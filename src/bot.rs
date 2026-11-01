@@ -1,42 +1,32 @@
 //! The bridge between the GUI thread and the Axis bot.
-//!
-//! The GUI thread is owned by eframe; the bot needs a Tokio runtime. A
-//! supervisor thread owns the runtime and mediates everything:
-//!
-//! - GUI → bot: [`BotCommand`]s via `blocking_send` (the GUI is never in
-//!   an async context),
-//! - bot → GUI: [`BotEvent`]s polled with `try_recv` once per frame.
-//!
-//! The command registry lives behind a shared lock so commands can be
-//! edited and re-synced while the bot is connected.
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use axis::model::Interaction;
 use axis::prelude::*;
+use axis::rest::Http;
 use axis_commands::CommandRegistry;
 
-/// Commands the GUI can send to the supervisor.
+use crate::agent::{AgentConfig, AgentState};
+
 #[derive(Debug, Clone)]
 pub enum BotCommand {
-    /// Build the client and start the gateway shard, installing a command
-    /// registry for the given user commands (plus built-ins).
     Connect {
         token: String,
         application_id: u64,
         commands: Vec<crate::commands_model::UserCommand>,
     },
-    /// Close the gateway gracefully and stop.
     Disconnect,
-    /// Send a message through the REST client.
-    SendMessage { channel_id: u64, content: String },
-    /// Bulk-overwrite Discord's global commands with the current registry.
+    SendMessage {
+        channel_id: u64,
+        content: String,
+    },
     SyncCommands,
-    /// List the models an OpenAI-compatible provider exposes.
-    FetchModels { base_url: String, api_key: String },
+    FetchModels {
+        base_url: String,
+        api_key: String,
+    },
 }
 
-/// Connection state reported to the GUI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     Offline,
@@ -48,7 +38,6 @@ pub enum Status {
     Disconnected(String),
 }
 
-/// Events the GUI polls.
 #[derive(Debug, Clone)]
 pub enum BotEvent {
     Status(Status),
@@ -68,22 +57,12 @@ pub enum BotEvent {
     ActionFailed(String),
 }
 
-/// The state shared between the supervisor and the running bot task.
-#[derive(Default)]
 struct Shared {
-    /// The REST client of the currently running bot, plus its application
-    /// ID — REST actions from the supervisor (send message, sync
-    /// commands) go through this.
     http: Mutex<Option<(Arc<Http>, u64)>>,
-    /// The live command registry. One `Arc` shared by supervisor, bot
-    /// task, and GUI handle — there is exactly one registry, so edits and
-    /// connect-time builds are visible to dispatch immediately.
     registry: Arc<RwLock<CommandRegistry>>,
-    /// The AI agent: config, conversation memory, bot identity.
-    agent: Arc<crate::agent::AgentState>,
+    agent: Arc<AgentState>,
 }
 
-/// A handle to the supervised bot.
 pub struct BotHandle {
     cmd_tx: tokio::sync::mpsc::Sender<BotCommand>,
     pub events: tokio::sync::mpsc::UnboundedReceiver<BotEvent>,
@@ -91,13 +70,15 @@ pub struct BotHandle {
 }
 
 impl BotHandle {
-    /// Spawn the supervisor thread with its own Tokio runtime.
     pub fn spawn() -> Self {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
         let (event_tx, events) = tokio::sync::mpsc::unbounded_channel();
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            http: Mutex::new(None),
+            registry: Arc::new(RwLock::new(CommandRegistry::new())),
+            agent: AgentState::new(2),
+        });
         let shared_for_thread = Arc::clone(&shared);
-
         std::thread::Builder::new()
             .name("axis-bot-supervisor".to_owned())
             .spawn(move || {
@@ -108,7 +89,6 @@ impl BotHandle {
                 runtime.block_on(supervise(cmd_rx, event_tx, shared_for_thread));
             })
             .expect("supervisor thread");
-
         Self {
             cmd_tx,
             events,
@@ -116,17 +96,12 @@ impl BotHandle {
         }
     }
 
-    /// Send a command from the GUI thread.
     pub fn send(&self, command: BotCommand) {
-        // `blocking_send` is legal here: the GUI thread is never inside an
-        // async context.
         if let Err(error) = self.cmd_tx.blocking_send(command) {
             tracing::debug!(%error, "bot supervisor is gone; command dropped");
         }
     }
 
-    /// Replace the live command registry (takes effect on the next
-    /// interaction).
     pub fn update_registry(&self, registry: CommandRegistry) {
         *self
             .shared
@@ -135,8 +110,7 @@ impl BotHandle {
             .expect("registry lock poisoned") = registry;
     }
 
-    /// Replace the agent configuration (takes effect immediately).
-    pub fn update_agent(&self, config: crate::agent::AgentConfig) {
+    pub fn update_agent(&self, config: AgentConfig) {
         *self
             .shared
             .agent
@@ -145,12 +119,10 @@ impl BotHandle {
             .expect("agent config lock poisoned") = config;
     }
 
-    /// The shared agent state, for the GUI to edit config and memory.
-    pub fn agent(&self) -> Arc<crate::agent::AgentState> {
+    pub fn agent(&self) -> Arc<AgentState> {
         Arc::clone(&self.shared.agent)
     }
 
-    /// Whether a bot is currently running (a REST client is attached).
     pub fn is_running(&self) -> bool {
         self.shared
             .http
@@ -168,8 +140,6 @@ async fn supervise(
     let emit = |event: BotEvent| {
         let _ = event_tx.send(event);
     };
-
-    // One graceful-shutdown signal per running bot.
     let mut shutdown_tx: Option<tokio::sync::watch::Sender<bool>> = None;
 
     while let Some(command) = cmd_rx.recv().await {
@@ -183,10 +153,6 @@ async fn supervise(
                     emit(BotEvent::Log("a bot is already running".to_owned()));
                     continue;
                 }
-                // Build the live registry now: built-ins + the user's
-                // saved commands. Dispatch and Sync both read this same
-                // registry, so what Discord sees and what responds stay
-                // in lockstep.
                 let (registry, validation) = crate::commands_model::build_registry(&commands);
                 if let Err(error) = validation {
                     emit(BotEvent::ActionFailed(format!(
@@ -194,8 +160,8 @@ async fn supervise(
                     )));
                 }
                 *shared.registry.write().expect("registry lock poisoned") = registry;
-                let (shutdown_tx_new, shutdown_rx) = tokio::sync::watch::channel(false);
-                shutdown_tx = Some(shutdown_tx_new);
+                let (shutdown_new, shutdown_rx) = tokio::sync::watch::channel(false);
+                shutdown_tx = Some(shutdown_new);
                 emit(BotEvent::Log("connecting…".to_owned()));
                 emit(BotEvent::Status(Status::Connecting));
                 let event_tx = event_tx.clone();
@@ -239,14 +205,6 @@ async fn supervise(
                     ))),
                 }
             }
-            BotCommand::FetchModels { base_url, api_key } => {
-                match crate::llm::list_models(&base_url, &api_key).await {
-                    Ok(models) => emit(BotEvent::ModelsFetched(models)),
-                    Err(error) => emit(BotEvent::ActionFailed(format!(
-                        "model list failed: {error}"
-                    ))),
-                }
-            }
             BotCommand::SyncCommands => {
                 let Some((http, application_id)) =
                     shared.http.lock().expect("http lock poisoned").clone()
@@ -274,6 +232,14 @@ async fn supervise(
                     ))),
                 }
             }
+            BotCommand::FetchModels { base_url, api_key } => {
+                match crate::llm::list_models(&base_url, &api_key).await {
+                    Ok(models) => emit(BotEvent::ModelsFetched(models)),
+                    Err(error) => emit(BotEvent::ActionFailed(format!(
+                        "model list failed: {error}"
+                    ))),
+                }
+            }
         }
     }
 }
@@ -286,7 +252,11 @@ async fn run_bot(
     shared: Arc<Shared>,
 ) {
     let mut client = match Client::builder(Token::new(token))
-        .intents(GatewayIntents::unprivileged() | GatewayIntents::MESSAGE_CONTENT)
+        .intents(
+            GatewayIntents::unprivileged()
+                | GatewayIntents::MESSAGE_CONTENT
+                | GatewayIntents::GUILD_MEMBERS,
+        )
         .build()
         .await
     {
@@ -301,13 +271,11 @@ async fn run_bot(
 
     *shared.http.lock().expect("http lock poisoned") = Some((client.http(), application_id));
 
-    // Gateway events → GUI. Each closure owns a cloned sender and clones
-    // it per call (`send` takes `&self`), keeping them `Fn`.
     let ready_tx = event_tx.clone();
-    let agent_for_ready = Arc::clone(&shared.agent);
+    let agent_ready = Arc::clone(&shared.agent);
     client.on_ready(move |_ctx, ready| {
         let tx = ready_tx.clone();
-        let agent = Arc::clone(&agent_for_ready);
+        let agent = Arc::clone(&agent_ready);
         async move {
             agent.set_bot_user(ready.user.id.get(), ready.user.username.clone());
             let _ = tx.send(BotEvent::Status(Status::Connected(
@@ -322,12 +290,12 @@ async fn run_bot(
     });
 
     let message_tx = event_tx.clone();
-    let agent_for_messages = Arc::clone(&shared.agent);
-    let http_for_agent = client.http();
+    let agent_messages = Arc::clone(&shared.agent);
+    let http_agent = client.http();
     client.on_message_create(move |ctx, message| {
         let tx = message_tx.clone();
-        let agent = Arc::clone(&agent_for_messages);
-        let http = Arc::clone(&http_for_agent);
+        let agent = Arc::clone(&agent_messages);
+        let http = Arc::clone(&http_agent);
         async move {
             let is_bot = message.author.bot.unwrap_or(false);
             let _ = tx.send(BotEvent::Message {
@@ -337,31 +305,24 @@ async fn run_bot(
                 content: message.content.clone(),
             });
 
-            // Agent triggers: @mention or the agent's trigger name as a
-            // word in the message. Both require the agent to be enabled.
-            let config = agent.config.read().expect("agent config poisoned").clone();
-            let trigger_name = config.trigger_name.trim().to_lowercase();
-            let name_triggered = !is_bot
-                && config.enabled
-                && !trigger_name.is_empty()
-                && message
-                    .content
-                    .to_lowercase()
-                    .split_whitespace()
-                    .any(|word| {
-                        word.trim_start_matches('@')
-                            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
-                            == trigger_name
-                    });
-            let mentions_bot = !is_bot
-                && config.enabled
-                && config.mention_trigger
-                && agent
-                    .bot_user_id()
-                    .map(|bot_id| message.mentions.iter().any(|user| user.id.get() == bot_id))
-                    .unwrap_or(false);
+            let should_reply = agent.should_process(
+                (
+                    message.guild_id.map(|id| id.get()).unwrap_or(0),
+                    message.channel_id.get(),
+                ),
+                message.author.id.get(),
+                &message.content,
+                is_bot,
+            ) || agent.is_mentioned(&message.mentions);
 
-            if mentions_bot || name_triggered {
+            if should_reply {
+                agent.activate_conversation(
+                    (
+                        message.guild_id.map(|id| id.get()).unwrap_or(0),
+                        message.channel_id.get(),
+                    ),
+                    message.author.id.get(),
+                );
                 let agent = Arc::clone(&agent);
                 let http = Arc::clone(&http);
                 let scope = (
@@ -369,33 +330,39 @@ async fn run_bot(
                     message.channel_id.get(),
                 );
                 let invoker = (message.author.id.get(), message.author.username.clone());
-                let prompt = if mentions_bot {
-                    message
-                        .content
-                        .split_once('>')
-                        .map(|(_, rest)| rest.trim())
-                        .unwrap_or(&message.content)
-                        .to_owned()
-                } else {
-                    message.content.clone()
-                };
+                let prompt = message
+                    .content
+                    .split_once('>')
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or(&message.content)
+                    .to_owned();
                 let typing_http = Arc::clone(&http);
                 let typing_channel = message.channel_id;
                 tokio::spawn(async move {
                     let _ = typing_http.trigger_typing(typing_channel).await;
                 });
                 tokio::spawn(async move {
+                    // Resolve the member to get their nickname.
+                    let nick = if scope.0 != 0 {
+                        http.get_member(GuildId::new(scope.0), UserId::new(invoker.0))
+                            .await
+                            .ok()
+                            .and_then(|member| member.nick)
+                    } else {
+                        None
+                    };
                     let invoker_with_name = (invoker.0, invoker.1.clone());
                     match crate::agent::run_agent(
                         http.clone(),
                         &agent,
                         scope,
                         invoker_with_name,
+                        nick,
                         prompt,
                     )
                     .await
                     {
-                        Ok(answer) => {
+                        Ok(Some(answer)) => {
                             for chunk in crate::agent::split_reply(&answer) {
                                 if let Err(error) = http
                                     .create_message(message.channel_id)
@@ -406,21 +373,16 @@ async fn run_bot(
                                 }
                             }
                         }
+                        Ok(None) => { /* agent chose not to respond */ }
                         Err(error) => {
-                            // One error message to Discord, then log only.
-                            let _ = http
-                                .create_message(message.channel_id)
-                                .content(
-                                    "There was an issue with the system. Please try again later.",
-                                )
-                                .await;
                             tracing::error!(%error, "agent invocation failed");
+                            // Never send errors to Discord.
                         }
                     }
                 });
             }
 
-            let _ = ctx; // reserved for future use
+            let _ = ctx;
             Ok(())
         }
     });
@@ -442,8 +404,6 @@ async fn run_bot(
         }
     });
 
-    // Interactions → the live registry (cloned out of the lock before any
-    // await so the future stays Send).
     let registry_slot = {
         let registry = shared.registry.read().expect("registry lock poisoned");
         Arc::new(RwLock::new(registry.clone()))
@@ -458,7 +418,12 @@ async fn run_bot(
                 .command_data()
                 .map(|data| data.name.clone())
                 .unwrap_or_default();
-            let user = invocation_user(&interaction);
+            let user = interaction
+                .user
+                .as_ref()
+                .or_else(|| interaction.member.as_ref().and_then(|m| m.user.as_ref()))
+                .map(|user| user.username.clone())
+                .unwrap_or_else(|| "unknown".to_owned());
             let _ = tx.send(BotEvent::Interaction {
                 command: name,
                 user,
@@ -468,7 +433,10 @@ async fn run_bot(
                 let guard = registry_slot.read().expect("registry lock poisoned");
                 guard.clone()
             };
-            registry.handle(ctx.http.clone(), interaction).await
+            if let Err(error) = registry.handle(ctx.http.clone(), interaction).await {
+                tracing::error!(%error, "command execution failed");
+            }
+            Ok(())
         }
     });
 
@@ -489,22 +457,5 @@ async fn run_bot(
     };
 
     *shared.http.lock().expect("http lock poisoned") = None;
-    // `interaction_tx` moved into the handler; report the final status
-    // through a fresh sender on the same channel.
     let _ = event_tx_for_status.send(BotEvent::Status(outcome));
-}
-
-/// The invoking user's name, from a DM user or the guild member.
-fn invocation_user(interaction: &Interaction) -> String {
-    interaction
-        .user
-        .as_ref()
-        .or_else(|| {
-            interaction
-                .member
-                .as_ref()
-                .and_then(|member| member.user.as_ref())
-        })
-        .map(|user| user.username.clone())
-        .unwrap_or_else(|| "unknown".to_owned())
 }

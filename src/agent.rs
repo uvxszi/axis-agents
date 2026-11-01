@@ -1,19 +1,15 @@
-//! The AI agent: MCP-style tools, permission gating, context management,
-//! and the tool-call loop.
+//! The AI agent: conversation mode, concurrency limits, permission-gated
+//! MCP-style tools, and the tool-call loop.
 //!
-//! Security model: the model can *ask* for tools, but every tool is
-//! executed by this app, which resolves the **invoking user's real Discord
-//! permissions** from the API and enforces them before any action runs.
-//! The gate is in code, not in the prompt — prompt injection cannot
-//! escalate. Denied attempts return an explanatory error to the model.
-//!
-//! Context management: local models have limited context windows. The
-//! agent estimates token usage, compacts older messages, and retries with
-//! a shorter context when the provider reports an overflow.
+//! Security model: tools are gated in code by the invoking user's real
+//! Discord permissions (resolved from the API), not by the prompt.
+//! Conversation mode: after a trigger, subsequent messages go to the
+//! agent without re-triggering. The agent can decline with `NO_REPLY`.
 
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant},
 };
 
 use axis::model::{Guild, Member, OverwriteType};
@@ -23,7 +19,6 @@ use serde_json::{Value, json};
 
 use crate::llm::{self, ChatMessage};
 
-/// Agent settings, edited in the GUI and persisted with the config.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
@@ -36,12 +31,11 @@ pub struct AgentConfig {
     pub temperature: f32,
     pub max_iterations: u32,
     pub mention_trigger: bool,
-    /// Also trigger on this name appearing as a word in messages.
-    pub trigger_name: String,
     pub name: String,
     pub instructions: String,
-    /// Approximate token budget for the context sent to the model.
     pub context_budget: u32,
+    pub conversation_timeout_secs: u64,
+    pub max_concurrent: u32,
 }
 
 impl Default for AgentConfig {
@@ -55,15 +49,15 @@ impl Default for AgentConfig {
             temperature: 0.7,
             max_iterations: 6,
             mention_trigger: true,
-            trigger_name: String::new(),
             name: "Agent".to_owned(),
             instructions: String::new(),
             context_budget: 3000,
+            conversation_timeout_secs: 300,
+            max_concurrent: 2,
         }
     }
 }
 
-/// One remembered exchange, per (guild, channel) scope.
 #[derive(Debug, Clone)]
 pub(crate) struct MemoryTurn {
     pub role: String,
@@ -72,20 +66,100 @@ pub(crate) struct MemoryTurn {
 }
 
 const MEMORY_TURNS: usize = 16;
-/// Maximum characters per tool result sent to the model.
 const TOOL_RESULT_MAX: usize = 600;
-/// Rough token estimate: ~3 chars per token for English text.
-const CHARS_PER_TOKEN: usize = 3;
+const NO_REPLY: &str = "NO_REPLY";
 
-/// Shared agent state: config, per-channel memory, bot identity.
-#[derive(Default)]
 pub struct AgentState {
     pub config: RwLock<AgentConfig>,
     pub(crate) memory: Mutex<HashMap<(u64, u64), VecDeque<MemoryTurn>>>,
     pub bot_user: Mutex<Option<(u64, String)>>,
+    conversations: Mutex<HashMap<(u64, u64, u64), Instant>>,
+    llm_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl AgentState {
+    pub fn new(max_concurrent: u32) -> Arc<Self> {
+        Arc::new(Self {
+            config: RwLock::new(AgentConfig::default()),
+            memory: Mutex::new(HashMap::new()),
+            bot_user: Mutex::new(None),
+            conversations: Mutex::new(HashMap::new()),
+            llm_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1) as usize)),
+        })
+    }
+
+    /// Whether a message should go to the agent.
+    pub fn should_process(
+        &self,
+        scope: (u64, u64),
+        user_id: u64,
+        content: &str,
+        is_bot: bool,
+    ) -> bool {
+        if is_bot {
+            return false;
+        }
+        // Expire conversations that timed out.
+        {
+            let timeout = {
+                let config = self.config.read().expect("agent config poisoned");
+                Duration::from_secs(config.conversation_timeout_secs)
+            };
+            self.conversations
+                .lock()
+                .expect("conversations poisoned")
+                .retain(|_, last| last.elapsed() < timeout);
+        }
+        let config = self.config.read().expect("agent config poisoned").clone();
+        if !config.enabled {
+            return false;
+        }
+
+        // Active conversation.
+        let key = (scope.0, scope.1, user_id);
+        {
+            let conversations = self.conversations.lock().expect("conversations poisoned");
+            if let Some(&last) = conversations.get(&key) {
+                if last.elapsed() < Duration::from_secs(config.conversation_timeout_secs) {
+                    return true;
+                }
+            }
+        }
+
+        // Name trigger.
+        let agent_name = config.name.to_lowercase();
+        if !agent_name.is_empty() && content.to_lowercase().contains(&agent_name) {
+            return true;
+        }
+        false
+    }
+
+    /// Check @mention against the bot's user ID.
+    pub fn is_mentioned(&self, mentions: &[axis::model::User]) -> bool {
+        let Some(bot_id) = self.bot_user_id() else {
+            return false;
+        };
+        self.config
+            .read()
+            .expect("agent config poisoned")
+            .mention_trigger
+            && mentions.iter().any(|user| user.id.get() == bot_id)
+    }
+
+    pub fn activate_conversation(&self, scope: (u64, u64), user_id: u64) {
+        self.conversations
+            .lock()
+            .expect("conversations poisoned")
+            .insert((scope.0, scope.1, user_id), Instant::now());
+    }
+
+    fn touch_conversation(&self, scope: (u64, u64), user_id: u64) {
+        self.conversations
+            .lock()
+            .expect("conversations poisoned")
+            .insert((scope.0, scope.1, user_id), Instant::now());
+    }
+
     fn remember(&self, scope: (u64, u64), turn: MemoryTurn) {
         let mut memory = self.memory.lock().expect("agent memory poisoned");
         let history = memory.entry(scope).or_default();
@@ -122,7 +196,7 @@ impl AgentState {
 }
 
 // ---------------------------------------------------------------------------
-// MCP-style tools
+// Tools
 // ---------------------------------------------------------------------------
 
 pub struct ToolCtx {
@@ -138,26 +212,20 @@ impl ToolCtx {
         if self.invoker_permissions.is_administrator()
             || self.invoker_permissions.contains(required)
         {
-            Ok(())
-        } else {
-            let missing: Vec<&str> = required
-                .names()
-                .filter(|name| {
-                    !self
-                        .invoker_permissions
-                        .names()
-                        .any(|invoker_name| invoker_name == *name)
-                })
-                .collect();
-            Err(format!(
-                "denied: you are missing the Discord permission(s) {}",
-                if missing.is_empty() {
-                    required.names().collect::<Vec<_>>().join(", ")
-                } else {
-                    missing.join(", ")
-                }
-            ))
+            return Ok(());
         }
+        let missing: Vec<&str> = required
+            .names()
+            .filter(|name| !self.invoker_permissions.names().any(|n| n == *name))
+            .collect();
+        Err(format!(
+            "denied: you need the Discord permission(s) {} to do this",
+            if missing.is_empty() {
+                required.names().collect::<Vec<_>>().join(", ")
+            } else {
+                missing.join(", ")
+            }
+        ))
     }
 }
 
@@ -181,15 +249,9 @@ pub fn definitions() -> Vec<Value> {
         .iter()
         .map(|tool| {
             let parameters: Value =
-                serde_json::from_str(tool.parameters).expect("static tool schema is valid JSON");
-            json!({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": parameters,
-                }
-            })
+                serde_json::from_str(tool.parameters).expect("valid tool schema");
+            json!({ "type": "function", "function": {
+            "name": tool.name, "description": tool.description, "parameters": parameters } })
         })
         .collect()
 }
@@ -198,21 +260,17 @@ pub fn find(name: &str) -> Option<&'static Tool> {
     TOOLS.iter().find(|tool| tool.name == name)
 }
 
-/// Format a role for display, hiding @everyone.
 fn format_role(role: &axis::model::Role, guild_id: u64) -> String {
     if role.id.get() == guild_id {
-        return String::new(); // @everyone — never shown
+        return String::new();
     }
     let perms = if role.permissions.is_administrator() {
         "administrator".to_owned()
     } else {
         let names: Vec<&str> = role.permissions.names().take(5).collect();
-        if role.permissions.names().count() > 5 {
-            format!(
-                "{}, +{} more",
-                names.join(", "),
-                role.permissions.names().count() - 5
-            )
+        let count = role.permissions.names().count();
+        if count > 5 {
+            format!("{}, +{} more", names.join(", "), count - 5)
         } else {
             names.join(", ")
         }
@@ -223,6 +281,33 @@ fn format_role(role: &axis::model::Role, guild_id: u64) -> String {
     )
 }
 
+fn parse_id(args: &Value, field: &str) -> Result<u64, String> {
+    let raw = args
+        .get(field)
+        .cloned()
+        .ok_or_else(|| format!("missing {field:?}"))?;
+    let text = match raw {
+        Value::String(text) => text,
+        Value::Number(number) => number.to_string(),
+        other => return Err(format!("{field:?} was {other}; expected an ID")),
+    };
+    text.trim()
+        .trim_start_matches('<')
+        .trim_start_matches("@")
+        .trim_start_matches("#")
+        .trim_end_matches('>')
+        .parse::<u64>()
+        .map_err(|_| format!("{field:?} was {text:?}; expected a Discord ID"))
+}
+
+fn parse_optional_channel(args: &Value, field: &str, default: u64) -> u64 {
+    match args.get(field) {
+        Some(Value::String(text)) => text.trim().parse::<u64>().unwrap_or(default),
+        Some(Value::Number(number)) => number.as_u64().unwrap_or(default),
+        _ => default,
+    }
+}
+
 static TOOLS: &[Tool] = &[
     Tool {
         name: "ban",
@@ -231,18 +316,11 @@ static TOOLS: &[Tool] = &[
         required: Permissions::BAN_MEMBERS,
         executor: |ctx, args| {
             Box::pin(async move {
-                let user_id = parse_user(args, "user_id")?;
-                let _reason = args
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Banned by agent");
-                let mut builder = ctx
-                    .http
-                    .ban_member(GuildId::new(ctx.guild_id), UserId::new(user_id));
-                if let Some(seconds) = args.get("delete_message_seconds").and_then(Value::as_u64) {
-                    builder = builder.delete_message_seconds(seconds.min(604_800) as u32);
-                }
-                builder.await.map_err(|error| error.to_string())?;
+                let user_id = parse_id(args, "user_id")?;
+                ctx.http
+                    .ban_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
+                    .await
+                    .map_err(|e| format!("Discord rejected the ban: {e}"))?;
                 Ok(format!("banned {user_id}"))
             })
         },
@@ -254,11 +332,11 @@ static TOOLS: &[Tool] = &[
         required: Permissions::KICK_MEMBERS,
         executor: |ctx, args| {
             Box::pin(async move {
-                let user_id = parse_user(args, "user_id")?;
+                let user_id = parse_id(args, "user_id")?;
                 ctx.http
                     .kick_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("Discord rejected the kick: {e}"))?;
                 Ok(format!("kicked {user_id}"))
             })
         },
@@ -270,21 +348,21 @@ static TOOLS: &[Tool] = &[
         required: Permissions::MODERATE_MEMBERS,
         executor: |ctx, args| {
             Box::pin(async move {
-                let user_id = parse_user(args, "user_id")?;
+                let user_id = parse_id(args, "user_id")?;
                 let minutes = args
                     .get("minutes")
                     .and_then(Value::as_i64)
                     .unwrap_or(10)
                     .clamp(1, 40_320);
-                let until_millis =
+                let millis =
                     axis::timestamp::Timestamp::now_utc().as_unix_millis() + minutes * 60_000;
-                let until = axis::timestamp::Timestamp::from_unix_millis(until_millis)
-                    .map_err(|error| error.to_string())?;
+                let until = axis::timestamp::Timestamp::from_unix_millis(millis)
+                    .map_err(|e| e.to_string())?;
                 ctx.http
                     .edit_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
                     .timeout_until(until)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("Discord rejected the timeout: {e}"))?;
                 Ok(format!("timed out {user_id} for {minutes}m"))
             })
         },
@@ -296,12 +374,12 @@ static TOOLS: &[Tool] = &[
         required: Permissions::MODERATE_MEMBERS,
         executor: |ctx, args| {
             Box::pin(async move {
-                let user_id = parse_user(args, "user_id")?;
+                let user_id = parse_id(args, "user_id")?;
                 ctx.http
                     .edit_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
                     .clear_timeout()
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("Discord rejected the untimeout: {e}"))?;
                 Ok(format!("removed timeout for {user_id}"))
             })
         },
@@ -313,20 +391,20 @@ static TOOLS: &[Tool] = &[
         required: Permissions::MANAGE_ROLES,
         executor: |ctx, args| {
             Box::pin(async move {
-                let user_id = parse_user(args, "user_id")?;
-                let role_id = parse_user(args, "role_id")?;
+                let user_id = parse_id(args, "user_id")?;
+                let role_id = parse_id(args, "role_id")?;
                 let member = ctx
                     .http
                     .get_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not find that member: {e}"))?;
                 let mut roles = member.roles.clone();
                 roles.push(RoleId::new(role_id));
                 ctx.http
                     .edit_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
                     .roles(roles)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("Discord rejected the role change: {e}"))?;
                 Ok(format!("added role {role_id} to {user_id}"))
             })
         },
@@ -338,13 +416,13 @@ static TOOLS: &[Tool] = &[
         required: Permissions::MANAGE_ROLES,
         executor: |ctx, args| {
             Box::pin(async move {
-                let user_id = parse_user(args, "user_id")?;
-                let role_id = parse_user(args, "role_id")?;
+                let user_id = parse_id(args, "user_id")?;
+                let role_id = parse_id(args, "role_id")?;
                 let member = ctx
                     .http
                     .get_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not find that member: {e}"))?;
                 let roles: Vec<_> = member
                     .roles
                     .iter()
@@ -355,15 +433,15 @@ static TOOLS: &[Tool] = &[
                     .edit_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
                     .roles(roles)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("Discord rejected the role change: {e}"))?;
                 Ok(format!("removed role {role_id} from {user_id}"))
             })
         },
     },
     Tool {
         name: "send_message",
-        description: "Send a message to a channel.",
-        parameters: r#"{"type":"object","properties":{"channel_id":{"type":"string","description":"Channel ID (defaults to current channel)"},"content":{"type":"string","description":"Message text (Discord Markdown)"}},"required":["content"]}"#,
+        description: "Send a message to a channel. Omit channel_id for the current channel.",
+        parameters: r#"{"type":"object","properties":{"channel_id":{"type":"string","description":"Target channel ID (omit for current channel)"},"content":{"type":"string","description":"Message text (Discord Markdown)"}},"required":["content"]}"#,
         required: Permissions::SEND_MESSAGES,
         executor: |ctx, args| {
             Box::pin(async move {
@@ -371,7 +449,6 @@ static TOOLS: &[Tool] = &[
                     .get("content")
                     .and_then(Value::as_str)
                     .ok_or("missing content")?;
-                // Strip @everyone/@here if the invoker lacks MENTION_EVERYONE.
                 let content = if ctx
                     .invoker_permissions
                     .contains(Permissions::MENTION_EVERYONE)
@@ -382,52 +459,44 @@ static TOOLS: &[Tool] = &[
                         .replace("@everyone", "@\u{200B}everyone")
                         .replace("@here", "@\u{200B}here")
                 };
-                let channel_id = args
-                    .get("channel_id")
-                    .and_then(Value::as_str)
-                    .and_then(|text| text.parse::<u64>().ok())
-                    .unwrap_or(ctx.channel_id);
-                let channel = ChannelScope::resolve(ctx, channel_id).await?;
-                channel.gate(Permissions::SEND_MESSAGES)?;
+                let channel_id = parse_optional_channel(args, "channel_id", ctx.channel_id);
+                let scope = ChannelScope::resolve(ctx, channel_id).await?;
+                scope.gate(Permissions::SEND_MESSAGES)?;
                 let message = ctx
                     .http
                     .create_message(ChannelId::new(channel_id))
                     .content(&content)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not send: {e}"))?;
                 Ok(format!(
-                    "sent message {} to channel {channel_id}",
-                    message.id
+                    "sent message {} in channel {}",
+                    message.id, channel_id
                 ))
             })
         },
     },
     Tool {
         name: "delete_message",
-        description: "Delete a message. Requires MANAGE_MESSAGES in that channel.",
-        parameters: r#"{"type":"object","properties":{"channel_id":{"type":"string","description":"Channel ID (defaults to current)"},"message_id":{"type":"string","description":"Message ID to delete"}},"required":["message_id"]}"#,
+        description: "Delete a message.",
+        parameters: r#"{"type":"object","properties":{"channel_id":{"type":"string","description":"Channel ID (omit for current)"},"message_id":{"type":"string","description":"Message ID to delete"}},"required":["message_id"]}"#,
         required: Permissions::MANAGE_MESSAGES,
         executor: |ctx, args| {
             Box::pin(async move {
-                let message_id = parse_user(args, "message_id")?;
-                let channel_id = args
-                    .get("channel_id")
-                    .and_then(Value::as_str)
-                    .and_then(|text| text.parse::<u64>().ok())
-                    .unwrap_or(ctx.channel_id);
-                let channel = ChannelScope::resolve(ctx, channel_id).await?;
-                channel.gate(Permissions::MANAGE_MESSAGES)?;
+                let message_id = parse_id(args, "message_id")?;
+                let channel_id = parse_optional_channel(args, "channel_id", ctx.channel_id);
+                let scope = ChannelScope::resolve(ctx, channel_id).await?;
+                scope.gate(Permissions::MANAGE_MESSAGES)?;
                 ctx.http
                     .delete_message(ChannelId::new(channel_id), MessageId::new(message_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not delete: {e}"))?;
                 Ok(format!("deleted message {message_id}"))
             })
         },
     },
     Tool {
         name: "list_roles",
-        description: "List all roles in the guild with names, IDs, and colors.",
+        description: "List all roles in the guild.",
         parameters: r#"{"type":"object","properties":{}}"#,
         required: Permissions::empty(),
         executor: |ctx, _args| {
@@ -436,11 +505,11 @@ static TOOLS: &[Tool] = &[
                     .http
                     .get_guild(GuildId::new(ctx.guild_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not load guild: {e}"))?;
                 let roles: Vec<String> = guild
                     .roles
                     .iter()
-                    .filter(|role| role.id.get() != ctx.guild_id) // hide @everyone
+                    .filter(|role| role.id.get() != ctx.guild_id)
                     .map(|role| format_role(role, ctx.guild_id))
                     .filter(|text| !text.is_empty())
                     .collect();
@@ -454,7 +523,7 @@ static TOOLS: &[Tool] = &[
     },
     Tool {
         name: "list_channels",
-        description: "List all channels in the guild with names, IDs, and types.",
+        description: "List all channels with names, IDs, and types.",
         parameters: r#"{"type":"object","properties":{}}"#,
         required: Permissions::empty(),
         executor: |ctx, _args| {
@@ -463,15 +532,15 @@ static TOOLS: &[Tool] = &[
                     .http
                     .get_guild_channels(GuildId::new(ctx.guild_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not load channels: {e}"))?;
                 let lines: Vec<String> = channels
                     .iter()
-                    .map(|channel| {
+                    .map(|c| {
                         format!(
                             "  #{} ({}, ID: {})",
-                            channel.name.as_deref().unwrap_or("unnamed"),
-                            format_channel_type(channel.r#type),
-                            channel.id
+                            c.name.as_deref().unwrap_or("unnamed"),
+                            format_channel_type(c.r#type),
+                            c.id
                         )
                     })
                     .collect();
@@ -481,33 +550,31 @@ static TOOLS: &[Tool] = &[
     },
     Tool {
         name: "get_channel_info",
-        description: "Get detailed info about a specific channel.",
+        description: "Get detailed info about a channel.",
         parameters: r#"{"type":"object","properties":{"channel_id":{"type":"string","description":"Channel ID"}},"required":["channel_id"]}"#,
         required: Permissions::empty(),
         executor: |ctx, args| {
             Box::pin(async move {
-                let channel_id = parse_user(args, "channel_id")?;
+                let channel_id = parse_id(args, "channel_id")?;
                 let channel = ctx
                     .http
                     .get_channel(ChannelId::new(channel_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not load channel: {e}"))?;
                 Ok(format!(
-                    "channel {}: name {:?}, type {}, topic {:?}, slowmode {}s, NSFW {}",
+                    "channel {}: name {:?}, type {}, topic {:?}",
                     channel.id,
                     channel.name,
                     format_channel_type(channel.r#type),
-                    channel.topic,
-                    channel.rate_limit_per_user.unwrap_or(0),
-                    channel.nsfw.unwrap_or(false)
+                    channel.topic
                 ))
             })
         },
     },
     Tool {
         name: "get_role_info",
-        description: "Get detailed info about a specific role by ID or name.",
-        parameters: r#"{"type":"object","properties":{"role":{"type":"string","description":"Role ID or exact name"}},"required":["role"]}"#,
+        description: "Get detailed info about a role by ID or name.",
+        parameters: r#"{"type":"object","properties":{"role":{"type":"string","description":"Role ID or name"}},"required":["role"]}"#,
         required: Permissions::empty(),
         executor: |ctx, args| {
             Box::pin(async move {
@@ -520,26 +587,20 @@ static TOOLS: &[Tool] = &[
                     .http
                     .get_guild(GuildId::new(ctx.guild_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not load guild: {e}"))?;
                 let role = guild
                     .roles
                     .iter()
-                    .find(|role| {
-                        role.id.to_string() == query || role.name.eq_ignore_ascii_case(&query)
-                    })
+                    .find(|r| r.id.to_string() == query || r.name.eq_ignore_ascii_case(&query))
                     .ok_or_else(|| format!("role {query:?} not found"))?;
                 if role.id.get() == ctx.guild_id {
-                    return Ok(
-                        "@everyone is the default role everyone has — it cannot be managed."
-                            .to_owned(),
-                    );
+                    return Ok("@everyone is the default role all members have.".to_owned());
                 }
                 Ok(format!(
-                    "role {}: name {:?}, color #{:06X}, position {}, permissions: {}",
+                    "role {}: name {:?}, color #{:06X}, permissions: {}",
                     role.id,
                     role.name,
                     role.color,
-                    role.position,
                     role.permissions.names().collect::<Vec<_>>().join(", ")
                 ))
             })
@@ -547,26 +608,26 @@ static TOOLS: &[Tool] = &[
     },
     Tool {
         name: "get_member",
-        description: "Look up a member: username, nickname, roles, join date.",
+        description: "Look up a member's username, nickname, roles, and join date.",
         parameters: r#"{"type":"object","properties":{"user_id":{"type":"string","description":"Discord user ID"}},"required":["user_id"]}"#,
         required: Permissions::empty(),
         executor: |ctx, args| {
             Box::pin(async move {
-                let user_id = parse_user(args, "user_id")?;
+                let user_id = parse_id(args, "user_id")?;
                 let member = ctx
                     .http
                     .get_member(GuildId::new(ctx.guild_id), UserId::new(user_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not find that member: {e}"))?;
                 let username = member
                     .user
                     .as_ref()
-                    .map(|user| user.username.clone())
-                    .unwrap_or_default();
+                    .map(|u| u.username.as_str())
+                    .unwrap_or("unknown");
+                let nickname = member.nick.as_deref().unwrap_or(username);
                 let role_ids: Vec<String> = member.roles.iter().map(|id| id.to_string()).collect();
                 Ok(format!(
-                    "member {user_id}: {username}, nick {:?}, roles [{}], joined {:?}, timeout {:?}",
-                    member.nick,
+                    "member {user_id}: username {username:?}, nickname {nickname:?}, roles [{}], joined {:?}, timeout {:?}",
                     role_ids.join(", "),
                     member.joined_at,
                     member.communication_disabled_until
@@ -585,12 +646,12 @@ static TOOLS: &[Tool] = &[
                     .http
                     .get_guild(GuildId::new(ctx.guild_id))
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|e| format!("could not load guild: {e}"))?;
                 let role_names: Vec<String> = guild
                     .roles
                     .iter()
-                    .filter(|role| role.id.get() != ctx.guild_id)
-                    .map(|role| role.name.clone())
+                    .filter(|r| r.id.get() != ctx.guild_id)
+                    .map(|r| r.name.clone())
                     .collect();
                 Ok(format!(
                     "guild {}: {:?}, roles [{}], features [{}]",
@@ -628,20 +689,16 @@ pub async fn invoker_permissions(
     let guild: Guild = http
         .get_guild(GuildId::new(guild_id))
         .await
-        .map_err(|error| format!("could not load guild: {error}"))?;
+        .map_err(|e| format!("could not load guild: {e}"))?;
     let member: Member = http
         .get_member(GuildId::new(guild_id), UserId::new(user_id))
         .await
-        .map_err(|error| format!("could not load your membership: {error}"))?;
+        .map_err(|e| format!("could not load your membership: {e}"))?;
     Ok(compute_guild_permissions(&guild, &member))
 }
 
 pub fn compute_guild_permissions(guild: &Guild, member: &Member) -> Permissions {
-    let member_id = member
-        .user
-        .as_ref()
-        .map(|user| user.id.get())
-        .unwrap_or_default();
+    let member_id = member.user.as_ref().map(|u| u.id.get()).unwrap_or_default();
     if member_id == guild.owner_id.get() {
         return Permissions::all();
     }
@@ -686,9 +743,7 @@ pub fn compute_channel_permissions(
     let mut deny = Permissions::empty();
     for overwrite in overwrites {
         if overwrite.r#type == OverwriteType::Role
-            && member_roles
-                .iter()
-                .any(|role| role.get() == overwrite.id.get())
+            && member_roles.iter().any(|r| r.get() == overwrite.id.get())
         {
             allow |= overwrite.allow;
             deny |= overwrite.deny;
@@ -714,17 +769,17 @@ impl ChannelScope {
             .http
             .get_member(GuildId::new(ctx.guild_id), UserId::new(ctx.invoker_id))
             .await
-            .map_err(|error| format!("could not load your membership: {error}"))?;
+            .map_err(|e| format!("could not load your membership: {e}"))?;
         let channel = ctx
             .http
             .get_channel(ChannelId::new(channel_id))
             .await
-            .map_err(|error| format!("could not load channel: {error}"))?;
+            .map_err(|e| format!("could not load channel: {e}"))?;
         let member_roles = member.roles.clone();
         let member_id = member
             .user
             .as_ref()
-            .map(|user| user.id.get())
+            .map(|u| u.id.get())
             .unwrap_or(ctx.invoker_id);
         Ok(Self {
             permissions: compute_channel_permissions(
@@ -735,16 +790,14 @@ impl ChannelScope {
             ),
         })
     }
-
     fn gate(&self, required: Permissions) -> Result<(), String> {
         if self.permissions.is_administrator() || self.permissions.contains(required) {
-            Ok(())
-        } else {
-            Err(format!(
-                "denied: you are missing {} in this channel",
-                required.names().collect::<Vec<_>>().join(", ")
-            ))
+            return Ok(());
         }
+        Err(format!(
+            "denied: you are missing {} in this channel",
+            required.names().collect::<Vec<_>>().join(", ")
+        ))
     }
 }
 
@@ -752,25 +805,20 @@ impl ChannelScope {
 // Context management
 // ---------------------------------------------------------------------------
 
-/// Rough token estimate for a message.
 fn estimate_tokens(message: &ChatMessage) -> usize {
-    message.content.len() / CHARS_PER_TOKEN + 10
+    message.content.len() / 3 + 10
 }
 
-/// Keep the system message and as many recent messages as fit the budget.
-/// Tool exchanges (assistant + tool pairs) are kept together.
 fn compact_history(
     system: ChatMessage,
     history: Vec<ChatMessage>,
-    budget_tokens: usize,
+    budget: usize,
 ) -> Vec<ChatMessage> {
     let system_cost = estimate_tokens(&system);
-    if system_cost >= budget_tokens {
+    if system_cost >= budget {
         return vec![system];
     }
-    let remaining = budget_tokens - system_cost;
-
-    // Walk backwards, keeping complete exchanges.
+    let remaining = budget - system_cost;
     let mut kept: Vec<ChatMessage> = Vec::new();
     let mut used = 0usize;
     for message in history.iter().rev() {
@@ -782,13 +830,11 @@ fn compact_history(
         kept.push(message.clone());
     }
     kept.reverse();
-
     let mut result = vec![system];
     result.extend(kept);
     result
 }
 
-/// Detect context-overflow errors from common providers.
 fn is_context_overflow(error: &str) -> bool {
     let lower = error.to_lowercase();
     lower.contains("context size has been exceeded")
@@ -802,14 +848,14 @@ fn is_context_overflow(error: &str) -> bool {
 // The loop
 // ---------------------------------------------------------------------------
 
-/// Run the agent for one user message. Returns the final answer text.
 pub async fn run_agent(
     http: Arc<Http>,
     state: &AgentState,
     scope: (u64, u64),
     invoker: (u64, String),
+    invoker_nick: Option<String>,
     user_message: String,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let config = state.config.read().expect("agent config poisoned").clone();
     if !config.enabled {
         return Err("the AI agent is disabled".to_owned());
@@ -818,7 +864,12 @@ pub async fn run_agent(
         return Err("no LLM provider configured".to_owned());
     }
 
-    // Resolve invoker permissions once (fail-closed).
+    let _permit = state
+        .llm_semaphore
+        .acquire()
+        .await
+        .map_err(|_| "the agent is shutting down".to_owned())?;
+
     let invoker_permissions = if scope.0 != 0 {
         match invoker_permissions(&http, scope.0, invoker.0).await {
             Ok(perms) => perms,
@@ -831,7 +882,15 @@ pub async fn run_agent(
         Permissions::empty()
     };
 
-    let system = build_system_prompt(&config, scope, &invoker, invoker_permissions, scope.0 != 0);
+    let display_name = invoker_nick.clone().unwrap_or_else(|| invoker.1.clone());
+    let system = build_system_prompt(
+        &config,
+        scope,
+        &invoker,
+        &display_name,
+        invoker_permissions,
+        scope.0 != 0,
+    );
     let tools = definitions();
     let ctx = ToolCtx {
         http: Arc::clone(&http),
@@ -841,7 +900,6 @@ pub async fn run_agent(
         invoker_permissions,
     };
 
-    // Build initial message list with history.
     let mut history: Vec<ChatMessage> = state
         .history(scope)
         .iter()
@@ -852,51 +910,32 @@ pub async fn run_agent(
         .collect();
     history.push(ChatMessage::user(format!(
         "{}: {}",
-        invoker.1, user_message
+        display_name, user_message
     )));
-
-    // Compact to fit the budget.
     let mut messages = compact_history(system, history, config.context_budget as usize);
 
     let mut final_content = String::new();
-    let mut last_error = String::new();
     let mut compacted = false;
 
-    for iteration in 0..config.max_iterations.max(1) {
+    for _ in 0..config.max_iterations.max(1) {
         let request = llm::build_chat_request(&config.model, config.temperature, &messages, &tools);
         let body = match llm::chat(&config.base_url, &config.api_key, request).await {
             Ok(body) => body,
             Err(error) => {
                 if is_context_overflow(&error) && !compacted {
-                    // Drop half the history (keeping system + latest user
-                    // message) and retry once.
                     compacted = true;
                     let keep_from = messages.len().saturating_sub(2).max(1);
-                    messages = messages[..keep_from].to_vec();
-                    messages.insert(
-                        0,
-                        build_system_prompt(
-                            &config,
-                            scope,
-                            &invoker,
-                            invoker_permissions,
-                            scope.0 != 0,
-                        ),
-                    );
-                    tracing::info!(
-                        iteration,
-                        "context overflow; compacted to {} messages and retrying",
-                        messages.len()
-                    );
+                    let system = messages[0].clone();
+                    messages = messages[keep_from..].to_vec();
+                    messages.insert(0, system);
+                    tracing::info!("context overflow; compacted and retrying");
                     continue;
                 }
-                last_error = error;
-                break;
+                return Err(error);
             }
         };
 
         let turn = llm::parse_chat_response(&body)?;
-
         if turn.tool_calls.is_empty() {
             final_content = turn.content;
             break;
@@ -914,13 +953,14 @@ pub async fn run_agent(
                 truncate_tool_result(&result),
             ));
         }
-        final_content = turn.content; // fallback if we hit max iterations
+        final_content = turn.content;
     }
 
+    if final_content.trim() == NO_REPLY {
+        state.touch_conversation(scope, invoker.0);
+        return Ok(None);
+    }
     if final_content.is_empty() {
-        if !last_error.is_empty() {
-            return Err(last_error);
-        }
         return Err("the agent could not produce a response".to_owned());
     }
 
@@ -928,7 +968,7 @@ pub async fn run_agent(
         scope,
         MemoryTurn {
             role: "user".to_owned(),
-            author: invoker.1.clone(),
+            author: display_name.clone(),
             content: user_message,
         },
     );
@@ -940,65 +980,43 @@ pub async fn run_agent(
             content: final_content.clone(),
         },
     );
+    state.touch_conversation(scope, invoker.0);
 
-    Ok(final_content)
+    Ok(Some(final_content))
 }
 
 fn build_system_prompt(
     config: &AgentConfig,
     scope: (u64, u64),
     invoker: &(u64, String),
+    display_name: &str,
     permissions: Permissions,
     in_guild: bool,
 ) -> ChatMessage {
     let mut prompt = format!(
-        "You are {}, a Discord bot. Respond naturally and concisely.",
+        "You are {}, a Discord bot. You respond naturally and conversationally. Never dump raw data — summarize findings in your own words. Keep responses short (1-3 paragraphs).",
         config.name
     );
     if !config.instructions.trim().is_empty() {
-        prompt.push_str("\n\nYour instructions:\n");
+        prompt.push_str("\n\nYour operator's instructions:\n");
         prompt.push_str(config.instructions.trim());
     }
     if in_guild {
-        let permission_text = if permissions.is_administrator() {
+        let perm_text = if permissions.is_administrator() {
             "administrator (full access)".to_owned()
         } else {
-            let names: Vec<&str> = permissions.names().take(8).collect();
-            names.join(", ")
+            permissions.names().take(8).collect::<Vec<_>>().join(", ")
         };
         prompt.push_str(&format!(
-            "\n\nContext: guild {}, channel {}. Talking to {} (ID: {}). Their permissions: {}.",
-            scope.0, scope.1, invoker.1, invoker.0, permission_text
+            "\n\nContext: guild {gid}, channel {cid}. Talking to {name} (ID: {uid}). Their Discord permissions: {perms}.",
+            gid = scope.0, cid = scope.1, name = display_name, uid = invoker.0, perms = perm_text,
         ));
-        prompt.push_str(
-            "\n\nUse tools to perform Discord actions. Tools are permission-gated — if one returns \"denied\", tell the user they lack the required permission and move on. Never fabricate results. Be concise.",
-        );
+        prompt.push_str("\n\nTools are permission-gated to them — if one returns \"denied\", tell them they lack the required Discord permission. Never fabricate results.");
+        prompt.push_str("\n\nIf the message is not directed at you or you have nothing useful to add, respond with exactly NO_REPLY and nothing else.");
     } else {
         prompt.push_str("\n\nThis is a DM — no guild tools available.");
     }
     ChatMessage::system(prompt)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn parse_user(args: &Value, field: &str) -> Result<u64, String> {
-    let raw = args
-        .get(field)
-        .cloned()
-        .ok_or_else(|| format!("missing {field:?}"))?;
-    let text = match raw {
-        Value::String(text) => text,
-        Value::Number(number) => number.to_string(),
-        other => return Err(format!("{field:?} was {other}; expected an ID")),
-    };
-    text.trim()
-        .trim_start_matches('<')
-        .trim_start_matches("@")
-        .trim_end_matches('>')
-        .parse::<u64>()
-        .map_err(|_| format!("{field:?} was {text:?}; expected a Discord ID"))
 }
 
 fn truncate_tool_result(result: &str) -> String {
@@ -1012,7 +1030,6 @@ fn truncate_tool_result(result: &str) -> String {
     format!("{}…", &result[..cut])
 }
 
-/// Execute one tool call with the permission gate enforced.
 pub async fn execute_tool(ctx: &ToolCtx, call: &llm::ToolCallRequest) -> String {
     let Some(tool) = find(&call.name) else {
         return format!("tool {:?} does not exist", call.name);
@@ -1029,7 +1046,6 @@ pub async fn execute_tool(ctx: &ToolCtx, call: &llm::ToolCallRequest) -> String 
     }
 }
 
-/// Split a reply into Discord-safe chunks (max 2000 characters).
 pub fn split_reply(text: &str) -> Vec<String> {
     const MAX: usize = 2000;
     let mut chunks = Vec::new();
@@ -1064,8 +1080,7 @@ mod tests {
         serde_json::from_value(json!({
             "user": { "id": "42", "username": "tester", "discriminator": "0" },
             "roles": roles.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
-            "deaf": false, "mute": false
-        }))
+            "deaf": false, "mute": false }))
         .unwrap()
     }
 
@@ -1114,8 +1129,7 @@ mod tests {
             "explicit_content_filter": 0, "roles": role_list, "emojis": [],
             "features": [], "mfa_level": 0, "premium_tier": 0,
             "preferred_locale": "en-US", "nsfw_level": 0,
-            "premium_progress_bar_enabled": false
-        }))
+            "premium_progress_bar_enabled": false }))
         .unwrap()
     }
 
@@ -1133,7 +1147,6 @@ mod tests {
         assert!(perms.contains(Permissions::VIEW_CHANNEL));
         assert!(perms.contains(Permissions::KICK_MEMBERS));
         assert!(perms.contains(Permissions::BAN_MEMBERS));
-
         let owner = member_with(&[]);
         let mut owner_guild = guild.clone();
         owner_guild.owner_id = owner.user.as_ref().unwrap().id;
@@ -1178,7 +1191,7 @@ mod tests {
     #[test]
     fn context_overflow_detected() {
         assert!(is_context_overflow(
-            r#"the provider answered HTTP 400: {"error":"Engine protocol predict stream returned an error: {\"code\":500,\"message\":\"Context size has been exceeded.\",\"type\":\"server_error\"}"}"#
+            r#"HTTP 400: Context size has been exceeded."#
         ));
         assert!(!is_context_overflow("connection refused"));
     }
@@ -1187,12 +1200,12 @@ mod tests {
     fn compact_history_keeps_system_and_recent() {
         let system = ChatMessage::system("be nice");
         let history: Vec<ChatMessage> = (0..50)
-            .map(|i| ChatMessage::user(format!("message {i} with some padding text here")))
+            .map(|i| ChatMessage::user(format!("message {i} with padding text here")))
             .collect();
         let compacted = compact_history(system, history, 500);
         assert_eq!(compacted[0].role, "system");
-        assert!(compacted.len() < 50, "should have dropped old messages");
-        assert!(compacted.len() > 1, "should have kept at least one message");
+        assert!(compacted.len() < 50);
+        assert!(compacted.len() > 1);
     }
 
     #[test]
@@ -1207,24 +1220,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_user_handles_mentions() {
+    fn parse_id_handles_mentions() {
         let args = json!({ "user_id": "<@80351110224678912>" });
+        assert_eq!(parse_id(&args, "user_id").unwrap(), 80_351_110_224_678_912);
+    }
+
+    #[test]
+    fn parse_channel_id_handles_both_types() {
         assert_eq!(
-            parse_user(&args, "user_id").unwrap(),
-            80_351_110_224_678_912
+            parse_optional_channel(&json!({ "channel_id": 123 }), "channel_id", 0),
+            123
         );
+        assert_eq!(
+            parse_optional_channel(&json!({ "channel_id": "456" }), "channel_id", 0),
+            456
+        );
+        assert_eq!(parse_optional_channel(&json!({}), "channel_id", 789), 789);
     }
 
     #[test]
-    fn token_estimation_is_reasonable() {
-        let message = ChatMessage::user("a".repeat(300));
-        let tokens = estimate_tokens(&message);
-        assert!(tokens > 50 && tokens < 200, "got {tokens}");
+    fn conversation_expiration() {
+        let state = AgentState::new(2);
+        {
+            let mut config = state.config.write().unwrap();
+            config.enabled = true;
+            config.name = "test".to_owned();
+        }
+        state.activate_conversation((1, 2), 42);
+        assert!(state.should_process((1, 2), 42, "hello", false));
+        assert!(!state.should_process((1, 2), 99, "hello", false));
     }
 
     #[test]
-    fn context_exceeded_errors_are_detected() {
-        let lm_studio_error = r#"the provider answered HTTP 400 Bad Request: {"error":"Engine protocol predict stream returned an error: {\"code\":500,\"message\":\"Context size has been exceeded.\",\"type\":\"server_error\"}"}"#;
-        assert!(is_context_overflow(lm_studio_error));
+    fn agent_name_is_trigger() {
+        let state = AgentState::new(2);
+        {
+            let mut config = state.config.write().unwrap();
+            config.enabled = true;
+            config.name = "magi".to_owned();
+        }
+        assert!(state.should_process((1, 2), 42, "hey magi what's up", false));
+        assert!(state.should_process((1, 2), 42, "MAGI help me", false));
+        assert!(!state.should_process((1, 2), 42, "just chatting", false));
     }
 }

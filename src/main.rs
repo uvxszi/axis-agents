@@ -1,6 +1,5 @@
 //! Axis Agents — a small desktop app that runs an AI-powered Discord bot
-//! locally on the Axis library: paste your token, edit commands, tune the
-//! agent, and watch everything live.
+//! locally on the Axis library.
 
 mod agent;
 mod bot;
@@ -14,8 +13,6 @@ use bot::{BotCommand, BotEvent, BotHandle, Status};
 use commands_model::{CommandBehavior, OptionKind, UserCommand, UserOption};
 
 fn main() -> eframe::Result<()> {
-    // Library logs (reconnects, rate limits) go to stderr via tracing;
-    // the GUI keeps its own on-screen log.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -57,7 +54,6 @@ impl Nav {
         Nav::Messages,
         Nav::Send,
     ];
-
     fn label(self) -> &'static str {
         match self {
             Nav::Connection => "🔌  Connection",
@@ -81,34 +77,23 @@ struct App {
     bot: BotHandle,
     config_path: PathBuf,
     config: config::AppConfig,
-
     token_input: String,
     status: Status,
     log: VecDeque<String>,
     messages: VecDeque<MessageLine>,
-
     nav: Nav,
     autoscroll: bool,
-
-    // Command editor state.
     editor: UserCommand,
     editing: Option<usize>,
     editor_error: Option<String>,
-
-    // Agent tab state.
     models: Vec<String>,
     models_status: Option<String>,
-
-    // Send panel state.
     send_channel: String,
     send_content: String,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Full-coverage emoji font: egui's bundled NotoEmoji is a 2015-era
-        // subset missing most modern emoji; register the complete font as
-        // a fallback for both families.
         let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
             "noto_emoji_full".to_owned(),
@@ -129,9 +114,6 @@ impl App {
         let config_path = config::default_path();
         let mut config = config::load(&config_path);
         config.seed_built_ins();
-        if let Err(error) = config::save(&config_path, &config) {
-            eprintln!("config save failed: {error}");
-        }
         let token_input = if config.save_token {
             config.token.clone()
         } else {
@@ -149,8 +131,13 @@ impl App {
                 behavior: CommandBehavior::Reply,
             });
 
+        // Push the initial agent config to the shared state.
+        // This happens implicitly because bot.update_agent is called below.
+        let bot = BotHandle::spawn();
+        bot.update_agent(config.agent.clone());
+
         Self {
-            bot: BotHandle::spawn(),
+            bot,
             config_path,
             token_input,
             status: Status::Offline,
@@ -192,9 +179,7 @@ impl App {
                         Status::Connecting => "connecting…".to_owned(),
                         Status::Connected(name) => format!("connected as {name}"),
                         Status::Resumed => "session resumed".to_owned(),
-                        Status::Reconnecting(code) => {
-                            format!("reconnecting (close code {code:?})…")
-                        }
+                        Status::Reconnecting(code) => format!("reconnecting ({code:?})…"),
                         Status::Failed(reason) => format!("FAILED: {reason}"),
                         Status::Disconnected(reason) => format!("disconnected: {reason}"),
                     });
@@ -222,17 +207,16 @@ impl App {
                     self.push_log(format!("/{command} invoked by {user}"));
                 }
                 BotEvent::CommandsSynced(names) => {
-                    self.push_log(format!("commands synced to Discord: {}", names.join(", ")));
+                    self.push_log(format!("commands synced: {}", names.join(", ")));
                 }
                 BotEvent::ModelsFetched(models) => {
-                    self.push_log(format!("fetched {} models from the provider", models.len()));
+                    self.push_log(format!("fetched {} models", models.len()));
                     self.models_status =
                         Some(format!("Found {} models — pick one below.", models.len()));
                     self.models = models;
                 }
             }
         }
-
         if self.bot.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
@@ -260,8 +244,6 @@ impl App {
         }
     }
 
-    // ----- panels -----
-
     fn nav_panel(&mut self, ctx: &egui::Context) {
         let (label, color) = self.status_label();
         egui::SidePanel::left("nav")
@@ -273,7 +255,6 @@ impl App {
                 ui.weak("powered by the Axis library");
                 ui.add_space(8.0);
                 ui.separator();
-
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                     ui.add_space(6.0);
                     for nav in Nav::ALL {
@@ -281,7 +262,6 @@ impl App {
                         ui.add_space(2.0);
                     }
                 });
-
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.separator();
                     ui.add_space(6.0);
@@ -294,7 +274,7 @@ impl App {
     fn connection_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Connection");
         ui.add_space(6.0);
-        ui.label("Paste your bot token (Developer Portal → Bot → Reset Token). The token is never written to disk unless you opt in below.");
+        ui.label("Paste your bot token (Developer Portal → Bot → Reset Token).");
         ui.add_space(6.0);
 
         egui::Grid::new("connection_grid")
@@ -309,12 +289,11 @@ impl App {
                         .desired_width(420.0),
                 );
                 ui.end_row();
-
                 ui.label("Application ID");
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut self.config.application_id)
-                            .hint_text("numeric app id (Developer Portal → General Information)")
+                            .hint_text("numeric app id")
                             .desired_width(420.0),
                     )
                     .changed()
@@ -324,15 +303,18 @@ impl App {
                 ui.end_row();
             });
 
-        ui.checkbox(
-            &mut self.config.save_token,
-            "Remember token on disk (stored in plain text in the config file next to this exe)",
-        );
-        if self.config.save_token {
-            self.config.token = self.token_input.trim().to_owned();
-            self.save_config();
-        } else if !self.config.token.is_empty() {
-            self.config.token.clear();
+        if ui
+            .checkbox(
+                &mut self.config.save_token,
+                "Remember token on disk (plain text next to this exe)",
+            )
+            .changed()
+        {
+            if self.config.save_token {
+                self.config.token = self.token_input.trim().to_owned();
+            } else {
+                self.config.token.clear();
+            }
             self.save_config();
         }
 
@@ -357,9 +339,7 @@ impl App {
                         commands: self.config.commands.clone(),
                     });
                 } else {
-                    self.push_log(
-                        "ERROR: application ID must be numeric (Developer Portal → General Information)",
-                    );
+                    self.push_log("ERROR: application ID must be numeric");
                 }
             }
             if running && ui.button("⏹  Disconnect").clicked() {
@@ -372,32 +352,23 @@ impl App {
         ui.add_space(4.0);
         ui.strong("Setup checklist");
         ui.label("•  Create the app in the Developer Portal and invite it with the `bot` + `applications.commands` scopes.");
-        ui.label("•  Enable the Message Content intent (Bot → Privileged Gateway Intents) so the bot can read messages.");
-        ui.label(
-            "•  Privileged intents also gate member events — enable what your automations need.",
-        );
-        ui.label(
-            "•  The token stays in this window only unless you tick “Remember token on disk”.",
-        );
+        ui.label("•  Enable the Message Content intent (Bot → Privileged Gateway Intents).");
+        ui.label("•  Enable any other privileged intents your automations need.");
     }
 
     fn agent_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("AI Agent");
         ui.add_space(4.0);
 
-        let enabled = self.config.agent.enabled;
         if ui
             .checkbox(
                 &mut self.config.agent.enabled,
-                "Enable the AI agent (answers /agent and @mentions)",
+                "Enable the AI agent (responds to @mentions and its name)",
             )
             .changed()
         {
             self.bot.update_agent(self.config.agent.clone());
             self.save_config();
-        }
-        if !enabled {
-            ui.weak("The agent is off — the /agent command replies that it is unavailable.");
         }
 
         ui.add_space(8.0);
@@ -460,7 +431,7 @@ impl App {
                 if self.models.is_empty() {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.config.agent.model)
-                            .hint_text("model id as the provider names it")
+                            .hint_text("model id")
                             .desired_width(420.0),
                     );
                 } else {
@@ -492,6 +463,7 @@ impl App {
             }
         });
         if provider_changed {
+            self.bot.update_agent(self.config.agent.clone());
             self.save_config();
         }
 
@@ -505,25 +477,20 @@ impl App {
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
                 ui.label("Agent name");
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut self.config.agent.name)
-                            .desired_width(300.0),
-                    )
-                    .changed()
-                {
-                    self.bot.update_agent(self.config.agent.clone());
-                    self.save_config();
-                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.agent.name)
+                        .hint_text("e.g. magi — used as the trigger word")
+                        .desired_width(300.0),
+                );
                 ui.end_row();
 
                 ui.label("Temperature");
-                let temperature = self.config.agent.temperature;
+                let old_temperature = self.config.agent.temperature;
                 ui.add(
                     egui::Slider::new(&mut self.config.agent.temperature, 0.0..=2.0)
                         .text("0 = focused, 2 = creative"),
                 );
-                if (temperature - self.config.agent.temperature).abs() > f32::EPSILON {
+                if (old_temperature - self.config.agent.temperature).abs() > f32::EPSILON {
                     self.bot.update_agent(self.config.agent.clone());
                     self.save_config();
                 }
@@ -532,18 +499,44 @@ impl App {
                 ui.label("Max tool rounds");
                 let mut iterations = self.config.agent.max_iterations;
                 ui.add(egui::DragValue::new(&mut iterations).range(1..=12));
-                if iterations != self.config.agent.max_iterations {
-                    self.config.agent.max_iterations = iterations;
-                    self.bot.update_agent(self.config.agent.clone());
-                    self.save_config();
-                }
+                ui.end_row();
+
+                ui.label("Context budget");
+                let mut budget = self.config.agent.context_budget;
+                ui.add(
+                    egui::DragValue::new(&mut budget)
+                        .range(500..=32000)
+                        .suffix(" tokens"),
+                );
+                ui.end_row();
+
+                ui.label("Conversation timeout");
+                let mut timeout = self.config.agent.conversation_timeout_secs;
+                ui.add(
+                    egui::DragValue::new(&mut timeout)
+                        .range(30..=3600)
+                        .suffix("s"),
+                );
+                ui.end_row();
+
+                ui.label("Max concurrent");
+                let mut concurrent = self.config.agent.max_concurrent;
+                ui.add(
+                    egui::DragValue::new(&mut concurrent)
+                        .range(1..=8)
+                        .suffix(" LLM calls"),
+                );
                 ui.end_row();
             });
+
+        // Save behavior settings when any changed (check periodically).
+        self.bot.update_agent(self.config.agent.clone());
+        self.save_config();
 
         if ui
             .checkbox(
                 &mut self.config.agent.mention_trigger,
-                "Summon the agent by @mentioning the bot in a message",
+                "Summon the agent by @mentioning the bot",
             )
             .changed()
         {
@@ -553,11 +546,11 @@ impl App {
 
         ui.add_space(8.0);
         ui.strong("Standing instructions (the agent's persona and rules)");
-        ui.weak("The agent always enforces Discord permissions on top of these instructions — it can never act beyond what the invoking user may do.");
+        ui.weak("The agent always enforces Discord permissions on top of these — it can never act beyond what the invoking user may do.");
         if ui
             .add(
                 egui::TextEdit::multiline(&mut self.config.agent.instructions)
-                    .hint_text("e.g. You are the moderator helper of this server. Be concise, and when asked to moderate, always explain your action first.")
+                    .hint_text("e.g. You are the moderator helper of this server. Be concise.")
                     .desired_rows(6)
                     .desired_width(f32::INFINITY),
             )
@@ -577,21 +570,20 @@ impl App {
 
         ui.add_space(8.0);
         ui.separator();
-        ui.strong("What the agent can do (MCP-style tools, permission-gated)");
-        ui.weak("Every tool checks the invoking user's real Discord permissions before it runs — the gate is in code, so prompt injection cannot bypass it.");
+        ui.strong("MCP-style tools (permission-gated to the invoking user)");
+        ui.weak("Every tool checks the invoking user's real Discord permissions in code before it runs.");
         for definition in agent::definitions() {
             let name = definition["function"]["name"].as_str().unwrap_or("?");
             let description = definition["function"]["description"].as_str().unwrap_or("");
-            ui.horizontal(|ui| {
-                ui.label("•");
-                ui.label(format!("{} — {}", name, description));
-            });
+            ui.label(format!("•  {name} — {description}"));
         }
     }
 
     fn commands_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Commands");
-        ui.weak("Built-ins were seeded into this list — edit, remove, or add new ones. The AI-agent behavior makes any command talk to your model.");
+        ui.weak(
+            "Built-ins are seeded and fully editable. Add new commands or modify existing ones.",
+        );
 
         ui.add_space(4.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -636,7 +628,6 @@ impl App {
                             .desired_width(200.0),
                     );
                     ui.end_row();
-
                     ui.label("Description");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.editor.description)
@@ -644,7 +635,6 @@ impl App {
                             .desired_width(260.0),
                     );
                     ui.end_row();
-
                     ui.label("Behavior");
                     egui::ComboBox::from_id_salt("behavior")
                         .selected_text(self.editor.behavior.label())
@@ -658,7 +648,6 @@ impl App {
                             }
                         });
                     ui.end_row();
-
                     match self.editor.behavior {
                         CommandBehavior::Reply | CommandBehavior::Roll => {
                             ui.label(if self.editor.behavior == CommandBehavior::Roll {
@@ -752,7 +741,7 @@ impl App {
             if ui.button("↺  Restore default commands").clicked() {
                 self.config.commands = commands_model::default_commands();
                 self.save_config();
-                self.push_log("default commands restored (re-sync to apply on Discord)");
+                self.push_log("default commands restored");
             }
 
             ui.add_space(8.0);
@@ -799,7 +788,6 @@ impl App {
             self.editor_error = Some(format!("A command named /{} already exists", command.name));
             return;
         }
-
         match self.editing.take() {
             Some(index) => self.config.commands[index] = command,
             None => self.config.commands.push(command),
@@ -850,10 +838,7 @@ impl App {
 
     fn send_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.label(
-            "Send a message through the bot. Copy a channel ID in Discord via \
-             right-click → Copy Channel ID (needs Developer Mode enabled).",
-        );
+        ui.label("Send a message through the bot. Copy a channel ID in Discord via right-click → Copy Channel ID (needs Developer Mode).");
         ui.add_space(6.0);
         egui::Grid::new("send_grid")
             .num_columns(2)
@@ -908,9 +893,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_bot(ctx);
-
         self.nav_panel(ctx);
-
         egui::CentralPanel::default().show(ctx, |ui| match self.nav {
             Nav::Connection => self.connection_panel(ui),
             Nav::Agent => self.agent_panel(ui),

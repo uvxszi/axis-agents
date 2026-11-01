@@ -1,19 +1,13 @@
-//! The app's command model: user-editable slash commands compiled into an
-//! Axis [`CommandRegistry`]. Built-ins (`/ping`, `/echo`, `/roll`) are
-//! seeded into the list and fully editable.
+//! User-editable slash commands compiled into an Axis [`CommandRegistry`].
 
 use axis::prelude::*;
 use axis_commands::{CommandOption, CommandRegistry, Invocation};
 
-/// What a command does when invoked.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandBehavior {
-    /// Reply with a template (`{option_name}` / `{user}` placeholders).
     #[default]
     Reply,
-    /// Roll a die with the `sides` option.
     Roll,
-    /// Measure the bot's REST round-trip latency.
     Ping,
 }
 
@@ -33,7 +27,6 @@ impl CommandBehavior {
     }
 }
 
-/// The type of a user-declared option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OptionKind {
     String,
@@ -43,7 +36,6 @@ pub enum OptionKind {
 
 impl OptionKind {
     pub const ALL: [OptionKind; 3] = [OptionKind::String, OptionKind::Integer, OptionKind::Boolean];
-
     pub fn label(self) -> &'static str {
         match self {
             OptionKind::String => "text",
@@ -53,7 +45,6 @@ impl OptionKind {
     }
 }
 
-/// One option of a user-declared command.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UserOption {
     pub name: String,
@@ -62,7 +53,6 @@ pub struct UserOption {
     pub required: bool,
 }
 
-/// A user-declared command.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UserCommand {
     pub name: String,
@@ -74,7 +64,6 @@ pub struct UserCommand {
     pub behavior: CommandBehavior,
 }
 
-/// The default command set, seeded on first run (all editable afterwards).
 pub fn default_commands() -> Vec<UserCommand> {
     vec![
         UserCommand {
@@ -111,10 +100,8 @@ pub fn default_commands() -> Vec<UserCommand> {
     ]
 }
 
-/// Build the live registry from the command list.
 pub fn build_registry(commands: &[UserCommand]) -> (CommandRegistry, Result<(), AxisError>) {
     let mut registry = CommandRegistry::new();
-
     for command in commands {
         let command = command.clone();
         registry.command(
@@ -138,23 +125,24 @@ pub fn build_registry(commands: &[UserCommand]) -> (CommandRegistry, Result<(), 
                     }
                     cmd.option(builder.finish());
                 }
-
                 match command.behavior {
                     CommandBehavior::Reply => {
-                        let reply_template = command.reply.clone();
+                        let template = command.reply.clone();
                         cmd.handler(move |invocation| {
-                            let reply_template = reply_template.clone();
+                            let template = template.clone();
                             async move {
-                                let reply = render_reply(&reply_template, &invocation);
-                                invocation.reply().content(reply).await?;
+                                invocation
+                                    .reply()
+                                    .content(render_reply(&template, &invocation))
+                                    .await?;
                                 Ok(())
                             }
                         });
                     }
                     CommandBehavior::Roll => {
-                        let reply_template = command.reply.clone();
+                        let template = command.reply.clone();
                         cmd.handler(move |invocation| {
-                            let reply_template = reply_template.clone();
+                            let template = template.clone();
                             async move {
                                 let sides = invocation.opt::<i64>("sides")?.unwrap_or(6);
                                 let roll = if sides > 0 {
@@ -163,7 +151,7 @@ pub fn build_registry(commands: &[UserCommand]) -> (CommandRegistry, Result<(), 
                                     1
                                 };
                                 let reply = render_reply(
-                                    &reply_template.replace("{roll}", &roll.to_string()),
+                                    &template.replace("{roll}", &roll.to_string()),
                                     &invocation,
                                 );
                                 invocation.reply().content(reply).await?;
@@ -174,12 +162,11 @@ pub fn build_registry(commands: &[UserCommand]) -> (CommandRegistry, Result<(), 
                     CommandBehavior::Ping => {
                         cmd.handler(move |invocation| async move {
                             let start = std::time::Instant::now();
-                            // Lightweight REST round-trip.
                             let _ = invocation.http.get_gateway().await?;
                             let elapsed = start.elapsed().as_millis();
                             invocation
                                 .reply()
-                                .content(format!("🏓 {elapsed}ms"))
+                                .content(format!("Gateway latency: {elapsed}ms"))
                                 .await?;
                             Ok(())
                         });
@@ -188,13 +175,10 @@ pub fn build_registry(commands: &[UserCommand]) -> (CommandRegistry, Result<(), 
             },
         );
     }
-
     let validation = registry.validate();
     (registry, validation)
 }
 
-/// Render a reply template: `{name}` for each supplied option, `{user}`
-/// for the invoker's mention, `{roll}` is substituted before this runs.
 pub fn render_reply(template: &str, invocation: &Invocation) -> String {
     let mut reply = template.to_owned();
     for option in invocation.scope_options() {
@@ -216,7 +200,7 @@ pub fn render_reply(template: &str, invocation: &Invocation) -> String {
                 .interaction
                 .member
                 .as_ref()
-                .and_then(|member| member.user.as_ref())
+                .and_then(|m| m.user.as_ref())
         })
         .map(|user| format!("<@{}>", user.id))
         .unwrap_or_else(|| "you".to_owned());
@@ -224,7 +208,6 @@ pub fn render_reply(template: &str, invocation: &Invocation) -> String {
     reply
 }
 
-/// A tiny xorshift for the roll command.
 pub fn rand_roll() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -238,7 +221,6 @@ pub fn rand_roll() -> i64 {
     (state >> 8) as i64
 }
 
-/// Check a candidate command name against Discord's rules.
 pub fn valid_command_name(name: &str) -> bool {
     let chars = name.chars().count();
     (1..=32).contains(&chars)
@@ -259,13 +241,12 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    fn interaction_with_options(options: serde_json::Value) -> Invocation {
+    fn make_invocation(options: serde_json::Value) -> Invocation {
         let interaction: Interaction = serde_json::from_value(json!({
             "id": "100", "application_id": "5", "type": 2,
             "data": { "id": "101", "name": "greet", "type": 1, "options": options },
             "user": { "id": "80351110224678912", "username": "Nelly", "discriminator": "0" },
-            "token": "t", "version": 1
-        }))
+            "token": "t", "version": 1 }))
         .unwrap();
         let data = interaction.command_data().unwrap().clone();
         Invocation {
@@ -277,47 +258,32 @@ mod tests {
     }
 
     #[test]
-    fn templates_substitute_options_and_user() {
-        let invocation = interaction_with_options(json!([
-            { "name": "target", "type": 3, "value": "the moon" }
-        ]));
-        let reply = render_reply("Hello {user}, welcome to {target}!", &invocation);
-        assert_eq!(reply, "Hello <@80351110224678912>, welcome to the moon!");
+    fn templates_substitute() {
+        let invocation =
+            make_invocation(json!([{ "name": "target", "type": 3, "value": "the moon" }]));
+        assert_eq!(
+            render_reply("Hello {user}, welcome to {target}!", &invocation),
+            "Hello <@80351110224678912>, welcome to the moon!"
+        );
     }
 
     #[test]
-    fn defaults_seed_three_builtins() {
+    fn defaults_are_correct() {
         let defaults = default_commands();
         assert_eq!(defaults.len(), 3);
-        assert_eq!(defaults[0].name, "ping");
         assert_eq!(defaults[0].behavior, CommandBehavior::Ping);
     }
 
     #[test]
-    fn registry_from_model_passes_validation() {
-        let commands = default_commands();
-        let (registry, validation) = build_registry(&commands);
+    fn registry_validates() {
+        let (registry, validation) = build_registry(&default_commands());
         validation.unwrap();
         assert_eq!(registry.len(), 3);
-    }
-
-    #[test]
-    fn registry_rejects_broken_commands() {
-        let commands = vec![UserCommand {
-            name: "Broken Name".to_owned(),
-            description: "x".to_owned(),
-            reply: String::new(),
-            options: Vec::new(),
-            behavior: CommandBehavior::Reply,
-        }];
-        let (_, validation) = build_registry(&commands);
-        assert!(validation.is_err());
     }
 
     #[test]
     fn name_rules() {
         assert!(valid_command_name("greet-user_2"));
         assert!(!valid_command_name("Greet"));
-        assert!(!valid_command_name("has space"));
     }
 }

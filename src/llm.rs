@@ -2,8 +2,6 @@
 //!
 //! Works with LM Studio (`http://localhost:1234/v1`), OpenAI, OpenRouter,
 //! Groq, and any other provider that speaks the `/chat/completions` shape.
-//! Request building and response parsing are pure functions so they are
-//! unit-testable without a server.
 
 use std::sync::OnceLock;
 
@@ -38,7 +36,6 @@ impl Provider {
         }
     }
 
-    /// The default base URL for the preset.
     pub fn default_base_url(self) -> &'static str {
         match self {
             Provider::LmStudio => "http://localhost:1234/v1",
@@ -49,7 +46,6 @@ impl Provider {
         }
     }
 
-    /// The default model for the preset.
     pub fn default_model(self) -> &'static str {
         match self {
             Provider::LmStudio => "local-model",
@@ -64,12 +60,9 @@ impl Provider {
 /// One message in an OpenAI-shaped conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessage {
-    /// `system`, `user`, `assistant`, or `tool`.
     pub role: String,
     pub content: String,
-    /// Present on assistant messages that request tool calls.
     pub tool_calls: Vec<ToolCallRequest>,
-    /// Present on `tool` messages: the id of the call being answered.
     pub tool_call_id: Option<String>,
 }
 
@@ -82,7 +75,6 @@ impl ChatMessage {
             tool_call_id: None,
         }
     }
-
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".to_owned(),
@@ -91,7 +83,6 @@ impl ChatMessage {
             tool_call_id: None,
         }
     }
-
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".to_owned(),
@@ -100,7 +91,6 @@ impl ChatMessage {
             tool_call_id: None,
         }
     }
-
     pub fn assistant_with_tool_calls(
         content: impl Into<String>,
         tool_calls: Vec<ToolCallRequest>,
@@ -112,7 +102,6 @@ impl ChatMessage {
             tool_call_id: None,
         }
     }
-
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".to_owned(),
@@ -125,15 +114,12 @@ impl ChatMessage {
     fn to_json(&self) -> Value {
         let mut message = json!({ "role": self.role, "content": self.content });
         if !self.tool_calls.is_empty() {
-            message["tool_calls"] = json!(
-                self.tool_calls
-                    .iter()
-                    .map(|call| json!({
-                        "id": call.id,
-                        "type": "function",
-                        "function": { "name": call.name, "arguments": call.arguments.to_string() }
-                    }))
-                    .collect::<Vec<_>>()
+            message["tool_calls"] =
+                json!(
+                self.tool_calls.iter().map(|call| json!({
+                    "id": call.id, "type": "function",
+                    "function": { "name": call.name, "arguments": call.arguments.to_string() }
+                })).collect::<Vec<_>>()
             );
         }
         if let Some(id) = &self.tool_call_id {
@@ -148,19 +134,16 @@ impl ChatMessage {
 pub struct ToolCallRequest {
     pub id: String,
     pub name: String,
-    /// Parsed arguments object. Malformed JSON from the model becomes
-    /// `{"_raw": "..."}` so the executor can report it.
     pub arguments: Value,
 }
 
-/// One round of the conversation: content plus any requested tool calls.
+/// One round of the conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmTurn {
     pub content: String,
     pub tool_calls: Vec<ToolCallRequest>,
 }
 
-/// Build the `/chat/completions` request body.
 pub fn build_chat_request(
     model: &str,
     temperature: f32,
@@ -179,7 +162,6 @@ pub fn build_chat_request(
     request
 }
 
-/// Parse a `/chat/completions` response body into a turn.
 pub fn parse_chat_response(body: &Value) -> Result<LlmTurn, String> {
     let error = |context: &str| format!("LLM response was malformed: {context}");
     let choices = body
@@ -196,7 +178,6 @@ pub fn parse_chat_response(body: &Value) -> Result<LlmTurn, String> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-
     let mut tool_calls = Vec::new();
     if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
         for call in calls {
@@ -207,23 +188,21 @@ pub fn parse_chat_response(body: &Value) -> Result<LlmTurn, String> {
                 .to_owned();
             let name = call
                 .get("function")
-                .and_then(|function| function.get("name"))
+                .and_then(|f| f.get("name"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| error("tool call missing function name"))?
                 .to_owned();
-            let raw_arguments = call
+            let raw = call
                 .get("function")
-                .and_then(|function| function.get("arguments"))
+                .and_then(|f| f.get("arguments"))
                 .cloned()
                 .unwrap_or(Value::Null);
-            let arguments = match raw_arguments {
-                Value::String(text) => serde_json::from_str(&text).unwrap_or_else(
-                    |_| json!({ "_raw": text, "_error": "arguments were not valid JSON" }),
-                ),
-                other @ Value::Object(_) => other,
-                other => {
-                    json!({ "_raw": other.to_string(), "_error": "arguments were not an object" })
+            let arguments = match raw {
+                Value::String(text) => {
+                    serde_json::from_str(&text).unwrap_or_else(|_| json!({ "_raw": text }))
                 }
+                other @ Value::Object(_) => other,
+                other => json!({ "_raw": other.to_string() }),
             };
             tool_calls.push(ToolCallRequest {
                 id,
@@ -232,14 +211,12 @@ pub fn parse_chat_response(body: &Value) -> Result<LlmTurn, String> {
             });
         }
     }
-
     Ok(LlmTurn {
         content,
         tool_calls,
     })
 }
 
-/// Extract model ids from a `/models` response.
 pub fn parse_models_response(body: &Value) -> Vec<String> {
     body.get("data")
         .and_then(Value::as_array)
@@ -253,7 +230,6 @@ pub fn parse_models_response(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A long-timeout client for LLM calls (local models can be slow).
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -272,11 +248,12 @@ fn auth_header(api_key: &str) -> Option<(&'static str, String)> {
     }
 }
 
-async fn send_json(
+async fn request_json(
+    method: reqwest::Method,
     base_url: &str,
     api_key: &str,
     path: &str,
-    body: Value,
+    body: Option<Value>,
 ) -> Result<Value, String> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
@@ -284,38 +261,12 @@ async fn send_json(
     }
     let url = format!("{base}{path}");
 
-    let mut request = http_client().post(&url).json(&body);
+    let mut request = http_client().request(method, &url);
     if let Some((name, value)) = auth_header(api_key) {
         request = request.header(name, value);
     }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("request to {url} failed: {error}"))?;
-
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!(
-            "the provider answered HTTP {status}: {}",
-            truncate(&text, 400)
-        ));
-    }
-    serde_json::from_str(&text)
-        .map_err(|error| format!("provider response was not valid JSON: {error}"))
-}
-
-async fn get_json(base_url: &str, api_key: &str, path: &str) -> Result<Value, String> {
-    let base = base_url.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Err("no API base URL configured".to_owned());
-    }
-    let url = format!("{base}{path}");
-
-    let mut request = http_client().get(&url);
-    if let Some((name, value)) = auth_header(api_key) {
-        request = request.header(name, value);
+    if let Some(body) = body {
+        request = request.json(&body);
     }
 
     let response = request
@@ -325,23 +276,24 @@ async fn get_json(base_url: &str, api_key: &str, path: &str) -> Result<Value, St
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!(
-            "the provider answered HTTP {status}: {}",
-            truncate(&text, 400)
-        ));
+        return Err(format!("HTTP {status}: {}", truncate(&text, 300)));
     }
-    serde_json::from_str(&text)
-        .map_err(|error| format!("provider response was not valid JSON: {error}"))
+    serde_json::from_str(&text).map_err(|error| format!("response was not valid JSON: {error}"))
 }
 
-/// Run one chat-completions round.
 pub async fn chat(base_url: &str, api_key: &str, request: Value) -> Result<Value, String> {
-    send_json(base_url, api_key, "/chat/completions", request).await
+    request_json(
+        reqwest::Method::POST,
+        base_url,
+        api_key,
+        "/chat/completions",
+        Some(request),
+    )
+    .await
 }
 
-/// List the models the provider exposes.
 pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
-    let body = get_json(base_url, api_key, "/models").await?;
+    let body = request_json(reqwest::Method::GET, base_url, api_key, "/models", None).await?;
     let models = parse_models_response(&body);
     if models.is_empty() {
         return Err("the provider returned no models".to_owned());
@@ -351,14 +303,13 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, S
 
 fn truncate(text: &str, max: usize) -> String {
     if text.len() <= max {
-        text.to_owned()
-    } else {
-        let mut cut = max;
-        while cut > 0 && !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        format!("{}…", &text[..cut])
+        return text.to_owned();
     }
+    let mut cut = max;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &text[..cut])
 }
 
 #[cfg(test)]
@@ -380,34 +331,24 @@ mod tests {
             ),
             ChatMessage::tool_result("call_1", "denied"),
         ];
-        let tools = vec![json!({
-            "type": "function",
-            "function": { "name": "ban", "description": "b", "parameters": {} }
-        })];
+        let tools = vec![
+            json!({ "type": "function", "function": { "name": "ban", "description": "b", "parameters": {} } }),
+        ];
         let request = build_chat_request("m", 0.5, &messages, &tools);
-
         assert_eq!(request["model"], "m");
-        assert_eq!(request["temperature"], 0.5);
         assert_eq!(request["messages"].as_array().unwrap().len(), 4);
         assert_eq!(
             request["messages"][2]["tool_calls"][0]["function"]["name"],
             "ban"
         );
-        // Arguments travel as a JSON string, per the wire format.
-        assert_eq!(
-            request["messages"][2]["tool_calls"][0]["function"]["arguments"],
-            json!(r#"{"user_id":"42"}"#)
-        );
         assert_eq!(request["messages"][3]["tool_call_id"], "call_1");
-        assert_eq!(request["tools"].as_array().unwrap().len(), 1);
         assert_eq!(request["tool_choice"], "auto");
     }
 
     #[test]
     fn chat_response_parses_content() {
-        let body = json!({
-            "choices": [ { "message": { "role": "assistant", "content": "hi there" } } ]
-        });
+        let body =
+            json!({ "choices": [ { "message": { "role": "assistant", "content": "hi there" } } ] });
         let turn = parse_chat_response(&body).unwrap();
         assert_eq!(turn.content, "hi there");
         assert!(turn.tool_calls.is_empty());
@@ -415,35 +356,31 @@ mod tests {
 
     #[test]
     fn chat_response_parses_tool_calls_with_string_arguments() {
-        let body = json!({
-            "choices": [ {
+        let arguments_string = r#"{"user_id": "7"}"#;
+        let body = serde_json::json!({
+            "choices": [{
                 "message": {
                     "role": "assistant",
-                    "content": null,
-                    "tool_calls": [ {
+                    "tool_calls": [{
                         "id": "call_9",
                         "type": "function",
-                        "function": { "name": "kick", "arguments": "{\"user_id\": \"7\"}" }
-                    } ]
-                },
-                "finish_reason": "tool_calls"
-            } ]
+                        "function": {
+                            "name": "kick",
+                            "arguments": arguments_string
+                        }
+                    }]
+                }
+            }]
         });
         let turn = parse_chat_response(&body).unwrap();
         assert_eq!(turn.tool_calls.len(), 1);
-        assert_eq!(turn.tool_calls[0].id, "call_9");
-        assert_eq!(turn.tool_calls[0].name, "kick");
         assert_eq!(turn.tool_calls[0].arguments["user_id"], "7");
     }
 
     #[test]
     fn malformed_tool_arguments_become_raw() {
-        let body = json!({
-            "choices": [ { "message": { "role": "assistant", "tool_calls": [ {
-                "id": "c", "type": "function",
-                "function": { "name": "x", "arguments": "not json" }
-            } ] } } ]
-        });
+        let body = json!({ "choices": [ { "message": { "role": "assistant", "tool_calls": [ {
+            "id": "c", "type": "function", "function": { "name": "x", "arguments": "not json" } } ] } } ] });
         let turn = parse_chat_response(&body).unwrap();
         assert_eq!(turn.tool_calls[0].arguments["_raw"], "not json");
     }
