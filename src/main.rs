@@ -228,6 +228,7 @@ impl App {
                     self.bot.send(BotCommand::Connect {
                         token: trimmed,
                         application_id,
+                        commands: self.config.commands.clone(),
                     });
                 } else {
                     self.push_log(

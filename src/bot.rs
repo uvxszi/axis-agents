@@ -19,8 +19,13 @@ use axis_commands::CommandRegistry;
 /// Commands the GUI can send to the supervisor.
 #[derive(Debug, Clone)]
 pub enum BotCommand {
-    /// Build the client and start the gateway shard.
-    Connect { token: String, application_id: u64 },
+    /// Build the client and start the gateway shard, installing a command
+    /// registry for the given user commands (plus built-ins).
+    Connect {
+        token: String,
+        application_id: u64,
+        commands: Vec<crate::commands_model::UserCommand>,
+    },
     /// Close the gateway gracefully and stop.
     Disconnect,
     /// Send a message through the REST client.
@@ -67,9 +72,10 @@ struct Shared {
     /// ID — REST actions from the supervisor (send message, sync
     /// commands) go through this.
     http: Mutex<Option<(Arc<Http>, u64)>>,
-    /// The live command registry; swapped by the GUI through
-    /// [`BotHandle::update_registry`].
-    registry: RwLock<CommandRegistry>,
+    /// The live command registry. One `Arc` shared by supervisor, bot
+    /// task, and GUI handle — there is exactly one registry, so edits and
+    /// connect-time builds are visible to dispatch immediately.
+    registry: Arc<RwLock<CommandRegistry>>,
 }
 
 /// A handle to the supervised bot.
@@ -151,11 +157,23 @@ async fn supervise(
             BotCommand::Connect {
                 token,
                 application_id,
+                commands,
             } => {
                 if shutdown_tx.is_some() {
                     emit(BotEvent::Log("a bot is already running".to_owned()));
                     continue;
                 }
+                // Build the live registry now: built-ins + the user's
+                // saved commands. Dispatch and Sync both read this same
+                // registry, so what Discord sees and what responds stay
+                // in lockstep.
+                let (registry, validation) = crate::commands_model::build_registry(&commands);
+                if let Err(error) = validation {
+                    emit(BotEvent::ActionFailed(format!(
+                        "some commands were not loaded: {error}"
+                    )));
+                }
+                *shared.registry.write().expect("registry lock poisoned") = registry;
                 let (shutdown_tx_new, shutdown_rx) = tokio::sync::watch::channel(false);
                 shutdown_tx = Some(shutdown_tx_new);
                 emit(BotEvent::Log("connecting…".to_owned()));

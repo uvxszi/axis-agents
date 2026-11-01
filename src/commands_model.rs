@@ -263,6 +263,28 @@ mod tests {
     }
 
     #[test]
+    fn connect_always_yields_built_ins_plus_user_commands() {
+        // Regression: the app once dispatched through an EMPTY registry
+        // because the connect-time build was never installed. The
+        // connect path uses build_registry — it must contain the
+        // built-ins even with zero user commands, and every user command
+        // with one.
+        let (registry, validation) = build_registry(&[]);
+        validation.unwrap();
+        assert_eq!(registry.len(), 3, "built-ins must exist with no commands");
+
+        let commands = vec![UserCommand {
+            name: "greet".to_owned(),
+            description: "Greet".to_owned(),
+            reply: "Hi {user}".to_owned(),
+            options: Vec::new(),
+        }];
+        let (registry, validation) = build_registry(&commands);
+        validation.unwrap();
+        assert_eq!(registry.len(), 4);
+    }
+
+    #[test]
     fn registry_rejects_broken_commands() {
         let commands = vec![UserCommand {
             name: "Broken Name".to_owned(),
