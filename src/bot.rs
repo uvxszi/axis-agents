@@ -32,6 +32,8 @@ pub enum BotCommand {
     SendMessage { channel_id: u64, content: String },
     /// Bulk-overwrite Discord's global commands with the current registry.
     SyncCommands,
+    /// List the models an OpenAI-compatible provider exposes.
+    FetchModels { base_url: String, api_key: String },
 }
 
 /// Connection state reported to the GUI.
@@ -62,6 +64,7 @@ pub enum BotEvent {
         user: String,
     },
     CommandsSynced(Vec<String>),
+    ModelsFetched(Vec<String>),
     ActionFailed(String),
 }
 
@@ -76,6 +79,8 @@ struct Shared {
     /// task, and GUI handle — there is exactly one registry, so edits and
     /// connect-time builds are visible to dispatch immediately.
     registry: Arc<RwLock<CommandRegistry>>,
+    /// The AI agent: config, conversation memory, bot identity.
+    agent: Arc<crate::agent::AgentState>,
 }
 
 /// A handle to the supervised bot.
@@ -130,6 +135,21 @@ impl BotHandle {
             .expect("registry lock poisoned") = registry;
     }
 
+    /// Replace the agent configuration (takes effect immediately).
+    pub fn update_agent(&self, config: crate::agent::AgentConfig) {
+        *self
+            .shared
+            .agent
+            .config
+            .write()
+            .expect("agent config lock poisoned") = config;
+    }
+
+    /// The shared agent state, for the GUI to edit config and memory.
+    pub fn agent(&self) -> Arc<crate::agent::AgentState> {
+        Arc::clone(&self.shared.agent)
+    }
+
     /// Whether a bot is currently running (a REST client is attached).
     pub fn is_running(&self) -> bool {
         self.shared
@@ -167,7 +187,8 @@ async fn supervise(
                 // saved commands. Dispatch and Sync both read this same
                 // registry, so what Discord sees and what responds stay
                 // in lockstep.
-                let (registry, validation) = crate::commands_model::build_registry(&commands);
+                let (registry, validation) =
+                    crate::commands_model::build_registry(&commands, Some(&shared.agent));
                 if let Err(error) = validation {
                     emit(BotEvent::ActionFailed(format!(
                         "some commands were not loaded: {error}"
@@ -216,6 +237,14 @@ async fn supervise(
                     ))),
                     Err(error) => emit(BotEvent::ActionFailed(format!(
                         "send to {channel_id} failed: {error}"
+                    ))),
+                }
+            }
+            BotCommand::FetchModels { base_url, api_key } => {
+                match crate::llm::list_models(&base_url, &api_key).await {
+                    Ok(models) => emit(BotEvent::ModelsFetched(models)),
+                    Err(error) => emit(BotEvent::ActionFailed(format!(
+                        "model list failed: {error}"
                     ))),
                 }
             }
@@ -276,9 +305,12 @@ async fn run_bot(
     // Gateway events → GUI. Each closure owns a cloned sender and clones
     // it per call (`send` takes `&self`), keeping them `Fn`.
     let ready_tx = event_tx.clone();
+    let agent_for_ready = Arc::clone(&shared.agent);
     client.on_ready(move |_ctx, ready| {
         let tx = ready_tx.clone();
+        let agent = Arc::clone(&agent_for_ready);
         async move {
+            agent.set_bot_user(ready.user.id.get(), ready.user.username.clone());
             let _ = tx.send(BotEvent::Status(Status::Connected(
                 ready.user.username.clone(),
             )));
@@ -291,15 +323,78 @@ async fn run_bot(
     });
 
     let message_tx = event_tx.clone();
-    client.on_message_create(move |_ctx, message| {
+    let agent_for_messages = Arc::clone(&shared.agent);
+    let http_for_agent = client.http();
+    client.on_message_create(move |ctx, message| {
         let tx = message_tx.clone();
+        let agent = Arc::clone(&agent_for_messages);
+        let http = Arc::clone(&http_for_agent);
         async move {
+            let is_bot = message.author.bot.unwrap_or(false);
             let _ = tx.send(BotEvent::Message {
                 author: message.author.username.clone(),
-                bot: message.author.bot.unwrap_or(false),
+                bot: is_bot,
                 channel_id: message.channel_id.get(),
                 content: message.content.clone(),
             });
+
+            // @mention trigger: summon the agent without a slash command.
+            let mentions_bot = !is_bot
+                && agent
+                    .bot_user_id()
+                    .map(|bot_id| message.mentions.iter().any(|user| user.id.get() == bot_id))
+                    .unwrap_or(false);
+            if mentions_bot {
+                let agent = Arc::clone(&agent);
+                let http = Arc::clone(&http);
+                let scope = (
+                    message.guild_id.map(|id| id.get()).unwrap_or(0),
+                    message.channel_id.get(),
+                );
+                let invoker = (message.author.id.get(), message.author.username.clone());
+                // Strip the mention tag(s) from the front of the content.
+                let prompt = message
+                    .content
+                    .split_once('>')
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or(&message.content)
+                    .to_owned();
+                tokio::spawn(async move {
+                    if let Err(error) = http.trigger_typing(message.channel_id).await {
+                        tracing::debug!(%error, "typing indicator failed");
+                    }
+                    let invoker_with_name = (invoker.0, invoker.1.clone());
+                    match crate::agent::run_agent(
+                        http.clone(),
+                        &agent,
+                        scope,
+                        invoker_with_name,
+                        prompt,
+                    )
+                    .await
+                    {
+                        Ok(answer) => {
+                            for chunk in crate::agent::split_reply(&answer) {
+                                if let Err(error) = http
+                                    .create_message(message.channel_id)
+                                    .content(&chunk)
+                                    .await
+                                {
+                                    tracing::warn!(%error, "agent reply failed");
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let _ = http
+                                .create_message(message.channel_id)
+                                .content(format!("⚠ {error}"))
+                                .await;
+                        }
+                    }
+                });
+            }
+
+            let _ = ctx; // reserved for future use
             Ok(())
         }
     });

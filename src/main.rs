@@ -1,17 +1,17 @@
-//! Axis Bot Studio — a small desktop app that runs an Axis Discord bot
-//! locally: paste your token, edit commands, watch the gateway live.
-//!
-//! Layout: connection controls on top, the command editor on the right,
-//! and tabbed central views (log / messages / send message) in the middle.
+//! Axis Agents — a small desktop app that runs an AI-powered Discord bot
+//! locally on the Axis library: paste your token, edit commands, tune the
+//! agent, and watch everything live.
 
+mod agent;
 mod bot;
 mod commands_model;
 mod config;
+mod llm;
 
 use std::{collections::VecDeque, path::PathBuf};
 
 use bot::{BotCommand, BotEvent, BotHandle, Status};
-use commands_model::{OptionKind, UserCommand, UserOption};
+use commands_model::{CommandBehavior, OptionKind, UserCommand, UserOption};
 
 fn main() -> eframe::Result<()> {
     // Library logs (reconnects, rate limits) go to stderr via tracing;
@@ -26,23 +26,48 @@ fn main() -> eframe::Result<()> {
 
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([860.0, 540.0]),
+            .with_inner_size([1160.0, 760.0])
+            .with_min_inner_size([900.0, 560.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Axis Bot Studio",
+        "Axis Agents",
         native,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Tab {
+enum Nav {
+    Connection,
+    Agent,
+    Commands,
     Log,
     Messages,
     Send,
+}
+
+impl Nav {
+    const ALL: [Nav; 6] = [
+        Nav::Connection,
+        Nav::Agent,
+        Nav::Commands,
+        Nav::Log,
+        Nav::Messages,
+        Nav::Send,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Nav::Connection => "🔌  Connection",
+            Nav::Agent => "🤖  AI Agent",
+            Nav::Commands => "⌨️  Commands",
+            Nav::Log => "📜  Log",
+            Nav::Messages => "💬  Messages",
+            Nav::Send => "✉️  Send message",
+        }
+    }
 }
 
 struct MessageLine {
@@ -57,12 +82,12 @@ struct App {
     config_path: PathBuf,
     config: config::AppConfig,
 
-    token: String,
+    token_input: String,
     status: Status,
     log: VecDeque<String>,
     messages: VecDeque<MessageLine>,
 
-    tab: Tab,
+    nav: Nav,
     autoscroll: bool,
 
     // Command editor state.
@@ -70,15 +95,48 @@ struct App {
     editing: Option<usize>,
     editor_error: Option<String>,
 
-    // Send-message panel state.
+    // Agent tab state.
+    models: Vec<String>,
+    models_status: Option<String>,
+
+    // Send panel state.
     send_channel: String,
     send_content: String,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Full-coverage emoji font: egui's bundled NotoEmoji is a 2015-era
+        // subset missing most modern emoji; register the complete font as
+        // a fallback for both families.
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "noto_emoji_full".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                "../assets/NotoEmoji.ttf"
+            ))),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("noto_emoji_full".to_owned());
+        }
+        cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx.set_theme(egui::Theme::Dark);
+
         let config_path = config::default_path();
-        let config = config::load(&config_path);
+        let mut config = config::load(&config_path);
+        config.seed_built_ins();
+        if let Err(error) = config::save(&config_path, &config) {
+            eprintln!("config save failed: {error}");
+        }
+        let token_input = if config.save_token {
+            config.token.clone()
+        } else {
+            String::new()
+        };
         let editor = config
             .commands
             .first()
@@ -88,35 +146,39 @@ impl App {
                 description: String::new(),
                 reply: String::new(),
                 options: Vec::new(),
+                behavior: CommandBehavior::Reply,
             });
+
         Self {
             bot: BotHandle::spawn(),
             config_path,
-            config,
-            token: String::new(),
+            token_input,
             status: Status::Offline,
             log: VecDeque::new(),
             messages: VecDeque::new(),
-            tab: Tab::Log,
+            nav: Nav::Connection,
             autoscroll: true,
             editor,
             editing: None,
             editor_error: None,
+            models: Vec::new(),
+            models_status: None,
             send_channel: String::new(),
             send_content: String::new(),
+            config,
         }
     }
 
     fn push_log(&mut self, line: impl Into<String>) {
         let stamp = axis::timestamp::Timestamp::now_utc().as_datetime();
         self.log.push_back(format!(
-            "{:02}:{:02}:{:02} {}",
+            "{:02}:{:02}:{:02}  {}",
             stamp.hour(),
             stamp.minute(),
             stamp.second(),
             line.into()
         ));
-        while self.log.len() > 500 {
+        while self.log.len() > 800 {
             self.log.pop_front();
         }
     }
@@ -162,10 +224,15 @@ impl App {
                 BotEvent::CommandsSynced(names) => {
                     self.push_log(format!("commands synced to Discord: {}", names.join(", ")));
                 }
+                BotEvent::ModelsFetched(models) => {
+                    self.push_log(format!("fetched {} models from the provider", models.len()));
+                    self.models_status =
+                        Some(format!("Found {} models — pick one below.", models.len()));
+                    self.models = models;
+                }
             }
         }
 
-        // Keep polling while connected so gateway traffic shows up.
         if self.bot.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
@@ -177,54 +244,113 @@ impl App {
         }
     }
 
-    // ----- UI sections -----
+    fn status_label(&self) -> (String, egui::Color32) {
+        match &self.status {
+            Status::Offline => ("offline".to_owned(), egui::Color32::GRAY),
+            Status::Connecting => ("connecting…".to_owned(), egui::Color32::YELLOW),
+            Status::Connected(name) => (format!("online as {name}"), egui::Color32::GREEN),
+            Status::Resumed => ("online (resumed)".to_owned(), egui::Color32::GREEN),
+            Status::Reconnecting(code) => {
+                (format!("reconnecting ({code:?})…"), egui::Color32::YELLOW)
+            }
+            Status::Failed(reason) => (format!("failed: {reason}"), egui::Color32::RED),
+            Status::Disconnected(reason) => {
+                (format!("disconnected: {reason}"), egui::Color32::GRAY)
+            }
+        }
+    }
+
+    // ----- panels -----
+
+    fn nav_panel(&mut self, ctx: &egui::Context) {
+        let (label, color) = self.status_label();
+        egui::SidePanel::left("nav")
+            .resizable(false)
+            .exact_width(190.0)
+            .show(ctx, |ui| {
+                ui.add_space(10.0);
+                ui.heading("Axis Agents");
+                ui.weak("powered by the Axis library");
+                ui.add_space(8.0);
+                ui.separator();
+
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                    ui.add_space(6.0);
+                    for nav in Nav::ALL {
+                        ui.selectable_value(&mut self.nav, nav, nav.label());
+                        ui.add_space(2.0);
+                    }
+                });
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.colored_label(color, label);
+                    ui.weak(format!("v{}", env!("CARGO_PKG_VERSION")));
+                });
+            });
+    }
 
     fn connection_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Axis Bot Studio");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (label, color) = match &self.status {
-                    Status::Offline => ("offline".to_owned(), egui::Color32::GRAY),
-                    Status::Connecting => ("connecting…".to_owned(), egui::Color32::YELLOW),
-                    Status::Connected(name) => (format!("online as {name}"), egui::Color32::GREEN),
-                    Status::Resumed => ("online (resumed)".to_owned(), egui::Color32::GREEN),
-                    Status::Reconnecting(_) => ("reconnecting…".to_owned(), egui::Color32::YELLOW),
-                    Status::Failed(_) => ("failed".to_owned(), egui::Color32::RED),
-                    Status::Disconnected(_) => ("disconnected".to_owned(), egui::Color32::GRAY),
-                };
-                ui.colored_label(color, label);
+        ui.heading("Connection");
+        ui.add_space(6.0);
+        ui.label("Paste your bot token (Developer Portal → Bot → Reset Token). The token is never written to disk unless you opt in below.");
+        ui.add_space(6.0);
+
+        egui::Grid::new("connection_grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Bot token");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.token_input)
+                        .password(true)
+                        .hint_text("MTIzNDU2Nzg5…")
+                        .desired_width(420.0),
+                );
+                ui.end_row();
+
+                ui.label("Application ID");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.config.application_id)
+                            .hint_text("numeric app id (Developer Portal → General Information)")
+                            .desired_width(420.0),
+                    )
+                    .changed()
+                {
+                    self.save_config();
+                }
+                ui.end_row();
             });
-        });
 
-        ui.add_space(4.0);
+        ui.checkbox(
+            &mut self.config.save_token,
+            "Remember token on disk (stored in plain text in the config file next to this exe)",
+        );
+        if self.config.save_token {
+            self.config.token = self.token_input.trim().to_owned();
+            self.save_config();
+        } else if !self.config.token.is_empty() {
+            self.config.token.clear();
+            self.save_config();
+        }
+
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label("Token:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.token)
-                    .password(true)
-                    .hint_text("paste your bot token (never saved to disk)")
-                    .desired_width(340.0),
-            );
-
-            ui.label("Application ID:");
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.config.application_id)
-                        .hint_text("numeric app id")
-                        .desired_width(140.0),
-                )
-                .lost_focus()
-            {
-                self.save_config();
-            }
-
             let running = self.bot.is_running();
-            if !running && ui.button("▶ Connect").clicked() {
-                let trimmed = self.token.trim().to_owned();
+            if !running && ui.button("▶  Connect").clicked() {
+                let trimmed = self.token_input.trim().to_owned();
                 if trimmed.is_empty() {
                     self.push_log("ERROR: paste a bot token first");
                 } else if let Ok(application_id) = self.config.application_id.trim().parse::<u64>()
                 {
+                    self.config.token = if self.config.save_token {
+                        trimmed.clone()
+                    } else {
+                        String::new()
+                    };
+                    self.save_config();
                     self.bot.send(BotCommand::Connect {
                         token: trimmed,
                         application_id,
@@ -236,16 +362,236 @@ impl App {
                     );
                 }
             }
-            if running && ui.button("⏹ Disconnect").clicked() {
+            if running && ui.button("⏹  Disconnect").clicked() {
                 self.bot.send(BotCommand::Disconnect);
             }
         });
+
+        ui.add_space(10.0);
         ui.separator();
+        ui.add_space(4.0);
+        ui.strong("Setup checklist");
+        ui.label("•  Create the app in the Developer Portal and invite it with the `bot` + `applications.commands` scopes.");
+        ui.label("•  Enable the Message Content intent (Bot → Privileged Gateway Intents) so the bot can read messages.");
+        ui.label(
+            "•  Privileged intents also gate member events — enable what your automations need.",
+        );
+        ui.label(
+            "•  The token stays in this window only unless you tick “Remember token on disk”.",
+        );
+    }
+
+    fn agent_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("AI Agent");
+        ui.add_space(4.0);
+
+        let enabled = self.config.agent.enabled;
+        if ui
+            .checkbox(
+                &mut self.config.agent.enabled,
+                "Enable the AI agent (answers /agent and @mentions)",
+            )
+            .changed()
+        {
+            self.bot.update_agent(self.config.agent.clone());
+            self.save_config();
+        }
+        if !enabled {
+            ui.weak("The agent is off — the /agent command replies that it is unavailable.");
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.strong("Provider");
+        ui.add_space(4.0);
+
+        let mut provider_changed = false;
+        egui::Grid::new("provider_grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Provider");
+                if egui::ComboBox::from_id_salt("provider")
+                    .selected_text(self.config.agent.provider.label())
+                    .show_ui(ui, |ui| {
+                        for provider in llm::Provider::ALL {
+                            ui.selectable_value(
+                                &mut self.config.agent.provider,
+                                provider,
+                                provider.label(),
+                            );
+                        }
+                    })
+                    .response
+                    .changed()
+                {
+                    self.config.agent.base_url =
+                        self.config.agent.provider.default_base_url().to_owned();
+                    self.config.agent.model = self.config.agent.provider.default_model().to_owned();
+                    self.models.clear();
+                    self.models_status = None;
+                    provider_changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Base URL");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.config.agent.base_url)
+                            .hint_text("http://localhost:1234/v1")
+                            .desired_width(420.0),
+                    )
+                    .changed()
+                {
+                    provider_changed = true;
+                }
+                ui.end_row();
+
+                ui.label("API key");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.agent.api_key)
+                        .password(true)
+                        .hint_text("empty for LM Studio")
+                        .desired_width(420.0),
+                );
+                ui.end_row();
+
+                ui.label("Model");
+                if self.models.is_empty() {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.config.agent.model)
+                            .hint_text("model id as the provider names it")
+                            .desired_width(420.0),
+                    );
+                } else {
+                    egui::ComboBox::from_id_salt("model_choice")
+                        .selected_text(self.config.agent.model.clone())
+                        .show_ui(ui, |ui| {
+                            for model in &self.models {
+                                ui.selectable_value(
+                                    &mut self.config.agent.model,
+                                    model.clone(),
+                                    model,
+                                );
+                            }
+                        });
+                }
+                ui.end_row();
+            });
+
+        ui.horizontal(|ui| {
+            if ui.button("🔄  Fetch model list").clicked() {
+                self.bot.send(BotCommand::FetchModels {
+                    base_url: self.config.agent.base_url.clone(),
+                    api_key: self.config.agent.api_key.clone(),
+                });
+                self.models_status = Some("fetching…".to_owned());
+            }
+            if let Some(status) = &self.models_status {
+                ui.weak(status);
+            }
+        });
+        if provider_changed {
+            self.save_config();
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.strong("Behavior");
+        ui.add_space(4.0);
+
+        egui::Grid::new("agent_behavior_grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Agent name");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.config.agent.name)
+                            .desired_width(300.0),
+                    )
+                    .changed()
+                {
+                    self.bot.update_agent(self.config.agent.clone());
+                    self.save_config();
+                }
+                ui.end_row();
+
+                ui.label("Temperature");
+                let temperature = self.config.agent.temperature;
+                ui.add(
+                    egui::Slider::new(&mut self.config.agent.temperature, 0.0..=2.0)
+                        .text("0 = focused, 2 = creative"),
+                );
+                if (temperature - self.config.agent.temperature).abs() > f32::EPSILON {
+                    self.bot.update_agent(self.config.agent.clone());
+                    self.save_config();
+                }
+                ui.end_row();
+
+                ui.label("Max tool rounds");
+                let mut iterations = self.config.agent.max_iterations;
+                ui.add(egui::DragValue::new(&mut iterations).range(1..=12));
+                if iterations != self.config.agent.max_iterations {
+                    self.config.agent.max_iterations = iterations;
+                    self.bot.update_agent(self.config.agent.clone());
+                    self.save_config();
+                }
+                ui.end_row();
+            });
+
+        if ui
+            .checkbox(
+                &mut self.config.agent.mention_trigger,
+                "Summon the agent by @mentioning the bot in a message",
+            )
+            .changed()
+        {
+            self.bot.update_agent(self.config.agent.clone());
+            self.save_config();
+        }
+
+        ui.add_space(8.0);
+        ui.strong("Standing instructions (the agent's persona and rules)");
+        ui.weak("The agent always enforces Discord permissions on top of these instructions — it can never act beyond what the invoking user may do.");
+        if ui
+            .add(
+                egui::TextEdit::multiline(&mut self.config.agent.instructions)
+                    .hint_text("e.g. You are the moderator helper of this server. Be concise, and when asked to moderate, always explain your action first.")
+                    .desired_rows(6)
+                    .desired_width(f32::INFINITY),
+            )
+            .lost_focus()
+        {
+            self.bot.update_agent(self.config.agent.clone());
+            self.save_config();
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("🧹  Clear conversation memory").clicked() {
+                self.bot.agent().reset_memory();
+                self.push_log("agent conversation memory cleared");
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.strong("What the agent can do (MCP-style tools, permission-gated)");
+        ui.weak("Every tool checks the invoking user's real Discord permissions before it runs — the gate is in code, so prompt injection cannot bypass it.");
+        for definition in agent::definitions() {
+            let name = definition["function"]["name"].as_str().unwrap_or("?");
+            let description = definition["function"]["description"].as_str().unwrap_or("");
+            ui.horizontal(|ui| {
+                ui.label("•");
+                ui.label(format!("{} — {}", name, description));
+            });
+        }
     }
 
     fn commands_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Commands");
-        ui.weak("Built-ins: /ping, /echo, /roll");
+        ui.weak("Built-ins were seeded into this list — edit, remove, or add new ones. The AI-agent behavior makes any command talk to your model.");
 
         ui.add_space(4.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -254,6 +600,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.monospace(format!("/{}", command.name));
                     ui.weak(&command.description);
+                    ui.weak(format!("({})", command.behavior.label()));
                     if ui.small_button("edit").clicked() {
                         self.editing = Some(index);
                         self.editor = command.clone();
@@ -280,13 +627,13 @@ impl App {
 
             egui::Grid::new("command_editor")
                 .num_columns(2)
-                .spacing([8.0, 4.0])
+                .spacing([10.0, 6.0])
                 .show(ui, |ui| {
                     ui.label("Name");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.editor.name)
                             .hint_text("lowercase, e.g. greet")
-                            .desired_width(180.0),
+                            .desired_width(200.0),
                     );
                     ui.end_row();
 
@@ -294,17 +641,43 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.editor.description)
                             .hint_text("Shown in Discord")
-                            .desired_width(180.0),
+                            .desired_width(260.0),
                     );
                     ui.end_row();
 
-                    ui.label("Reply");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.editor.reply)
-                            .hint_text("Supports {option_name} and {user}")
-                            .desired_width(220.0),
-                    );
+                    ui.label("Behavior");
+                    egui::ComboBox::from_id_salt("behavior")
+                        .selected_text(self.editor.behavior.label())
+                        .show_ui(ui, |ui| {
+                            for behavior in CommandBehavior::ALL {
+                                ui.selectable_value(
+                                    &mut self.editor.behavior,
+                                    behavior,
+                                    behavior.label(),
+                                );
+                            }
+                        });
                     ui.end_row();
+
+                    match self.editor.behavior {
+                        CommandBehavior::Reply | CommandBehavior::Roll => {
+                            ui.label(if self.editor.behavior == CommandBehavior::Roll {
+                                "Reply (use {roll})"
+                            } else {
+                                "Reply (use {option} and {user})"
+                            });
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.editor.reply)
+                                    .desired_width(320.0),
+                            );
+                            ui.end_row();
+                        }
+                        CommandBehavior::Agent => {
+                            ui.label("Reply");
+                            ui.weak("(unused — the agent answers via followup)");
+                            ui.end_row();
+                        }
+                    }
                 });
 
             ui.weak("Options (optional):");
@@ -315,14 +688,14 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(&mut option.name)
                             .hint_text("name")
-                            .desired_width(70.0),
+                            .desired_width(90.0),
                     );
                     ui.add(
                         egui::TextEdit::singleline(&mut option.description)
                             .hint_text("description")
-                            .desired_width(110.0),
+                            .desired_width(160.0),
                     );
-                    egui::ComboBox::from_id_salt(format!("kind-{index}"))
+                    egui::ComboBox::from_id_salt(format!("option-kind-{index}"))
                         .selected_text(option.kind.label())
                         .show_ui(ui, |ui| {
                             for kind in OptionKind::ALL {
@@ -372,22 +745,24 @@ impl App {
                 if self.editing.is_some() && ui.button("Cancel").clicked() {
                     self.editing = None;
                     self.editor_error = None;
-                    self.editor = UserCommand {
-                        name: String::new(),
-                        description: String::new(),
-                        reply: String::new(),
-                        options: Vec::new(),
-                    };
                 }
             });
 
             ui.add_space(8.0);
+            if ui.button("↺  Restore default commands").clicked() {
+                self.config.commands = commands_model::default_commands();
+                self.save_config();
+                self.push_log("default commands restored (re-sync to apply on Discord)");
+            }
+
+            ui.add_space(8.0);
             let running = self.bot.is_running();
             if ui
-                .add_enabled(running, egui::Button::new("⇅ Sync to Discord (global)"))
+                .add_enabled(running, egui::Button::new("⇅  Sync to Discord (global)"))
                 .clicked()
             {
-                let (registry, validation) = commands_model::build_registry(&self.config.commands);
+                let (registry, validation) =
+                    commands_model::build_registry(&self.config.commands, Some(&self.bot.agent()));
                 match validation {
                     Ok(()) => {
                         self.bot.update_registry(registry);
@@ -436,102 +811,98 @@ impl App {
             description: String::new(),
             reply: String::new(),
             options: Vec::new(),
+            behavior: CommandBehavior::Reply,
         };
         self.save_config();
         self.push_log("command saved (use Sync to update Discord)");
     }
 
-    fn central_panel(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Log, "Log");
-                ui.selectable_value(&mut self.tab, Tab::Messages, "Messages");
-                ui.selectable_value(&mut self.tab, Tab::Send, "Send message");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.checkbox(&mut self.autoscroll, "autoscroll");
-                });
+    fn log_panel(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .stick_to_bottom(self.autoscroll)
+            .show(ui, |ui| {
+                for line in &self.log {
+                    ui.monospace(line);
+                }
             });
-            ui.separator();
+    }
 
-            match self.tab {
-                Tab::Log => {
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(self.autoscroll)
-                        .show(ui, |ui| {
-                            for line in &self.log {
-                                ui.monospace(line);
-                            }
-                        });
+    fn messages_panel(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .stick_to_bottom(self.autoscroll)
+            .show(ui, |ui| {
+                if self.messages.is_empty() {
+                    ui.weak("No messages seen yet (requires the MESSAGE_CONTENT intent).");
                 }
-                Tab::Messages => {
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(self.autoscroll)
-                        .show(ui, |ui| {
-                            if self.messages.is_empty() {
-                                ui.weak(
-                                    "No messages seen yet (requires the MESSAGE_CONTENT intent).",
-                                );
-                            }
-                            for message in &self.messages {
-                                ui.horizontal(|ui| {
-                                    if message.bot {
-                                        ui.weak(format!("[bot] {}", message.author));
-                                    } else {
-                                        ui.strong(&message.author);
-                                    }
-                                    ui.weak(format!("in {}", message.channel_id));
-                                });
-                                ui.label(&message.content);
-                                ui.separator();
-                            }
-                        });
-                }
-                Tab::Send => {
-                    ui.add_space(4.0);
-                    ui.label(
-                        "Send a message through the bot. Copy a channel ID in Discord via \
-                         right-click → Copy Channel ID (needs Developer Mode enabled).",
-                    );
-                    ui.add_space(4.0);
-                    egui::Grid::new("send_grid")
-                        .num_columns(2)
-                        .spacing([8.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.label("Channel ID");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.send_channel)
-                                    .hint_text("e.g. 123456789012345678")
-                                    .desired_width(260.0),
-                            );
-                            ui.end_row();
-                            ui.label("Content");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.send_content)
-                                    .hint_text("message text")
-                                    .desired_width(420.0),
-                            );
-                            ui.end_row();
-                        });
-                    ui.add_space(4.0);
-                    if ui.button("Send").clicked() {
-                        match self.send_channel.trim().parse::<u64>() {
-                            Ok(channel_id) if !self.send_content.trim().is_empty() => {
-                                self.bot.send(BotCommand::SendMessage {
-                                    channel_id,
-                                    content: self.send_content.trim().to_owned(),
-                                });
-                                self.send_content.clear();
-                            }
-                            Ok(_) => self.push_log("ERROR: message text is empty"),
-                            Err(_) => self.push_log("ERROR: channel ID must be numeric"),
+                for message in &self.messages {
+                    ui.horizontal(|ui| {
+                        if message.bot {
+                            ui.weak(format!("[bot] {}", message.author));
+                        } else {
+                            ui.strong(&message.author);
                         }
-                    }
-                    if !self.bot.is_running() {
-                        ui.weak("Connect first to send.");
-                    }
+                        ui.weak(format!("in {}", message.channel_id));
+                    });
+                    ui.label(&message.content);
+                    ui.separator();
                 }
+            });
+    }
+
+    fn send_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.label(
+            "Send a message through the bot. Copy a channel ID in Discord via \
+             right-click → Copy Channel ID (needs Developer Mode enabled).",
+        );
+        ui.add_space(6.0);
+        egui::Grid::new("send_grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Channel ID");
+                let channel_response = ui.add(
+                    egui::TextEdit::singleline(&mut self.send_channel)
+                        .hint_text("e.g. 123456789012345678")
+                        .desired_width(280.0),
+                );
+                ui.end_row();
+                ui.label("Content");
+                let content_response = ui.add(
+                    egui::TextEdit::singleline(&mut self.send_content)
+                        .hint_text("message text")
+                        .desired_width(480.0),
+                );
+                ui.end_row();
+                let enter_pressed = (channel_response.lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                    || (content_response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                if enter_pressed {
+                    self.send_message();
+                }
+            });
+        ui.add_space(4.0);
+        if ui.button("✉  Send").clicked() {
+            self.send_message();
+        }
+        if !self.bot.is_running() {
+            ui.weak("Connect first to send.");
+        }
+    }
+
+    fn send_message(&mut self) {
+        match self.send_channel.trim().parse::<u64>() {
+            Ok(channel_id) if !self.send_content.trim().is_empty() => {
+                self.bot.send(BotCommand::SendMessage {
+                    channel_id,
+                    content: self.send_content.trim().to_owned(),
+                });
+                self.send_content.clear();
             }
-        });
+            Ok(_) => self.push_log("ERROR: message text is empty"),
+            Err(_) => self.push_log("ERROR: channel ID must be numeric"),
+        }
     }
 }
 
@@ -539,17 +910,33 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_bot(ctx);
 
-        egui::TopBottomPanel::top("connection").show(ctx, |ui| {
-            self.connection_panel(ui);
+        self.nav_panel(ctx);
+
+        egui::CentralPanel::default().show(ctx, |ui| match self.nav {
+            Nav::Connection => self.connection_panel(ui),
+            Nav::Agent => self.agent_panel(ui),
+            Nav::Commands => self.commands_panel(ui),
+            Nav::Log => {
+                ui.horizontal(|ui| {
+                    ui.heading("Log");
+                    ui.checkbox(&mut self.autoscroll, "autoscroll");
+                });
+                ui.separator();
+                self.log_panel(ui);
+            }
+            Nav::Messages => {
+                ui.horizontal(|ui| {
+                    ui.heading("Messages");
+                    ui.checkbox(&mut self.autoscroll, "autoscroll");
+                });
+                ui.separator();
+                self.messages_panel(ui);
+            }
+            Nav::Send => {
+                ui.heading("Send message");
+                ui.separator();
+                self.send_panel(ui);
+            }
         });
-
-        egui::SidePanel::right("commands")
-            .resizable(true)
-            .default_width(340.0)
-            .show(ctx, |ui| {
-                self.commands_panel(ui);
-            });
-
-        self.central_panel(ctx);
     }
 }

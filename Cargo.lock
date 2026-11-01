@@ -197,6 +197,7 @@ dependencies = [
  "axis-commands",
  "eframe",
  "egui",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
