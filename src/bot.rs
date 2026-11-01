@@ -187,8 +187,7 @@ async fn supervise(
                 // saved commands. Dispatch and Sync both read this same
                 // registry, so what Discord sees and what responds stay
                 // in lockstep.
-                let (registry, validation) =
-                    crate::commands_model::build_registry(&commands, Some(&shared.agent));
+                let (registry, validation) = crate::commands_model::build_registry(&commands);
                 if let Err(error) = validation {
                     emit(BotEvent::ActionFailed(format!(
                         "some commands were not loaded: {error}"
@@ -338,13 +337,31 @@ async fn run_bot(
                 content: message.content.clone(),
             });
 
-            // @mention trigger: summon the agent without a slash command.
+            // Agent triggers: @mention or the agent's trigger name as a
+            // word in the message. Both require the agent to be enabled.
+            let config = agent.config.read().expect("agent config poisoned").clone();
+            let trigger_name = config.trigger_name.trim().to_lowercase();
+            let name_triggered = !is_bot
+                && config.enabled
+                && !trigger_name.is_empty()
+                && message
+                    .content
+                    .to_lowercase()
+                    .split_whitespace()
+                    .any(|word| {
+                        word.trim_start_matches('@')
+                            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+                            == trigger_name
+                    });
             let mentions_bot = !is_bot
+                && config.enabled
+                && config.mention_trigger
                 && agent
                     .bot_user_id()
                     .map(|bot_id| message.mentions.iter().any(|user| user.id.get() == bot_id))
                     .unwrap_or(false);
-            if mentions_bot {
+
+            if mentions_bot || name_triggered {
                 let agent = Arc::clone(&agent);
                 let http = Arc::clone(&http);
                 let scope = (
@@ -352,17 +369,22 @@ async fn run_bot(
                     message.channel_id.get(),
                 );
                 let invoker = (message.author.id.get(), message.author.username.clone());
-                // Strip the mention tag(s) from the front of the content.
-                let prompt = message
-                    .content
-                    .split_once('>')
-                    .map(|(_, rest)| rest.trim())
-                    .unwrap_or(&message.content)
-                    .to_owned();
+                let prompt = if mentions_bot {
+                    message
+                        .content
+                        .split_once('>')
+                        .map(|(_, rest)| rest.trim())
+                        .unwrap_or(&message.content)
+                        .to_owned()
+                } else {
+                    message.content.clone()
+                };
+                let typing_http = Arc::clone(&http);
+                let typing_channel = message.channel_id;
                 tokio::spawn(async move {
-                    if let Err(error) = http.trigger_typing(message.channel_id).await {
-                        tracing::debug!(%error, "typing indicator failed");
-                    }
+                    let _ = typing_http.trigger_typing(typing_channel).await;
+                });
+                tokio::spawn(async move {
                     let invoker_with_name = (invoker.0, invoker.1.clone());
                     match crate::agent::run_agent(
                         http.clone(),
@@ -385,10 +407,14 @@ async fn run_bot(
                             }
                         }
                         Err(error) => {
+                            // One error message to Discord, then log only.
                             let _ = http
                                 .create_message(message.channel_id)
-                                .content(format!("⚠ {error}"))
+                                .content(
+                                    "There was an issue with the system. Please try again later.",
+                                )
                                 .await;
+                            tracing::error!(%error, "agent invocation failed");
                         }
                     }
                 });

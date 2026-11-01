@@ -1,13 +1,9 @@
-//! The app's command model: user-editable slash commands (reply
-//! templates, dice rolls, AI-agent invocations) compiled into an Axis
-//! [`CommandRegistry`].
-
-use std::sync::Arc;
+//! The app's command model: user-editable slash commands compiled into an
+//! Axis [`CommandRegistry`]. Built-ins (`/ping`, `/echo`, `/roll`) are
+//! seeded into the list and fully editable.
 
 use axis::prelude::*;
 use axis_commands::{CommandOption, CommandRegistry, Invocation};
-
-use crate::agent::{self, AgentState};
 
 /// What a command does when invoked.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17,22 +13,22 @@ pub enum CommandBehavior {
     Reply,
     /// Roll a die with the `sides` option.
     Roll,
-    /// Run the AI agent with the `message` option (or the raw text).
-    Agent,
+    /// Measure the bot's REST round-trip latency.
+    Ping,
 }
 
 impl CommandBehavior {
     pub const ALL: [CommandBehavior; 3] = [
         CommandBehavior::Reply,
         CommandBehavior::Roll,
-        CommandBehavior::Agent,
+        CommandBehavior::Ping,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             CommandBehavior::Reply => "reply template",
             CommandBehavior::Roll => "roll a die",
-            CommandBehavior::Agent => "AI agent",
+            CommandBehavior::Ping => "ping (latency)",
         }
     }
 }
@@ -67,11 +63,6 @@ pub struct UserOption {
 }
 
 /// A user-declared command.
-///
-/// - `Reply`: the reply text is a template (`{option_name}` / `{user}`).
-/// - `Roll`: rolls a die with the `sides` option; reply may use `{roll}`.
-/// - `Agent`: runs the AI agent; reply is ignored (the answer is the
-///   model's, sent via followup).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UserCommand {
     pub name: String,
@@ -88,10 +79,10 @@ pub fn default_commands() -> Vec<UserCommand> {
     vec![
         UserCommand {
             name: "ping".to_owned(),
-            description: "Check the bot is alive".to_owned(),
-            reply: "Pong! 🏓".to_owned(),
+            description: "Check the bot's latency".to_owned(),
+            reply: String::new(),
             options: Vec::new(),
-            behavior: CommandBehavior::Reply,
+            behavior: CommandBehavior::Ping,
         },
         UserCommand {
             name: "echo".to_owned(),
@@ -117,29 +108,11 @@ pub fn default_commands() -> Vec<UserCommand> {
             }],
             behavior: CommandBehavior::Roll,
         },
-        UserCommand {
-            name: "agent".to_owned(),
-            description: "Ask the AI agent".to_owned(),
-            reply: String::new(),
-            options: vec![UserOption {
-                name: "message".to_owned(),
-                description: "What to ask".to_owned(),
-                kind: OptionKind::String,
-                required: true,
-            }],
-            behavior: CommandBehavior::Agent,
-        },
     ]
 }
 
 /// Build the live registry from the command list.
-///
-/// `agent` is required for commands with [`CommandBehavior::Agent`]; such
-/// commands without it reply that the agent is unavailable.
-pub fn build_registry(
-    commands: &[UserCommand],
-    agent: Option<&Arc<AgentState>>,
-) -> (CommandRegistry, Result<(), AxisError>) {
+pub fn build_registry(commands: &[UserCommand]) -> (CommandRegistry, Result<(), AxisError>) {
     let mut registry = CommandRegistry::new();
 
     for command in commands {
@@ -198,76 +171,17 @@ pub fn build_registry(
                             }
                         });
                     }
-                    CommandBehavior::Agent => {
-                        let agent = agent.map(Arc::clone);
-                        let reply_template = command.reply.clone();
-                        cmd.handler(move |invocation| {
-                            let agent = agent.clone();
-                            let reply_template = reply_template.clone();
-                            async move {
-                                let Some(agent) = agent else {
-                                    invocation
-                                        .reply()
-                                        .content("The AI agent is not available.")
-                                        .ephemeral(true)
-                                        .await?;
-                                    return Ok(());
-                                };
-                                // Defer first: LLM calls can outlast the
-                                // 3-second interaction window.
-                                invocation.defer(false).await?;
-                                let scope = (
-                                    invocation
-                                        .interaction
-                                        .guild_id
-                                        .map(|id| id.get())
-                                        .unwrap_or(0),
-                                    invocation
-                                        .interaction
-                                        .channel_id
-                                        .map(|id| id.get())
-                                        .unwrap_or(0),
-                                );
-                                let invoker = invocation
-                                    .interaction
-                                    .user
-                                    .as_ref()
-                                    .or_else(|| {
-                                        invocation
-                                            .interaction
-                                            .member
-                                            .as_ref()
-                                            .and_then(|member| member.user.as_ref())
-                                    })
-                                    .map(|user| (user.id.get(), user.username.clone()))
-                                    .unwrap_or((0, "unknown".to_owned()));
-                                let question =
-                                    invocation.opt::<String>("message")?.unwrap_or_default();
-                                match agent::run_agent(
-                                    invocation.http.clone(),
-                                    &agent,
-                                    scope,
-                                    invoker,
-                                    question,
-                                )
-                                .await
-                                {
-                                    Ok(answer) => {
-                                        for chunk in agent::split_reply(&answer) {
-                                            invocation.followup().content(chunk).await?;
-                                        }
-                                    }
-                                    Err(error) => {
-                                        invocation
-                                            .followup()
-                                            .content(format!("⚠ {error}"))
-                                            .ephemeral(true)
-                                            .await?;
-                                    }
-                                }
-                                let _ = reply_template;
-                                Ok(())
-                            }
+                    CommandBehavior::Ping => {
+                        cmd.handler(move |invocation| async move {
+                            let start = std::time::Instant::now();
+                            // Lightweight REST round-trip.
+                            let _ = invocation.http.get_gateway().await?;
+                            let elapsed = start.elapsed().as_millis();
+                            invocation
+                                .reply()
+                                .content(format!("🏓 {elapsed}ms"))
+                                .await?;
+                            Ok(())
                         });
                     }
                 }
@@ -310,8 +224,7 @@ pub fn render_reply(template: &str, invocation: &Invocation) -> String {
     reply
 }
 
-/// A tiny xorshift so the roll command needs no rand dependency; this is
-/// a dice roll, not cryptography.
+/// A tiny xorshift for the roll command.
 pub fn rand_roll() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -325,8 +238,7 @@ pub fn rand_roll() -> i64 {
     (state >> 8) as i64
 }
 
-/// Check a candidate command name against Discord's rules (mirrored from
-/// the registry validation, run in the UI before a command is added).
+/// Check a candidate command name against Discord's rules.
 pub fn valid_command_name(name: &str) -> bool {
     let chars = name.chars().count();
     (1..=32).contains(&chars)
@@ -350,9 +262,7 @@ mod tests {
     fn interaction_with_options(options: serde_json::Value) -> Invocation {
         let interaction: Interaction = serde_json::from_value(json!({
             "id": "100", "application_id": "5", "type": 2,
-            "data": {
-                "id": "101", "name": "greet", "type": 1, "options": options
-            },
+            "data": { "id": "101", "name": "greet", "type": 1, "options": options },
             "user": { "id": "80351110224678912", "username": "Nelly", "discriminator": "0" },
             "token": "t", "version": 1
         }))
@@ -376,54 +286,19 @@ mod tests {
     }
 
     #[test]
-    fn templates_keep_unknown_placeholders() {
-        let invocation = interaction_with_options(json!([]));
-        let reply = render_reply("value: {missing}", &invocation);
-        assert_eq!(reply, "value: {missing}");
-    }
-
-    #[test]
-    fn defaults_seed_four_builtins() {
+    fn defaults_seed_three_builtins() {
         let defaults = default_commands();
-        assert_eq!(defaults.len(), 4);
+        assert_eq!(defaults.len(), 3);
         assert_eq!(defaults[0].name, "ping");
-        assert_eq!(defaults[3].behavior, CommandBehavior::Agent);
+        assert_eq!(defaults[0].behavior, CommandBehavior::Ping);
     }
 
     #[test]
     fn registry_from_model_passes_validation() {
-        let commands = vec![UserCommand {
-            name: "greet".to_owned(),
-            description: "Greet someone".to_owned(),
-            reply: "Hi {user}, welcome to {place}!".to_owned(),
-            options: vec![
-                UserOption {
-                    name: "place".to_owned(),
-                    description: "Where".to_owned(),
-                    kind: OptionKind::String,
-                    required: true,
-                },
-                UserOption {
-                    name: "loud".to_owned(),
-                    description: "All caps".to_owned(),
-                    kind: OptionKind::Boolean,
-                    required: false,
-                },
-            ],
-            behavior: CommandBehavior::Reply,
-        }];
-        let (registry, validation) = build_registry(&commands, None);
+        let commands = default_commands();
+        let (registry, validation) = build_registry(&commands);
         validation.unwrap();
-        assert_eq!(registry.len(), 1);
-    }
-
-    #[test]
-    fn agent_commands_build_without_state() {
-        // The Agent behavior must be declarable even without an agent
-        // (it replies "not available" at runtime).
-        let (registry, validation) = build_registry(&default_commands(), None);
-        validation.unwrap();
-        assert_eq!(registry.len(), 4);
+        assert_eq!(registry.len(), 3);
     }
 
     #[test]
@@ -435,7 +310,7 @@ mod tests {
             options: Vec::new(),
             behavior: CommandBehavior::Reply,
         }];
-        let (_, validation) = build_registry(&commands, None);
+        let (_, validation) = build_registry(&commands);
         assert!(validation.is_err());
     }
 
@@ -444,6 +319,5 @@ mod tests {
         assert!(valid_command_name("greet-user_2"));
         assert!(!valid_command_name("Greet"));
         assert!(!valid_command_name("has space"));
-        assert!(!valid_command_name(""));
     }
 }

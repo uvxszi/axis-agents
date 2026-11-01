@@ -672,9 +672,9 @@ impl App {
                             );
                             ui.end_row();
                         }
-                        CommandBehavior::Agent => {
+                        CommandBehavior::Ping => {
                             ui.label("Reply");
-                            ui.weak("(unused — the agent answers via followup)");
+                            ui.weak("(unused — ping measures latency)");
                             ui.end_row();
                         }
                     }
@@ -761,8 +761,7 @@ impl App {
                 .add_enabled(running, egui::Button::new("⇅  Sync to Discord (global)"))
                 .clicked()
             {
-                let (registry, validation) =
-                    commands_model::build_registry(&self.config.commands, Some(&self.bot.agent()));
+                let (registry, validation) = commands_model::build_registry(&self.config.commands);
                 match validation {
                     Ok(()) => {
                         self.bot.update_registry(registry);

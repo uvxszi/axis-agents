@@ -31,26 +31,6 @@ impl AppConfig {
         if !self.seeded {
             self.commands = crate::commands_model::default_commands();
             self.seeded = true;
-        } else if !self.commands.iter().any(|command| {
-            matches!(
-                command.behavior,
-                crate::commands_model::CommandBehavior::Agent
-            )
-        }) {
-            // The AI agent command is the app's core feature; restore it
-            // if the user removed every agent command.
-            if let Some(agent_default) =
-                crate::commands_model::default_commands()
-                    .into_iter()
-                    .find(|command| {
-                        matches!(
-                            command.behavior,
-                            crate::commands_model::CommandBehavior::Agent
-                        )
-                    })
-            {
-                self.commands.push(agent_default);
-            }
         }
     }
 }
@@ -126,8 +106,8 @@ mod tests {
         let mut config = config;
         config.seed_built_ins();
         assert!(config.seeded);
-        assert_eq!(config.commands.len(), 4);
-        assert!(config.commands.iter().any(|c| c.name == "agent"));
+        assert_eq!(config.commands.len(), 3);
+        assert!(config.commands.iter().any(|c| c.name == "ping"));
     }
 
     #[test]
@@ -159,24 +139,4 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn agent_command_is_restored_if_removed() {
-        let path = std::env::temp_dir().join("axis_bot_studio_restore.json");
-        let mut config = AppConfig {
-            seeded: true,
-            ..AppConfig::default()
-        };
-        config.commands.clear();
-        save(&path, &config).unwrap();
-        let mut loaded = load(&path);
-        loaded.seed_built_ins();
-        assert!(
-            loaded
-                .commands
-                .iter()
-                .any(|c| matches!(c.behavior, CommandBehavior::Agent)),
-            "the /agent command must always exist"
-        );
-        let _ = std::fs::remove_file(path);
-    }
 }
