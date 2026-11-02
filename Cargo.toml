@@ -1,7 +1,7 @@
 [package]
-name = "axis_bot_studio"
-description = "A small desktop app that runs an Axis Discord bot: paste a token, set up commands, watch it live"
-version = "0.1.0"
+name = "axis_agents"
+description = "Run a team of autonomous AI agents on Discord: each agent is its own bot, with memory, tools, and a shared coordination channel"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -14,20 +14,48 @@ publish = false
 # Empty workspace table: detach from the parent library workspace.
 [workspace]
 
+[[bin]]
+name = "axis_agents"
+path = "src/main.rs"
+
 [dependencies]
 axis = { path = "../crates/axis" }
 axis-commands = { path = "../crates/axis-commands" }
+axis-voice = { path = "../crates/axis-voice" }
 eframe = { version = "0.33", default-features = false, features = [
     "glow",
     "default_fonts",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+egui = "0.33"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net", "fs"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+ab_glyph = "0.2"
+epaint_default_fonts = "0.33"
+fastrand = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-egui = "0.33"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+
+# Audio and encryption run 50 times a second; keep them fast in debug builds.
+[profile.dev.package.unsafe-libopus]
+opt-level = 3
+[profile.dev.package.davey]
+opt-level = 3
+[profile.dev.package.openmls]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.axis-voice]
+opt-level = 2
