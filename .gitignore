@@ -1,0 +1,10 @@
+/target
+
+# Environment / secrets (never commit tokens)
+.env
+.env.*
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp

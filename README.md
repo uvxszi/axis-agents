@@ -1,7 +1,7 @@
 # Axis Agents
 
 A small desktop app (single `.exe`) that runs an AI-powered Discord bot
-built on the [Axis](../README.md) library — paste your token, set up
+built on the [Axis](https://github.com/uvxszi/axis) library — paste your token, set up
 slash commands, configure an LLM agent with permission-gated tools, and
 watch the gateway live.
 
@@ -10,13 +10,14 @@ watch the gateway live.
 ## Build
 
 ```sh
-cd app
 cargo build --release
 ```
 
-The binary lands at `app/target/release/axis_bot_studio.exe` (~11 MB).
-This crate is a separate workspace on purpose: the GUI stack (eframe)
-needs windowing libraries the library CI does not.
+The binary lands at `target/release/axis_agents.exe`. Cargo downloads
+[Axis](https://github.com/uvxszi/axis) and
+[axis-voice](https://github.com/uvxszi/axis-voice) from GitHub; the exact
+versions used are pinned in `Cargo.lock`. Run `cargo update -p axis -p
+axis-voice` to pick up newer commits of either.
 
 ## Running
 

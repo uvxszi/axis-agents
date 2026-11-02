@@ -6,22 +6,18 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 publish = false
-
-# Independent from the library workspace: this crate pulls in the GUI
-# stack (eframe), which needs system windowing libraries. Build with
-# `cargo build --release` in this directory.
-
-# Empty workspace table: detach from the parent library workspace.
-[workspace]
+repository = "https://github.com/uvxszi/axis-agents"
 
 [[bin]]
 name = "axis_agents"
 path = "src/main.rs"
 
 [dependencies]
-axis = { path = "../crates/axis" }
-axis-commands = { path = "../crates/axis-commands" }
-axis-voice = { path = "../crates/axis-voice" }
+# The Axis Discord library and its voice add-on, from GitHub (pinned in
+# Cargo.lock; `cargo update -p axis -p axis-voice` takes newer commits).
+axis = { git = "https://github.com/uvxszi/axis" }
+axis-commands = { git = "https://github.com/uvxszi/axis" }
+axis-voice = { git = "https://github.com/uvxszi/axis-voice" }
 eframe = { version = "0.33", default-features = false, features = [
     "glow",
     "default_fonts",
