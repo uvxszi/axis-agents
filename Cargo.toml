@@ -44,6 +44,14 @@ opt-level = 3
 lto = "thin"
 codegen-units = 4
 
+# Debug and test builds: keep line numbers for the app's own panics and
+# backtraces, but no debugger symbols for dependencies. Most of a debug
+# build's size is those symbols.
+[profile.dev]
+debug = "line-tables-only"
+[profile.dev.package."*"]
+debug = false
+
 # Audio and encryption run 50 times a second; keep them fast in debug builds.
 [profile.dev.package.unsafe-libopus]
 opt-level = 3
