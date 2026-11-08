@@ -115,7 +115,7 @@ fn request_line(text: &str) -> (String, String) {
 }
 
 fn mock_discord(method: &str, path: &str, body: &[u8]) -> (u16, String) {
-    let body_snippet: String = String::from_utf8_lossy(body).chars().take(300).collect();
+    let body_snippet: String = String::from_utf8_lossy(body).chars().take(4000).collect();
     discord_log()
         .lock()
         .unwrap()
@@ -140,7 +140,18 @@ fn mock_discord(method: &str, path: &str, body: &[u8]) -> (u16, String) {
     }
 }
 
-fn mock_llm(_method: &str, _path: &str, _body: &[u8]) -> (u16, String) {
+fn mock_llm(_method: &str, _path: &str, body: &[u8]) -> (u16, String) {
+    // Background calls (private summaries, judgments) get canned answers
+    // so they never eat a scripted turn.
+    if body
+        .windows(b"writer's private memory".len())
+        .any(|w| w == b"writer's private memory")
+    {
+        return (
+            200,
+            json!({ "choices": [{ "message": { "role": "assistant", "content": "Flood rising; Mara investigating the water's meaning." }, "finish_reason": "stop" }] }).to_string(),
+        );
+    }
     let entered = LLM_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
     LLM_MAX_IN_FLIGHT.fetch_max(entered, Ordering::SeqCst);
     LLM_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -198,7 +209,7 @@ const GUILD: u64 = 50;
 const CHANNEL: u64 = 100;
 const ADMIN: u64 = 1;
 const BOT: u64 = 7;
-const PLEB: u64 = 2;
+const PLEB: u64 = 102;
 
 fn member_info(id: u64, name: &str, roles: Vec<u64>) -> axis_agents::runtime::world::MemberInfo {
     axis_agents::runtime::world::MemberInfo {
@@ -257,6 +268,11 @@ fn seed_world(core: &Arc<AgentCore>) {
         state
             .members
             .insert(PLEB, member_info(PLEB, "simmember", vec![]));
+        // The bot needs a role above other members for moderation tools'
+        // role-hierarchy checks (check_target looks up my_id's roles here).
+        let mut bot_info = member_info(BOT, "zz_bot", vec![60]);
+        bot_info.bot = true;
+        state.members.insert(BOT, bot_info);
     });
     core.world.set_me(
         serde_json::from_value(
@@ -777,6 +793,403 @@ async fn scenario_live_edited_answer(core: &Arc<AgentCore>) -> Result<String, St
     Ok("status posted fast, progress edited, answer edited in place".to_owned())
 }
 
+// --- Scenarios: long-form sections + numbered user picks -----------------------------
+
+async fn scenario_long_form_sections(core: &Arc<AgentCore>) -> Result<String, String> {
+    // A chapter request: the model writes real prose section by section
+    // via write_section; the private summary keeps its context flat; the
+    // finished document is saved and attached.
+    set_script(vec![
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("write_section", json!({
+                    "text": "Chapter One.
+
+The rain had not stopped for nine days, and the streets of Velle ran with it..."
+                }))] }),
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("write_section", json!({
+                    "text": "By morning the flood had reached the lower market, and Mara knew what the water meant..."
+                }))] }),
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("write_section", json!({
+                    "text": "She reached the archive at dusk. The doors were already open.",
+                    "finished": true,
+                    "name": "chapter_one.txt"
+                }))] }),
+        json!({ "role": "assistant", "content": "Chapter one is written in full — the file is below." }),
+    ]);
+    brain::run(
+        core,
+        job(
+            admin_principal(core),
+            "magi write me a full chapter of a story about a flood",
+        ),
+    )
+    .await;
+    let path = axis_agents::paths::data_dir()
+        .join("sandbox")
+        .join(CHANNEL.to_string())
+        .join("chapter_one.txt");
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        let feed: Vec<String> = core
+            .live()
+            .feed_snapshot(Some(&core.id), 10)
+            .iter()
+            .map(|item| format!("[{:?}] {}", item.kind, item.text))
+            .collect();
+        format!(
+            "chapter missing: {e}
+feed:
+  {}",
+            feed.join(
+                "
+  "
+            )
+        )
+    })?;
+    assert!(text.contains("nine days"), "first section missing");
+    assert!(text.contains("lower market"), "second section missing");
+    assert!(text.contains("archive at dusk"), "third section missing");
+    // The private summary must never be posted to Discord.
+    let posts = discord_calls("POST");
+    let leaked_summary = posts.iter().any(|(_, b)| b.contains("PRIVATE NOTES"));
+    if leaked_summary {
+        return Err("the private summary leaked into chat".to_owned());
+    }
+    Ok("full chapter written across sections, saved, private notes never posted".to_owned())
+}
+
+async fn scenario_numbered_user_pick(core: &Arc<AgentCore>) -> Result<String, String> {
+    // find_users lists numbered candidates; the moderation tool then
+    // resolves `#2` to that exact ID — the model never writes an ID.
+    let ctx = ToolCtx {
+        core: Arc::clone(core),
+        guild_id: Some(GUILD),
+        channel_id: CHANNEL,
+        message_id: None,
+        requester: admin_principal(core),
+        autonomous: false,
+        replies_here: true,
+        media: Arc::new(std::sync::Mutex::new(
+            axis_agents::tools::images::Media::default(),
+        )),
+        inputs: vec![],
+    };
+    let listing = axis_agents::tools::users::find_users(&ctx, &serde_json::json!({ "like": "" }))
+        .await
+        .map_err(|e| format!("find_users failed: {e}"))?;
+    assert!(listing.contains("[1]"), "numbered list missing: {listing}");
+    assert!(listing.contains("[2]"), "candidate 2 missing: {listing}");
+
+    // Verify pick_users inspects and understands the selection
+    let inspection =
+        axis_agents::tools::users::pick_users(&ctx, &serde_json::json!({ "pick": "2" }))
+            .await
+            .map_err(|e| format!("pick_users failed: {e}"))?;
+    assert!(
+        inspection.contains("simmember"),
+        "pick_users missing simmember: {inspection}"
+    );
+    assert!(
+        inspection.contains("102"),
+        "pick_users missing ID 102: {inspection}"
+    );
+
+    // kick_member with `user: "#2"` resolves through the list to user 102
+    // (the second member) — the model never types an ID.
+    let call = axis_agents::llm::ToolCall {
+        id: "sim".to_owned(),
+        name: "kick_member".to_owned(),
+        arguments: serde_json::json!({ "user": "#2", "reason": "sim pick" }),
+    };
+    let outcome = axis_agents::tools::execute(&ctx, &call).await;
+    if outcome.text.starts_with("confirmation pending") {
+        let feed_note = outcome.text.clone();
+        return Err(format!(
+            "kick hit the confirmation gate (unexpected): {feed_note}"
+        ));
+    }
+    if !outcome.ok {
+        return Err(format!("kick failed: {}", outcome.text));
+    }
+    let deletes = discord_calls("DELETE");
+    let kicked = deletes.iter().any(|(p, _)| p.contains("members/102"));
+    if !kicked {
+        return Err(format!(
+            "#2 did not resolve to member 102 (deletes: {deletes:?})"
+        ));
+    }
+    Ok(
+        "#2 resolved to exact member 102; inspected with pick_users, no ID was ever typed"
+            .to_owned(),
+    )
+}
+
+async fn scenario_interactive_voting(core: &Arc<AgentCore>) -> Result<String, String> {
+    let ctx = ToolCtx {
+        core: Arc::clone(core),
+        guild_id: Some(GUILD),
+        channel_id: CHANNEL,
+        message_id: None,
+        requester: admin_principal(core),
+        autonomous: false,
+        replies_here: true,
+        media: Arc::new(std::sync::Mutex::new(
+            axis_agents::tools::images::Media::default(),
+        )),
+        inputs: vec![],
+    };
+
+    // 1. Create an anonymous vote with 3 options and a 2-hour timer in the channel
+    let call = axis_agents::llm::ToolCall {
+        id: "sim".to_owned(),
+        name: "create_vote".to_owned(),
+        arguments: serde_json::json!({
+            "question": "What should we play tonight?",
+            "options": ["Minecraft", "Valorant", "Lethal Company"],
+            "anonymous": true,
+            "ends": "in 2 hours",
+            "channel": "general"
+        }),
+    };
+    let outcome = axis_agents::tools::execute(&ctx, &call).await;
+    if !outcome.ok {
+        return Err(format!("create_vote failed: {}", outcome.text));
+    }
+    assert!(
+        outcome.text.contains("anonymous vote"),
+        "confirmation text missing anonymous note"
+    );
+    assert!(
+        outcome.text.contains("3 options"),
+        "confirmation text missing option count"
+    );
+
+    // Verify Discord received the message with interactive buttons
+    let posts = discord_calls("POST");
+    let vote_post = posts.iter().find(|(p, b)| {
+        p.contains("/channels/100/messages") && b.contains("What should we play tonight?")
+    });
+    let Some((_, body)) = vote_post else {
+        return Err("vote message was not posted to Discord".to_owned());
+    };
+    assert!(body.contains("axis_vote:0"), "button 0 missing");
+    assert!(body.contains("axis_vote:1"), "button 1 missing");
+    assert!(body.contains("axis_vote:2"), "button 2 missing");
+    assert!(
+        body.contains("Anonymous Vote"),
+        "anonymous notice missing from embed"
+    );
+
+    // 2. Cast a vote via button component
+    let interaction_json = serde_json::json!({
+        "id": "888",
+        "application_id": "7",
+        "type": 3,
+        "guild_id": GUILD.to_string(),
+        "channel_id": CHANNEL.to_string(),
+        "token": "sim-token",
+        "version": 1,
+        "message": serde_json::from_str::<serde_json::Value>(&message_json()).unwrap(),
+        "member": {
+            "user": { "id": "102", "username": "simmember", "discriminator": "0" },
+            "roles": [], "deaf": false, "mute": false
+        },
+        "data": {
+            "component_type": 2,
+            "custom_id": "axis_vote:0"
+        }
+    });
+    let interaction: axis::model::Interaction = serde_json::from_value(interaction_json)
+        .map_err(|e| format!("interaction parse failed: {e}"))?;
+
+    let handled = axis_agents::runtime::community::on_component(core, &interaction).await;
+    if !handled {
+        return Err("button interaction was not handled by on_component".to_owned());
+    }
+
+    // 3. End the vote early via end_vote tool
+    let end_call = axis_agents::llm::ToolCall {
+        id: "sim".to_owned(),
+        name: "end_vote".to_owned(),
+        arguments: serde_json::json!({
+            "vote": "play"
+        }),
+    };
+    let end_outcome = axis_agents::tools::execute(&ctx, &end_call).await;
+    if !end_outcome.ok {
+        return Err(format!("end_vote failed: {}", end_outcome.text));
+    }
+    assert!(
+        end_outcome.text.contains("Ended vote"),
+        "end_vote result unexpected: {}",
+        end_outcome.text
+    );
+    assert!(
+        end_outcome.text.contains("Minecraft"),
+        "winner missing from result: {}",
+        end_outcome.text
+    );
+
+    Ok("interactive vote created with buttons, anonymous ballot unsealed and ended".to_owned())
+}
+
+async fn scenario_gif_and_sticker_search_and_pick(core: &Arc<AgentCore>) -> Result<String, String> {
+    let ctx = ToolCtx {
+        core: Arc::clone(core),
+        guild_id: Some(GUILD),
+        channel_id: CHANNEL,
+        message_id: None,
+        requester: admin_principal(core),
+        autonomous: false,
+        replies_here: true,
+        media: Arc::new(std::sync::Mutex::new(
+            axis_agents::tools::images::Media::default(),
+        )),
+        inputs: vec![],
+    };
+
+    // 1. Verify safety filter prevents NSFW searches
+    let nsfw_call = axis_agents::llm::ToolCall {
+        id: "sim-nsfw".to_owned(),
+        name: "find_gifs".to_owned(),
+        arguments: serde_json::json!({ "query": "free porn nsfw" }),
+    };
+    let nsfw_outcome = axis_agents::tools::execute(&ctx, &nsfw_call).await;
+    assert!(!nsfw_outcome.ok, "nsfw search should have been rejected");
+    assert!(
+        nsfw_outcome.text.contains("disabled")
+            || nsfw_outcome.text.contains("NSFW")
+            || nsfw_outcome.text.contains("denied"),
+        "error message should cite safety: {}",
+        nsfw_outcome.text
+    );
+
+    // 2. Set mock candidates to test numbering, slug names, and pick tools
+    let candidates = vec![
+        axis_agents::tools::gifs::CandidateGif {
+            id: 1,
+            name: "happy-cat-jumping".to_owned(),
+            title: "Happy Cat Jumping GIF".to_owned(),
+            url: "https://gifdb.com/images/thumbnail/cat-jumping.gif".to_owned(),
+            page_url: "https://gifdb.com/gif/cat-jumping".to_owned(),
+            provider: "GIFDB".to_owned(),
+            is_sticker: false,
+            width: 400,
+            height: 400,
+        },
+        axis_agents::tools::gifs::CandidateGif {
+            id: 2,
+            name: "party-parrot-sticker".to_owned(),
+            title: "Party Parrot Dance".to_owned(),
+            url: "https://gifdb.com/images/thumbnail/party-parrot.gif".to_owned(),
+            page_url: "https://gifdb.com/gif/party-parrot".to_owned(),
+            provider: "GIFDB".to_owned(),
+            is_sticker: true,
+            width: 300,
+            height: 300,
+        },
+    ];
+    let listing = axis_agents::tools::gifs::set_candidates(CHANNEL, candidates);
+    assert!(listing.contains("[1]"), "candidate 1 missing from listing");
+    assert!(
+        listing.contains("happy-cat-jumping"),
+        "slug 1 missing from listing"
+    );
+    assert!(listing.contains("[2]"), "candidate 2 missing from listing");
+    assert!(
+        listing.contains("[Sticker]"),
+        "sticker tag missing from listing"
+    );
+
+    // 3. Resolve by number #1 and by slug name
+    let c1 = axis_agents::tools::gifs::resolve(CHANNEL, "#1")
+        .map_err(|e| format!("resolve #1 failed: {e}"))?;
+    assert_eq!(c1.name, "happy-cat-jumping");
+
+    let c2 = axis_agents::tools::gifs::resolve(CHANNEL, "party-parrot-sticker")
+        .map_err(|e| format!("resolve slug failed: {e}"))?;
+    assert_eq!(c2.id, 2);
+
+    // 4. send_gif as embed link (as_attachment: false)
+    let send_call = axis_agents::llm::ToolCall {
+        id: "sim-send".to_owned(),
+        name: "send_gif".to_owned(),
+        arguments: serde_json::json!({
+            "gif": "#1",
+            "as_attachment": false
+        }),
+    };
+    let send_outcome = axis_agents::tools::execute(&ctx, &send_call).await;
+    assert!(send_outcome.ok, "send_gif failed: {}", send_outcome.text);
+    assert!(
+        send_outcome.text.contains("cat-jumping.gif"),
+        "expected GIF link in outcome: {}",
+        send_outcome.text
+    );
+
+    // 5. Verify recently-used tracking and "different" sticker resolution
+    assert!(
+        axis_agents::tools::gifs::is_recently_used(CHANNEL, &c1),
+        "candidate 1 should now be recorded as used"
+    );
+    assert!(
+        !axis_agents::tools::gifs::is_recently_used(CHANNEL, &c2),
+        "candidate 2 should still be unused"
+    );
+
+    // Asking for a "different" sticker picks candidate 2 automatically
+    let diff = axis_agents::tools::gifs::resolve(CHANNEL, "different")
+        .map_err(|e| format!("resolve 'different' failed: {e}"))?;
+    assert_eq!(diff.name, "party-parrot-sticker");
+
+    // send_sticker with sticker: "different"
+    let diff_call = axis_agents::llm::ToolCall {
+        id: "sim-diff".to_owned(),
+        name: "send_sticker".to_owned(),
+        arguments: serde_json::json!({
+            "sticker": "different",
+            "as_attachment": false
+        }),
+    };
+    let diff_outcome = axis_agents::tools::execute(&ctx, &diff_call).await;
+    assert!(
+        diff_outcome.ok,
+        "send_sticker failed: {}",
+        diff_outcome.text
+    );
+    assert!(
+        diff_outcome.text.contains("party-parrot.gif"),
+        "expected party-parrot sticker link: {}",
+        diff_outcome.text
+    );
+
+    // 6. list_recent_gifs shows the history of media used in this channel
+    let recent_call = axis_agents::llm::ToolCall {
+        id: "sim-recent".to_owned(),
+        name: "list_recent_gifs".to_owned(),
+        arguments: serde_json::json!({}),
+    };
+    let recent_outcome = axis_agents::tools::execute(&ctx, &recent_call).await;
+    assert!(
+        recent_outcome.ok,
+        "list_recent_gifs failed: {}",
+        recent_outcome.text
+    );
+    assert!(
+        recent_outcome.text.contains("happy-cat-jumping"),
+        "recent history missing cat: {}",
+        recent_outcome.text
+    );
+    assert!(
+        recent_outcome.text.contains("party-parrot-sticker"),
+        "recent history missing parrot: {}",
+        recent_outcome.text
+    );
+
+    Ok("GIF & sticker search filtered NSFW; history tracked and 'different' resolved unused sticker".to_owned())
+}
+
 // --- Main --------------------------------------------------------------------------
 
 fn main() {
@@ -837,11 +1250,25 @@ async fn sim_main(scratch: &std::path::Path) {
         ("live edited answer (one message, start to end)", |c| {
             Box::pin(scenario_live_edited_answer(c))
         }),
+        ("long-form written in sections", |c| {
+            Box::pin(scenario_long_form_sections(c))
+        }),
+        ("numbered user pick resolves exactly", |c| {
+            Box::pin(scenario_numbered_user_pick(c))
+        }),
+        (
+            "interactive voting with buttons and anonymous ballot",
+            |c| Box::pin(scenario_interactive_voting(c)),
+        ),
+        (
+            "GIF & sticker search, safety filter, and numbered pick",
+            |c| Box::pin(scenario_gif_and_sticker_search_and_pick(c)),
+        ),
     ];
 
     println!("Axis Agents simulation — real pipeline, mocked Discord + LLM\n");
     let mut passed = 0;
-    for (name, run) in scenarios {
+    for (name, run) in &scenarios {
         reset_between();
         match run(&core).await {
             Ok(report) => {
@@ -851,9 +1278,9 @@ async fn sim_main(scratch: &std::path::Path) {
             Err(error) => println!("  FAIL  {name}: {error}"),
         }
     }
-    println!("\n{passed}/11 scenarios passed.");
+    println!("\n{passed}/{} scenarios passed.", scenarios.len());
     let _ = std::fs::remove_dir_all(scratch);
-    if passed < 11 {
+    if passed < scenarios.len() {
         std::process::exit(1);
     }
 }

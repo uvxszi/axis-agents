@@ -407,7 +407,29 @@ pub async fn send_dm(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             private.join(", ")
         ));
     }
-    let target = one_person(ctx, &query, &servers).await?;
+    // A numbered pick from find_users resolves first (exact ID, no
+    // transcription).
+    let target = match super::users::resolve(ctx.channel_id, &query, false)? {
+        Some(picked) => {
+            let user = ctx
+                .guild_id
+                .and_then(|g| ctx.core.world.member(g, picked[0]));
+            Found {
+                user_id: picked[0],
+                username: user
+                    .as_ref()
+                    .map(|m| m.username.clone())
+                    .unwrap_or_else(|| format!("user {}", picked[0])),
+                display: user
+                    .and_then(|m| m.nick.clone())
+                    .unwrap_or_else(|| format!("user {}", picked[0])),
+                servers: servers.iter().map(|(_, n)| n.clone()).collect(),
+                score: 100,
+                bot: false,
+            }
+        }
+        None => one_person(ctx, &query, &servers).await?,
+    };
     // AAv2: DMs are not server actions — no server permission applies.
     // Anyone who shares a server with the target may ask (Discord itself
     // blocks DMs the recipient has closed).

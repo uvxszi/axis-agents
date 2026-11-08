@@ -32,6 +32,36 @@ pub async fn resolve_member(ctx: &ToolCtx, query: &str) -> Result<MemberInfo, St
         }
     }
     let query = query.trim();
+    // A numbered pick from the last find_users list resolves to an exact
+    // ID before anything else — the model never transcribes IDs.
+    if let Some(picked) = super::users::resolve(ctx.channel_id, query, false)? {
+        if let Some(member) = ctx.core.world.member(guild_id, picked[0]) {
+            return Ok(member);
+        }
+        if let Ok(member) = ctx
+            .core
+            .http
+            .get_member(GuildId::new(guild_id), UserId::new(picked[0]))
+            .await
+        {
+            ctx.core.world.upsert_member(guild_id, &member);
+            return Ok(ctx.core.world.member(guild_id, picked[0]).unwrap());
+        }
+        // A bare ID (not a member here): the minimum the tools need.
+        let username = format!("user {}", picked[0]);
+        return Ok(MemberInfo {
+            user_id: picked[0],
+            username: username.clone(),
+            global_name: None,
+            nick: None,
+            roles: Vec::new(),
+            bot: false,
+            joined_at: None,
+            timeout_until: None,
+            avatar: None,
+            guild_avatar: None,
+        });
+    }
     let lower = query.to_lowercase();
     if matches!(lower.as_str(), "me" | "myself" | "requester" | "i") && ctx.requester.user_id != 0 {
         if let Some(member) = ctx.core.world.member(guild_id, ctx.requester.user_id) {

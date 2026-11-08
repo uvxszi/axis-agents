@@ -1517,6 +1517,7 @@ fn is_work_tool(name: &str) -> bool {
             | "find_in_document"
             | "step_done"
             | "design_rank_card"
+            | "write_section"
             | "wait"
     )
 }

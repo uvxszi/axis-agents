@@ -33,6 +33,14 @@ const MAX_SANDBOX: u64 = 64 * 1024 * 1024;
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SCRIPT_OUTPUT: usize = 2000;
 
+pub(crate) fn sandbox_dir_pub(channel_id: u64) -> PathBuf {
+    sandbox_dir(channel_id)
+}
+
+pub(crate) fn sanitize_name_pub(name: &str) -> Result<String, String> {
+    sanitize_name(name)
+}
+
 fn sandbox_dir(channel_id: u64) -> PathBuf {
     let dir = paths::data_dir()
         .join("sandbox")

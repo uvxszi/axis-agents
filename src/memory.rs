@@ -882,6 +882,8 @@ pub struct GuildKnowledge {
     pub mod_log: VecDeque<ModAction>,
     pub tickets: TicketSystem,
     pub giveaways: Vec<Giveaway>,
+    #[serde(default)]
+    pub votes: Vec<Vote>,
     /// Who may change the agents' server settings (set by the owner).
     pub settings_access: SettingsAccess,
     /// Whether big/irreversible actions need a confirmation button.
@@ -1232,6 +1234,37 @@ pub struct Giveaway {
     pub entrants: Vec<u64>,
     pub ended: bool,
     pub picked: Vec<u64>,
+}
+
+/// An interactive button-based vote or poll in a Discord channel.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Vote {
+    pub agent_id: String,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub question: String,
+    pub options: Vec<String>,
+    pub host_id: u64,
+    /// Unix timestamp in millis when this vote ends.
+    pub ends: i64,
+    /// Anonymous voting: votes are secret and only revealed when the vote ends.
+    pub anonymous: bool,
+    /// Map of user_id -> option_index (0-based).
+    pub votes: HashMap<u64, usize>,
+    pub ended: bool,
+}
+
+impl Vote {
+    pub fn tally(&self) -> Vec<usize> {
+        let mut counts = vec![0; self.options.len()];
+        for &opt in self.votes.values() {
+            if opt < counts.len() {
+                counts[opt] += 1;
+            }
+        }
+        counts
+    }
 }
 
 /// A support-ticket system an agent set up (like Ticket Tool): a panel

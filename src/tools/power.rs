@@ -743,30 +743,42 @@ pub async fn edit_server(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
     Ok("updated the server settings".to_owned())
 }
 
-/// "in 2 hours", "tomorrow", or an ISO time.
+/// "in 2 hours", "10m", "tomorrow", or an ISO time.
 fn parse_time(text: &str) -> Result<Timestamp, String> {
     let t = text.trim().to_lowercase();
     let now = now_ms();
     let relative = |ms: i64| Timestamp::from_unix_millis(now + ms);
-    if let Some(rest) = t.strip_prefix("in ") {
-        let mut parts = rest.split_whitespace();
-        let amount: f64 = parts.next().and_then(|n| n.parse().ok()).unwrap_or(1.0);
-        let unit = parts.next().unwrap_or("hours");
-        let ms = match unit.trim_end_matches('s') {
-            "minute" | "min" => 60_000.0,
-            "hour" | "hr" | "h" => 3_600_000.0,
-            "day" | "d" => 86_400_000.0,
-            "week" => 604_800_000.0,
-            _ => return Err(format!("can't read the time \"{text}\"")),
-        };
-        return relative((amount * ms) as i64).map_err(|e| e.to_string());
-    }
-    if t == "tomorrow" {
+    let stripped = t.strip_prefix("in ").unwrap_or(&t).trim();
+    if stripped == "tomorrow" {
         return relative(86_400_000).map_err(|e| e.to_string());
+    }
+    let mut parts = stripped.split_whitespace();
+    if let Some(first) = parts.next() {
+        let (num_str, unit_str) = if let Some(idx) = first.find(|c: char| c.is_alphabetic()) {
+            if idx > 0 {
+                (&first[..idx], &first[idx..])
+            } else {
+                ("", first)
+            }
+        } else {
+            (first, parts.next().unwrap_or("hours"))
+        };
+        if let Ok(amount) = num_str.parse::<f64>() {
+            let ms = match unit_str.trim_end_matches('s') {
+                "m" | "min" | "minute" => 60_000.0,
+                "h" | "hr" | "hour" => 3_600_000.0,
+                "d" | "day" => 86_400_000.0,
+                "w" | "week" => 604_800_000.0,
+                _ => 0.0,
+            };
+            if ms > 0.0 {
+                return relative((amount * ms) as i64).map_err(|e| e.to_string());
+            }
+        }
     }
     text.trim().parse::<Timestamp>().map_err(|_| {
         format!(
-            "can't read the time \"{text}\" — use \"in 2 hours\" or ISO like 2026-11-02T20:00:00Z"
+            "can't read the time \"{text}\" — use \"in 2 hours\", \"10m\", or ISO like 2026-11-02T20:00:00Z"
         )
     })
 }
@@ -1695,6 +1707,211 @@ pub async fn list_giveaways(ctx: &ToolCtx, _args: &Value) -> Result<String, Stri
     } else {
         lines.join("\n")
     })
+}
+
+// --- voting & polls -----------------------------------------------------------------
+
+fn parse_vote_options(args: &Value) -> Result<Vec<String>, String> {
+    if let Some(arr) = args.get("options").and_then(Value::as_array) {
+        let opts: Vec<String> = arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !opts.is_empty() {
+            return Ok(opts);
+        }
+    }
+    if let Some(s) = args.get("options").and_then(Value::as_str) {
+        let opts: Vec<String> = s
+            .split(['\n', ';'])
+            .flat_map(|line| {
+                if line.contains(',') && !line.contains(';') {
+                    line.split(',').collect::<Vec<_>>()
+                } else {
+                    vec![line]
+                }
+            })
+            .map(str::trim)
+            .map(|s| {
+                s.trim_start_matches(|c: char| {
+                    c.is_ascii_digit() || c == '.' || c == '-' || c == ')' || c == ' ' || c == '•'
+                })
+            })
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !opts.is_empty() {
+            return Ok(opts);
+        }
+    }
+    Err(
+        "give the voting `options` (an array like [\"Option 1\", \"Option 2\"] or a list)"
+            .to_owned(),
+    )
+}
+
+pub async fn create_vote(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
+    let guild_id = ctx.require_guild()?;
+    require_guild_perm(ctx, Permissions::SEND_MESSAGES)?;
+    let channel_id = resolve_channel(ctx, arg(args, "channel"))?;
+    let question = required(args, "question")?;
+    let options = parse_vote_options(args)?;
+    if options.len() < 2 {
+        return Err("voting needs at least 2 options".to_owned());
+    }
+    if options.len() > 25 {
+        return Err("voting supports up to 25 options (Discord limit for buttons)".to_owned());
+    }
+    let anonymous = flag(args, "anonymous").unwrap_or(false);
+    let ends_str = arg(args, "ends").unwrap_or_else(|| "in 24 hours".to_owned());
+    let ends_ts = parse_time(&ends_str)?;
+    let vote = crate::memory::Vote {
+        agent_id: ctx.core.id.clone(),
+        channel_id,
+        message_id: 0,
+        question: question.clone(),
+        options: options.clone(),
+        host_id: ctx.requester.user_id,
+        ends: ends_ts.as_unix_millis(),
+        anonymous,
+        votes: std::collections::HashMap::new(),
+        ended: false,
+    };
+    let created = crate::runtime::community::start_vote(&ctx.core, guild_id, vote).await?;
+    Ok(format!(
+        "Created {}vote \"{}\" with {} options in <#{channel_id}>. Ends <t:{}:R>.",
+        if anonymous { "anonymous " } else { "" },
+        created.question,
+        created.options.len(),
+        created.ends / 1000
+    ))
+}
+
+pub async fn end_vote(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
+    let guild_id = ctx.require_guild()?;
+    let channel_filter = resolve_channel(ctx, arg(args, "channel")).ok();
+    let target = arg(args, "vote").unwrap_or_default().trim().to_lowercase();
+
+    let found = ctx.core.hive.knowledge.guild(guild_id, |k| {
+        if let Ok(id) = target.parse::<u64>() {
+            if let Some(v) = k.votes.iter().find(|v| v.message_id == id && !v.ended) {
+                return Some((v.message_id, v.question.clone(), v.host_id));
+            }
+        }
+        if !target.is_empty() {
+            if let Some(v) = k.votes.iter().find(|v| {
+                !v.ended
+                    && v.question.to_lowercase().contains(&target)
+                    && channel_filter.map_or(true, |c| v.channel_id == c)
+            }) {
+                return Some((v.message_id, v.question.clone(), v.host_id));
+            }
+        }
+        let open: Vec<&crate::memory::Vote> = k
+            .votes
+            .iter()
+            .filter(|v| !v.ended && channel_filter.map_or(true, |c| v.channel_id == c))
+            .collect();
+        open.last()
+            .map(|v| (v.message_id, v.question.clone(), v.host_id))
+    });
+
+    let (message_id, question, host_id) = found.ok_or_else(|| {
+        if target.is_empty() {
+            "no running votes found to end".to_owned()
+        } else {
+            format!("no running vote matches \"{target}\"")
+        }
+    })?;
+    let _ = question;
+
+    if ctx.requester.user_id != host_id {
+        require_guild_perm(ctx, Permissions::MANAGE_MESSAGES)?;
+    }
+
+    let ended = crate::runtime::community::finish_vote(&ctx.core, guild_id, message_id).await?;
+    let total = ended.votes.len();
+    let tallies = ended.tally();
+    let max = tallies.iter().copied().max().unwrap_or(0);
+    let winners: Vec<String> = ended
+        .options
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| tallies[*i] == max && max > 0)
+        .map(|(_, name)| name.clone())
+        .collect();
+
+    let result_summary = if total == 0 {
+        "ended with no votes cast".to_owned()
+    } else if winners.len() == 1 {
+        format!("winner: **{}** with {}/{} votes", winners[0], max, total)
+    } else {
+        format!(
+            "tied between **{}** with {} votes each",
+            winners.join(", "),
+            max
+        )
+    };
+
+    Ok(format!(
+        "Ended vote \"{}\" ({}): {result_summary}. Results posted in <#{}>.",
+        ended.question,
+        if ended.anonymous {
+            "anonymous"
+        } else {
+            "public"
+        },
+        ended.channel_id
+    ))
+}
+
+pub async fn list_votes(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
+    let guild_id = ctx.require_guild()?;
+    let channel_filter = resolve_channel(ctx, arg(args, "channel")).ok();
+    let include_ended = flag(args, "include_ended").unwrap_or(false);
+
+    let votes: Vec<crate::memory::Vote> = ctx.core.hive.knowledge.guild(guild_id, |k| {
+        k.votes
+            .iter()
+            .filter(|v| {
+                (include_ended || !v.ended) && channel_filter.map_or(true, |c| v.channel_id == c)
+            })
+            .cloned()
+            .collect()
+    });
+
+    if votes.is_empty() {
+        return Ok("no running votes found".to_owned());
+    }
+
+    let mut out = format!(
+        "Found {} vote{}:\n",
+        votes.len(),
+        if votes.len() == 1 { "" } else { "s" }
+    );
+    for v in votes {
+        let status = if v.ended {
+            "[Ended]"
+        } else if v.anonymous {
+            "[Anonymous · Running]"
+        } else {
+            "[Running]"
+        };
+        out.push_str(&format!(
+            "- {} **{}** in <#{}>: {} options, {} total votes, ends <t:{}:R> (ID: {})\n",
+            status,
+            v.question,
+            v.channel_id,
+            v.options.len(),
+            v.votes.len(),
+            v.ends / 1000,
+            v.message_id
+        ));
+    }
+    Ok(out)
 }
 
 // --- settings, levels & stats ---------------------------------------------------------------
