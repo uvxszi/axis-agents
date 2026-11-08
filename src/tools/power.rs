@@ -13,7 +13,6 @@ use crate::memory::{StandingTask, TaskTrigger, now_ms};
 use crate::runtime::authority::PrincipalKind;
 use crate::runtime::live::FeedKind;
 use crate::runtime::tickets;
-use super::docs::section_index;
 
 fn label(ctx: &ToolCtx, channel_id: u64) -> String {
     ctx.core.channel_label(ctx.guild_id, channel_id)
@@ -29,21 +28,35 @@ fn require_guild_perm(ctx: &ToolCtx, perms: Permissions) -> Result<u64, String> 
     if ctx.requester.kind == PrincipalKind::Operator || ctx.acting_as_agent() {
         return Ok(guild_id);
     }
-    if ctx.requester.permissions.contains(perms) || ctx.requester.permissions.contains(Permissions::ADMINISTRATOR) {
+    if ctx.requester.permissions.contains(perms)
+        || ctx
+            .requester
+            .permissions
+            .contains(Permissions::ADMINISTRATOR)
+    {
         Ok(guild_id)
     } else {
-        Err(format!("denied: {} doesn't have the {perms:?} permission", ctx.requester.name))
+        Err(format!(
+            "denied: {} doesn't have the {perms:?} permission",
+            ctx.requester.name
+        ))
     }
 }
 
 fn id_of(value: &Value) -> Option<u64> {
-    value.get("id").and_then(Value::as_str).and_then(|s| s.parse().ok())
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse().ok())
 }
 
 fn find_role(ctx: &ToolCtx, guild_id: u64, query: &str) -> Result<(u64, String, i32), String> {
     ctx.core
         .world
-        .with_guild(guild_id, |g| g.find_role(query).map(|r| (r.id.get(), r.name.clone(), r.position)))
+        .with_guild(guild_id, |g| {
+            g.find_role(query)
+                .map(|r| (r.id.get(), r.name.clone(), r.position))
+        })
         .flatten()
         .ok_or_else(|| format!("no role matching \"{query}\""))
 }
@@ -51,7 +64,11 @@ fn find_role(ctx: &ToolCtx, guild_id: u64, query: &str) -> Result<(u64, String, 
 /// "send messages, view channel" → bits.
 fn permission_bits(list: &str) -> Result<u64, String> {
     let mut bits = 0u64;
-    for item in list.split([',', ';', '|']).map(str::trim).filter(|s| !s.is_empty()) {
+    for item in list
+        .split([',', ';', '|'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let name = item
             .to_uppercase()
             .replace([' ', '-'], "_")
@@ -67,7 +84,8 @@ fn permission_bits(list: &str) -> Result<u64, String> {
             "VOICE_STATUS" => "SET_VOICE_CHANNEL_STATUS".to_owned(),
             _ => name,
         };
-        let flag = Permissions::from_name(&name).ok_or_else(|| format!("unknown permission \"{item}\""))?;
+        let flag = Permissions::from_name(&name)
+            .ok_or_else(|| format!("unknown permission \"{item}\""))?;
         bits |= flag.bits();
     }
     Ok(bits)
@@ -86,14 +104,33 @@ pub async fn clone_channel(ctx: &ToolCtx, args: &Value) -> Result<String, String
         .await
         .map_err(discord_error)?;
     let name = arg(args, "name").unwrap_or_else(|| {
-        format!("{}-copy", original.get("name").and_then(Value::as_str).unwrap_or("channel"))
+        format!(
+            "{}-copy",
+            original
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("channel")
+        )
     });
     let mut body = json!({ "name": name });
     for key in [
-        "type", "topic", "nsfw", "rate_limit_per_user", "bitrate", "user_limit", "parent_id",
-        "permission_overwrites", "rtc_region", "video_quality_mode", "default_auto_archive_duration",
-        "default_reaction_emoji", "available_tags", "default_sort_order", "default_forum_layout",
-        "default_thread_rate_limit_per_user", "flags",
+        "type",
+        "topic",
+        "nsfw",
+        "rate_limit_per_user",
+        "bitrate",
+        "user_limit",
+        "parent_id",
+        "permission_overwrites",
+        "rtc_region",
+        "video_quality_mode",
+        "default_auto_archive_duration",
+        "default_reaction_emoji",
+        "available_tags",
+        "default_sort_order",
+        "default_forum_layout",
+        "default_thread_rate_limit_per_user",
+        "flags",
     ] {
         if let Some(value) = original.get(key).filter(|v| !v.is_null()) {
             body[key] = value.clone();
@@ -113,14 +150,23 @@ pub async fn clone_channel(ctx: &ToolCtx, args: &Value) -> Result<String, String
     let created = ctx
         .core
         .http
-        .raw("POST", &format!("/guilds/{guild_id}/channels"), Some(body), Some(ctx.reason(None)))
+        .raw(
+            "POST",
+            &format!("/guilds/{guild_id}/channels"),
+            Some(body),
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     let id = id_of(&created).ok_or("Discord didn't return the new channel")?;
     if let Ok(channel) = serde_json::from_value::<axis::model::Channel>(created) {
         ctx.core.world.upsert_channel(&channel);
     }
-    ctx.core.feed(FeedKind::Tool, format!("cloned #{} as <#{id}>", label(ctx, source)), None);
+    ctx.core.feed(
+        FeedKind::Tool,
+        format!("cloned #{} as <#{id}>", label(ctx, source)),
+        None,
+    );
     Ok(format!(
         "cloned {} into <#{id}> — same type, category, topic, settings, and permissions (messages aren't copied)",
         label(ctx, source)
@@ -161,7 +207,10 @@ pub async fn move_channel(ctx: &ToolCtx, args: &Value) -> Result<String, String>
         if is_category {
             return Err("categories can't go inside other categories".to_owned());
         }
-        parent = if matches!(query.to_lowercase().as_str(), "none" | "no category" | "nothing" | "top level") {
+        parent = if matches!(
+            query.to_lowercase().as_str(),
+            "none" | "no category" | "nothing" | "top level"
+        ) {
             None
         } else {
             let id = resolve_channel(ctx, Some(query.clone()))?;
@@ -172,18 +221,25 @@ pub async fn move_channel(ctx: &ToolCtx, args: &Value) -> Result<String, String>
         };
     }
     let resolve_anchor = |key: &str| -> Result<Option<u64>, String> {
-        arg(args, key).map(|q| resolve_channel(ctx, Some(q))).transpose()
+        arg(args, key)
+            .map(|q| resolve_channel(ctx, Some(q)))
+            .transpose()
     };
     let above = resolve_anchor("above")?;
     let below = resolve_anchor("below")?;
     let anchor = above.or(below);
     if let Some(anchor) = anchor {
-        let (_, anchor_is_category, anchor_parent, _) = info(anchor).ok_or("I don't know the channel to put it next to")?;
+        let (_, anchor_is_category, anchor_parent, _) =
+            info(anchor).ok_or("I don't know the channel to put it next to")?;
         if is_category && !anchor_is_category {
             return Err("a category can only go above or below another category".to_owned());
         }
         if !is_category && arg(args, "category").is_none() {
-            parent = if anchor_is_category { Some(anchor) } else { anchor_parent };
+            parent = if anchor_is_category {
+                Some(anchor)
+            } else {
+                anchor_parent
+            };
         }
     }
 
@@ -198,7 +254,10 @@ pub async fn move_channel(ctx: &ToolCtx, args: &Value) -> Result<String, String>
     let place = arg(args, "position").unwrap_or_default().to_lowercase();
     let index = match (above, below) {
         (Some(a), _) if order.contains(&a) => order.iter().position(|id| *id == a).unwrap_or(0),
-        (_, Some(b)) if order.contains(&b) => order.iter().position(|id| *id == b).map_or(order.len(), |i| i + 1),
+        (_, Some(b)) if order.contains(&b) => order
+            .iter()
+            .position(|id| *id == b)
+            .map_or(order.len(), |i| i + 1),
         // Into a category named as the anchor: its top.
         _ if anchor.is_some() => 0,
         _ if place == "top" || place == "first" => 0,
@@ -220,7 +279,12 @@ pub async fn move_channel(ctx: &ToolCtx, args: &Value) -> Result<String, String>
         .collect();
     ctx.core
         .http
-        .raw("PATCH", &format!("/guilds/{guild_id}/channels"), Some(Value::Array(body)), Some(ctx.reason(None)))
+        .raw(
+            "PATCH",
+            &format!("/guilds/{guild_id}/channels"),
+            Some(Value::Array(body)),
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     let place = match (above, below) {
@@ -256,14 +320,22 @@ pub async fn set_voice_status(ctx: &ToolCtx, args: &Value) -> Result<String, Str
             })
             .ok_or("say which voice channel")?,
     };
-    if !ctx.core.world.channel(guild_id, channel_id).is_some_and(|c| c.is_voice()) {
+    if !ctx
+        .core
+        .world
+        .channel(guild_id, channel_id)
+        .is_some_and(|c| c.is_voice())
+    {
         return Err(format!("{} isn't a voice channel", label(ctx, channel_id)));
     }
     let perms = ctx.requester_permissions_in(channel_id);
     if !ctx.acting_as_agent()
         && !perms.intersects(Permissions::SET_VOICE_CHANNEL_STATUS | Permissions::MANAGE_CHANNELS)
     {
-        return Err(format!("denied: {} can't set that channel's status", ctx.requester.name));
+        return Err(format!(
+            "denied: {} can't set that channel's status",
+            ctx.requester.name
+        ));
     }
     let status = arg(args, "status").unwrap_or_default();
     ctx.core
@@ -282,7 +354,10 @@ pub async fn set_voice_status(ctx: &ToolCtx, args: &Value) -> Result<String, Str
     Ok(if status.is_empty() {
         format!("cleared the status of {}", label(ctx, channel_id))
     } else {
-        format!("set the status of {} to \"{status}\"", label(ctx, channel_id))
+        format!(
+            "set the status of {} to \"{status}\"",
+            label(ctx, channel_id)
+        )
     })
 }
 
@@ -291,14 +366,15 @@ pub async fn set_channel_permissions(ctx: &ToolCtx, args: &Value) -> Result<Stri
     let channel_id = resolve_channel(ctx, arg(args, "channel"))?;
     require(ctx, channel_id, Permissions::MANAGE_ROLES)?;
     let target = required(args, "target")?;
-    let (id, is_member, name) = if matches!(target.to_lowercase().as_str(), "everyone" | "@everyone") {
-        (guild_id, false, "@everyone".to_owned())
-    } else if let Ok((id, name, _)) = find_role(ctx, guild_id, &target) {
-        (id, false, format!("@{name}"))
-    } else {
-        let member = resolve_member(ctx, &target).await?;
-        (member.user_id, true, member.display_name().to_owned())
-    };
+    let (id, is_member, name) =
+        if matches!(target.to_lowercase().as_str(), "everyone" | "@everyone") {
+            (guild_id, false, "@everyone".to_owned())
+        } else if let Ok((id, name, _)) = find_role(ctx, guild_id, &target) {
+            (id, false, format!("@{name}"))
+        } else {
+            let member = resolve_member(ctx, &target).await?;
+            (member.user_id, true, member.display_name().to_owned())
+        };
     let path = format!("/channels/{channel_id}/permissions/{id}");
     if flag(args, "reset").unwrap_or(false) {
         ctx.core
@@ -306,7 +382,10 @@ pub async fn set_channel_permissions(ctx: &ToolCtx, args: &Value) -> Result<Stri
             .raw("DELETE", &path, None, Some(ctx.reason(None)))
             .await
             .map_err(discord_error)?;
-        return Ok(format!("removed {name}'s special permissions in {}", label(ctx, channel_id)));
+        return Ok(format!(
+            "removed {name}'s special permissions in {}",
+            label(ctx, channel_id)
+        ));
     }
     let allow = permission_bits(&arg(args, "allow").unwrap_or_default())?;
     let deny = permission_bits(&arg(args, "deny").unwrap_or_default())?;
@@ -364,14 +443,23 @@ pub async fn edit_thread(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter(|t| t.get("name").and_then(Value::as_str).is_some_and(|n| wanted.contains(&n.to_lowercase())))
+            .filter(|t| {
+                t.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| wanted.contains(&n.to_lowercase()))
+            })
             .filter_map(|t| t.get("id").and_then(Value::as_str).map(str::to_owned))
             .collect();
         body["applied_tags"] = json!(ids);
     }
     ctx.core
         .http
-        .raw("PATCH", &format!("/channels/{thread}"), Some(body), Some(ctx.reason(None)))
+        .raw(
+            "PATCH",
+            &format!("/channels/{thread}"),
+            Some(body),
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     Ok(format!("updated {}", label(ctx, thread)))
@@ -393,10 +481,18 @@ pub async fn unpin_message(ctx: &ToolCtx, args: &Value) -> Result<String, String
     require(ctx, channel_id, Permissions::MANAGE_MESSAGES)?;
     ctx.core
         .http
-        .raw("DELETE", &format!("/channels/{channel_id}/pins/{message_id}"), None, Some(ctx.reason(None)))
+        .raw(
+            "DELETE",
+            &format!("/channels/{channel_id}/pins/{message_id}"),
+            None,
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
-    Ok(format!("unpinned that message in {}", label(ctx, channel_id)))
+    Ok(format!(
+        "unpinned that message in {}",
+        label(ctx, channel_id)
+    ))
 }
 
 pub async fn publish_message(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -404,7 +500,12 @@ pub async fn publish_message(ctx: &ToolCtx, args: &Value) -> Result<String, Stri
     require(ctx, channel_id, Permissions::SEND_MESSAGES)?;
     ctx.core
         .http
-        .raw("POST", &format!("/channels/{channel_id}/messages/{message_id}/crosspost"), None, None)
+        .raw(
+            "POST",
+            &format!("/channels/{channel_id}/messages/{message_id}/crosspost"),
+            None,
+            None,
+        )
         .await
         .map_err(discord_error)?;
     Ok("published it to the servers following this announcement channel".to_owned())
@@ -414,7 +515,12 @@ pub async fn end_poll(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let (channel_id, message_id) = message_target(ctx, args)?;
     ctx.core
         .http
-        .raw("POST", &format!("/channels/{channel_id}/polls/{message_id}/expire"), None, None)
+        .raw(
+            "POST",
+            &format!("/channels/{channel_id}/polls/{message_id}/expire"),
+            None,
+            None,
+        )
         .await
         .map_err(discord_error)?;
     Ok("ended the poll — results are final".to_owned())
@@ -425,13 +531,21 @@ pub async fn end_poll(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
 pub async fn edit_role(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = require_guild_perm(ctx, Permissions::MANAGE_ROLES)?;
     let (role_id, name, position) = find_role(ctx, guild_id, &required(args, "role")?)?;
-    if !ctx.acting_as_agent() && ctx.requester.kind != PrincipalKind::Operator && position.max(0) as u32 >= ctx.requester.rank {
-        return Err(format!("denied: @{name} is at or above {}'s highest role", ctx.requester.name));
+    if !ctx.acting_as_agent()
+        && ctx.requester.kind != PrincipalKind::Operator
+        && position.max(0) as u32 >= ctx.requester.rank
+    {
+        return Err(format!(
+            "denied: @{name} is at or above {}'s highest role",
+            ctx.requester.name
+        ));
     }
     let current = ctx
         .core
         .world
-        .with_guild(guild_id, |g| g.roles.get(&role_id).map(|r| r.permissions.bits()))
+        .with_guild(guild_id, |g| {
+            g.roles.get(&role_id).map(|r| r.permissions.bits())
+        })
         .flatten()
         .unwrap_or(0);
     let mut body = json!({});
@@ -440,7 +554,10 @@ pub async fn edit_role(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     if let Some(color) = arg(args, "color") {
         let hex = color.trim().trim_start_matches('#');
-        body["color"] = json!(u32::from_str_radix(hex, 16).map_err(|_| format!("color should be hex like #ff8800, not {color}"))?);
+        body["color"] = json!(
+            u32::from_str_radix(hex, 16)
+                .map_err(|_| format!("color should be hex like #ff8800, not {color}"))?
+        );
     }
     if let Some(hoist) = flag(args, "hoist") {
         body["hoist"] = json!(hoist);
@@ -455,7 +572,12 @@ pub async fn edit_role(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     ctx.core
         .http
-        .raw("PATCH", &format!("/guilds/{guild_id}/roles/{role_id}"), Some(body), Some(ctx.reason(None)))
+        .raw(
+            "PATCH",
+            &format!("/guilds/{guild_id}/roles/{role_id}"),
+            Some(body),
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     Ok(format!("updated @{name}"))
@@ -464,12 +586,23 @@ pub async fn edit_role(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
 pub async fn delete_role(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = require_guild_perm(ctx, Permissions::MANAGE_ROLES)?;
     let (role_id, name, position) = find_role(ctx, guild_id, &required(args, "role")?)?;
-    if !ctx.acting_as_agent() && ctx.requester.kind != PrincipalKind::Operator && position.max(0) as u32 >= ctx.requester.rank {
-        return Err(format!("denied: @{name} is at or above {}'s highest role", ctx.requester.name));
+    if !ctx.acting_as_agent()
+        && ctx.requester.kind != PrincipalKind::Operator
+        && position.max(0) as u32 >= ctx.requester.rank
+    {
+        return Err(format!(
+            "denied: @{name} is at or above {}'s highest role",
+            ctx.requester.name
+        ));
     }
     ctx.core
         .http
-        .raw("DELETE", &format!("/guilds/{guild_id}/roles/{role_id}"), None, Some(ctx.reason(None)))
+        .raw(
+            "DELETE",
+            &format!("/guilds/{guild_id}/roles/{role_id}"),
+            None,
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     Ok(format!("deleted @{name}"))
@@ -480,7 +613,12 @@ pub async fn list_bans(ctx: &ToolCtx, _args: &Value) -> Result<String, String> {
     let bans = ctx
         .core
         .http
-        .raw("GET", &format!("/guilds/{guild_id}/bans?limit=100"), None, None)
+        .raw(
+            "GET",
+            &format!("/guilds/{guild_id}/bans?limit=100"),
+            None,
+            None,
+        )
         .await
         .map_err(discord_error)?;
     let lines: Vec<String> = bans
@@ -490,13 +628,21 @@ pub async fn list_bans(ctx: &ToolCtx, _args: &Value) -> Result<String, String> {
         .map(|b| {
             format!(
                 "- {} ({}): {}",
-                b.pointer("/user/username").and_then(Value::as_str).unwrap_or("?"),
+                b.pointer("/user/username")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
                 b.pointer("/user/id").and_then(Value::as_str).unwrap_or("?"),
-                b.get("reason").and_then(Value::as_str).unwrap_or("no reason")
+                b.get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason")
             )
         })
         .collect();
-    Ok(if lines.is_empty() { "nobody is banned".to_owned() } else { lines.join("\n") })
+    Ok(if lines.is_empty() {
+        "nobody is banned".to_owned()
+    } else {
+        lines.join("\n")
+    })
 }
 
 pub async fn unban_member(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -508,7 +654,12 @@ pub async fn unban_member(ctx: &ToolCtx, args: &Value) -> Result<String, String>
             let bans = ctx
                 .core
                 .http
-                .raw("GET", &format!("/guilds/{guild_id}/bans?limit=1000"), None, None)
+                .raw(
+                    "GET",
+                    &format!("/guilds/{guild_id}/bans?limit=1000"),
+                    None,
+                    None,
+                )
                 .await
                 .map_err(discord_error)?;
             let wanted = query.trim_start_matches('@').to_lowercase();
@@ -516,16 +667,29 @@ pub async fn unban_member(ctx: &ToolCtx, args: &Value) -> Result<String, String>
                 .into_iter()
                 .flatten()
                 .find(|b| {
-                    b.pointer("/user/username").and_then(Value::as_str).is_some_and(|n| n.to_lowercase() == wanted)
-                        || b.pointer("/user/global_name").and_then(Value::as_str).is_some_and(|n| n.to_lowercase() == wanted)
+                    b.pointer("/user/username")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| n.to_lowercase() == wanted)
+                        || b.pointer("/user/global_name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|n| n.to_lowercase() == wanted)
                 })
-                .and_then(|b| b.pointer("/user/id").and_then(Value::as_str).and_then(|s| s.parse().ok()))
+                .and_then(|b| {
+                    b.pointer("/user/id")
+                        .and_then(Value::as_str)
+                        .and_then(|s| s.parse().ok())
+                })
                 .ok_or_else(|| format!("no banned user named {query}"))?
         }
     };
     ctx.core
         .http
-        .raw("DELETE", &format!("/guilds/{guild_id}/bans/{user_id}"), None, Some(ctx.reason(None)))
+        .raw(
+            "DELETE",
+            &format!("/guilds/{guild_id}/bans/{user_id}"),
+            None,
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     Ok(format!("unbanned <@{user_id}>"))
@@ -542,13 +706,23 @@ pub async fn edit_server(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
     if let Some(description) = arg(args, "description") {
         body["description"] = json!(description);
     }
-    for (key, field) in [("system_channel", "system_channel_id"), ("afk_channel", "afk_channel_id"), ("rules_channel", "rules_channel_id")] {
+    for (key, field) in [
+        ("system_channel", "system_channel_id"),
+        ("afk_channel", "afk_channel_id"),
+        ("rules_channel", "rules_channel_id"),
+    ] {
         if let Some(query) = arg(args, key) {
             body[field] = json!(resolve_channel(ctx, Some(query))?.to_string());
         }
     }
     if let Some(timeout) = number(args, "afk_timeout_minutes") {
-        body["afk_timeout"] = json!([1i64, 5, 15, 30, 60].into_iter().min_by_key(|m| (m - timeout).abs()).unwrap_or(5) * 60);
+        body["afk_timeout"] = json!(
+            [1i64, 5, 15, 30, 60]
+                .into_iter()
+                .min_by_key(|m| (m - timeout).abs())
+                .unwrap_or(5)
+                * 60
+        );
     }
     if let Some(level) = number(args, "verification_level") {
         body["verification_level"] = json!(level.clamp(0, 4));
@@ -558,7 +732,12 @@ pub async fn edit_server(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
     }
     ctx.core
         .http
-        .raw("PATCH", &format!("/guilds/{guild_id}"), Some(body), Some(ctx.reason(None)))
+        .raw(
+            "PATCH",
+            &format!("/guilds/{guild_id}"),
+            Some(body),
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     Ok("updated the server settings".to_owned())
@@ -586,15 +765,20 @@ fn parse_time(text: &str) -> Result<Timestamp, String> {
         return relative(86_400_000).map_err(|e| e.to_string());
     }
     text.trim().parse::<Timestamp>().map_err(|_| {
-        format!("can't read the time \"{text}\" — use \"in 2 hours\" or ISO like 2026-11-02T20:00:00Z")
+        format!(
+            "can't read the time \"{text}\" — use \"in 2 hours\" or ISO like 2026-11-02T20:00:00Z"
+        )
     })
 }
 
 pub async fn create_event(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = require_guild_perm(ctx, Permissions::CREATE_EVENTS)?;
     let start = parse_time(&required(args, "start")?)?;
-    let minutes = number(args, "duration_minutes").unwrap_or(60).clamp(5, 10_080);
-    let end = Timestamp::from_unix_millis(start.as_unix_millis() + minutes * 60_000).map_err(|e| e.to_string())?;
+    let minutes = number(args, "duration_minutes")
+        .unwrap_or(60)
+        .clamp(5, 10_080);
+    let end = Timestamp::from_unix_millis(start.as_unix_millis() + minutes * 60_000)
+        .map_err(|e| e.to_string())?;
     let mut body = json!({
         "name": required(args, "name")?,
         "description": arg(args, "description").unwrap_or_default(),
@@ -602,8 +786,17 @@ pub async fn create_event(ctx: &ToolCtx, args: &Value) -> Result<String, String>
         "scheduled_end_time": end.to_string(),
         "privacy_level": 2,
     });
-    match arg(args, "channel").map(|q| resolve_channel(ctx, Some(q))).transpose()? {
-        Some(channel) if ctx.core.world.channel(guild_id, channel).is_some_and(|c| c.is_voice()) => {
+    match arg(args, "channel")
+        .map(|q| resolve_channel(ctx, Some(q)))
+        .transpose()?
+    {
+        Some(channel)
+            if ctx
+                .core
+                .world
+                .channel(guild_id, channel)
+                .is_some_and(|c| c.is_voice()) =>
+        {
             body["entity_type"] = json!(2);
             body["channel_id"] = json!(channel.to_string());
         }
@@ -615,7 +808,12 @@ pub async fn create_event(ctx: &ToolCtx, args: &Value) -> Result<String, String>
     let event = ctx
         .core
         .http
-        .raw("POST", &format!("/guilds/{guild_id}/scheduled-events"), Some(body), Some(ctx.reason(None)))
+        .raw(
+            "POST",
+            &format!("/guilds/{guild_id}/scheduled-events"),
+            Some(body),
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     Ok(format!(
@@ -631,7 +829,12 @@ pub async fn list_events(ctx: &ToolCtx, _args: &Value) -> Result<String, String>
     let events = ctx
         .core
         .http
-        .raw("GET", &format!("/guilds/{guild_id}/scheduled-events?with_user_count=true"), None, None)
+        .raw(
+            "GET",
+            &format!("/guilds/{guild_id}/scheduled-events?with_user_count=true"),
+            None,
+            None,
+        )
         .await
         .map_err(discord_error)?;
     let lines: Vec<String> = events
@@ -643,12 +846,18 @@ pub async fn list_events(ctx: &ToolCtx, _args: &Value) -> Result<String, String>
                 "- {} (ID {}): starts {} · {} interested",
                 e.get("name").and_then(Value::as_str).unwrap_or("?"),
                 e.get("id").and_then(Value::as_str).unwrap_or("?"),
-                e.get("scheduled_start_time").and_then(Value::as_str).unwrap_or("?"),
+                e.get("scheduled_start_time")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
                 e.get("user_count").and_then(Value::as_u64).unwrap_or(0)
             )
         })
         .collect();
-    Ok(if lines.is_empty() { "no scheduled events".to_owned() } else { lines.join("\n") })
+    Ok(if lines.is_empty() {
+        "no scheduled events".to_owned()
+    } else {
+        lines.join("\n")
+    })
 }
 
 pub async fn delete_event(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -660,21 +869,35 @@ pub async fn delete_event(ctx: &ToolCtx, args: &Value) -> Result<String, String>
             let events = ctx
                 .core
                 .http
-                .raw("GET", &format!("/guilds/{guild_id}/scheduled-events"), None, None)
+                .raw(
+                    "GET",
+                    &format!("/guilds/{guild_id}/scheduled-events"),
+                    None,
+                    None,
+                )
                 .await
                 .map_err(discord_error)?;
             events
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|e| e.get("name").and_then(Value::as_str).is_some_and(|n| n.to_lowercase().contains(&query.to_lowercase())))
+                .find(|e| {
+                    e.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| n.to_lowercase().contains(&query.to_lowercase()))
+                })
                 .and_then(id_of)
                 .ok_or_else(|| format!("no event matching \"{query}\""))?
         }
     };
     ctx.core
         .http
-        .raw("DELETE", &format!("/guilds/{guild_id}/scheduled-events/{id}"), None, Some(ctx.reason(None)))
+        .raw(
+            "DELETE",
+            &format!("/guilds/{guild_id}/scheduled-events/{id}"),
+            None,
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     Ok("deleted the event".to_owned())
@@ -695,7 +918,9 @@ pub async fn create_emoji(ctx: &ToolCtx, args: &Value) -> Result<String, String>
             .iter()
             .find(|i| i.name.eq_ignore_ascii_case(&source))
             .map(|i| i.url.clone())
-            .ok_or_else(|| format!("give an image URL (or the name of an image in the chat), not \"{source}\""))?
+            .ok_or_else(|| {
+                format!("give an image URL (or the name of an image in the chat), not \"{source}\"")
+            })?
     };
     let bytes = super::web::fetch_bytes(&url, false, 256 * 1024)
         .await
@@ -718,28 +943,49 @@ pub async fn create_emoji(ctx: &ToolCtx, args: &Value) -> Result<String, String>
         .await
         .map_err(discord_error)?;
     let id = emoji.get("id").and_then(Value::as_str).unwrap_or("?");
-    let animated = emoji.get("animated").and_then(Value::as_bool).unwrap_or(false);
-    Ok(format!("added the emoji <{}:{name}:{id}>", if animated { "a" } else { "" }))
+    let animated = emoji
+        .get("animated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(format!(
+        "added the emoji <{}:{name}:{id}>",
+        if animated { "a" } else { "" }
+    ))
 }
 
 pub async fn delete_emoji(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = require_guild_perm(ctx, Permissions::MANAGE_GUILD_EXPRESSIONS)?;
     let query = required(args, "emoji")?;
-    let wanted = query.trim_matches([':', '<', '>']).rsplit(':').nth(1).unwrap_or(query.trim_matches(':')).to_lowercase();
+    let wanted = query
+        .trim_matches([':', '<', '>'])
+        .rsplit(':')
+        .nth(1)
+        .unwrap_or(query.trim_matches(':'))
+        .to_lowercase();
     let id = ctx
         .core
         .world
         .with_guild(guild_id, |g| {
             g.emojis
                 .iter()
-                .find(|e| e.name.as_deref().is_some_and(|n| n.to_lowercase() == wanted) || e.id.map(|i| i.to_string()) == Some(query.clone()))
+                .find(|e| {
+                    e.name
+                        .as_deref()
+                        .is_some_and(|n| n.to_lowercase() == wanted)
+                        || e.id.map(|i| i.to_string()) == Some(query.clone())
+                })
                 .and_then(|e| e.id.map(|i| i.get()))
         })
         .flatten()
         .ok_or_else(|| format!("no emoji named {query}"))?;
     ctx.core
         .http
-        .raw("DELETE", &format!("/guilds/{guild_id}/emojis/{id}"), None, Some(ctx.reason(None)))
+        .raw(
+            "DELETE",
+            &format!("/guilds/{guild_id}/emojis/{id}"),
+            None,
+            Some(ctx.reason(None)),
+        )
         .await
         .map_err(discord_error)?;
     Ok(format!("deleted :{wanted}:"))
@@ -756,8 +1002,13 @@ fn resolve_text_channel(ctx: &ToolCtx, query: Option<String>) -> Result<u64, Str
             .core
             .world
             .with_guild(guild_id, |g| {
-                g.find_channel_where(q, |c| matches!(c.r#type, ChannelType::GuildText | ChannelType::GuildAnnouncement))
-                    .map(|c| c.id.get())
+                g.find_channel_where(q, |c| {
+                    matches!(
+                        c.r#type,
+                        ChannelType::GuildText | ChannelType::GuildAnnouncement
+                    )
+                })
+                .map(|c| c.id.get())
             })
             .flatten();
         if let Some(id) = found {
@@ -771,7 +1022,9 @@ fn staff_check(ctx: &ToolCtx, channel_id: u64) -> bool {
     ctx.requester.kind == PrincipalKind::Operator
         || ctx.acting_as_agent()
         || ctx.requester.level >= AccessLevel::Moderator
-        || ctx.requester_permissions_in(channel_id).contains(Permissions::MANAGE_MESSAGES)
+        || ctx
+            .requester_permissions_in(channel_id)
+            .contains(Permissions::MANAGE_MESSAGES)
         || tickets::system(&ctx.core, ctx.guild_id.unwrap_or(0))
             .staff_roles
             .iter()
@@ -781,13 +1034,19 @@ fn staff_check(ctx: &ToolCtx, channel_id: u64) -> bool {
 fn ticket_for(ctx: &ToolCtx, args: &Value) -> Result<crate::memory::Ticket, String> {
     let guild_id = ctx.require_guild()?;
     let system = tickets::system(&ctx.core, guild_id);
-    tickets::find(&system, arg(args, "ticket").as_deref(), ctx.channel_id)
-        .ok_or_else(|| "which ticket? give its number (like #3), or ask inside the ticket".to_owned())
+    tickets::find(&system, arg(args, "ticket").as_deref(), ctx.channel_id).ok_or_else(|| {
+        "which ticket? give its number (like #3), or ask inside the ticket".to_owned()
+    })
 }
 
 fn roles_list(ctx: &ToolCtx, guild_id: u64, list: Option<String>) -> Result<Vec<u64>, String> {
     let mut out = Vec::new();
-    for role in list.unwrap_or_default().split(',').map(str::trim).filter(|r| !r.is_empty()) {
+    for role in list
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
         out.push(find_role(ctx, guild_id, role)?.0);
     }
     Ok(out)
@@ -855,7 +1114,9 @@ pub async fn setup_tickets(ctx: &ToolCtx, args: &Value) -> Result<String, String
         });
         id
     });
-    Ok(format!("{result} New tickets run standing task #{task_id}."))
+    Ok(format!(
+        "{result} New tickets run standing task #{task_id}."
+    ))
 }
 
 pub async fn edit_ticket_panel(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -884,7 +1145,13 @@ pub async fn edit_ticket_panel(ctx: &ToolCtx, args: &Value) -> Result<String, St
             .map(|o| {
                 let parts: Vec<&str> = o.split('|').map(str::trim).collect();
                 crate::memory::TicketOption {
-                    label: parts.first().copied().unwrap_or("Support").chars().take(100).collect(),
+                    label: parts
+                        .first()
+                        .copied()
+                        .unwrap_or("Support")
+                        .chars()
+                        .take(100)
+                        .collect(),
                     emoji: parts.get(1).copied().unwrap_or("").to_owned(),
                     description: parts.get(2).copied().unwrap_or("").to_owned(),
                     instruction: parts.get(3).copied().unwrap_or("").to_owned(),
@@ -929,7 +1196,12 @@ pub async fn edit_ticket_panel(ctx: &ToolCtx, args: &Value) -> Result<String, St
         } else {
             format!(
                 "a dropdown of {}",
-                panel.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>().join(", ")
+                panel
+                    .options
+                    .iter()
+                    .map(|o| o.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         }
     ))
@@ -972,9 +1244,17 @@ pub async fn ticket_settings(ctx: &ToolCtx, args: &Value) -> Result<String, Stri
         if t.staff_roles.is_empty() {
             "none".to_owned()
         } else {
-            t.staff_roles.iter().map(|r| format!("<@&{r}>")).collect::<Vec<_>>().join(", ")
+            t.staff_roles
+                .iter()
+                .map(|r| format!("<@&{r}>"))
+                .collect::<Vec<_>>()
+                .join(", ")
         },
-        if t.log_channel_id == 0 { "nowhere".to_owned() } else { format!("<#{}>", t.log_channel_id) },
+        if t.log_channel_id == 0 {
+            "nowhere".to_owned()
+        } else {
+            format!("<#{}>", t.log_channel_id)
+        },
         if t.dm_transcripts { "on" } else { "off" },
         if t.auto_reply { "yes" } else { "no" },
         t.max_open.max(1),
@@ -988,7 +1268,9 @@ pub async fn ticket_access(ctx: &ToolCtx, args: &Value) -> Result<String, String
         return Err("only staff or the ticket's opener can change who's in it".to_owned());
     }
     let grant = !flag(args, "remove").unwrap_or(false);
-    let who = arg(args, "who").or_else(|| arg(args, "user")).ok_or("say who (a member or a role)")?;
+    let who = arg(args, "who")
+        .or_else(|| arg(args, "user"))
+        .ok_or("say who (a member or a role)")?;
     let (id, member, name) = if let Ok((id, name, _)) = find_role(ctx, guild_id, &who) {
         (id, false, format!("@{name}"))
     } else {
@@ -1040,7 +1322,14 @@ pub async fn claim_ticket(ctx: &ToolCtx, args: &Value) -> Result<String, String>
     if !staff_check(ctx, ticket.channel_id) {
         return Err("only staff can claim tickets".to_owned());
     }
-    tickets::claim(&ctx.core, guild_id, ticket.channel_id, ctx.requester.user_id, &ctx.requester.name).await
+    tickets::claim(
+        &ctx.core,
+        guild_id,
+        ticket.channel_id,
+        ctx.requester.user_id,
+        &ctx.requester.name,
+    )
+    .await
 }
 
 pub async fn rename_ticket(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -1071,8 +1360,18 @@ pub async fn open_ticket(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
             .find(|o| o.label.to_lowercase().contains(&t.to_lowercase()))
             .cloned()
     });
-    let channel = tickets::open_ticket(&ctx.core, guild_id, member.user_id, member.display_name(), kind.as_ref()).await?;
-    Ok(format!("opened a ticket for {}: <#{channel}>", member.display_name()))
+    let channel = tickets::open_ticket(
+        &ctx.core,
+        guild_id,
+        member.user_id,
+        member.display_name(),
+        kind.as_ref(),
+    )
+    .await?;
+    Ok(format!(
+        "opened a ticket for {}: <#{channel}>",
+        member.display_name()
+    ))
 }
 
 pub async fn list_tickets(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -1098,11 +1397,17 @@ pub async fn list_tickets(ctx: &ToolCtx, args: &Value) -> Result<String, String>
                 "- #{} {}{} — {} (<#{}>), opened <t:{}:R>{}{}",
                 t.number,
                 if t.closed.is_some() { "closed" } else { "open" },
-                if t.kind.is_empty() { String::new() } else { format!(" [{}]", t.kind) },
+                if t.kind.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", t.kind)
+                },
                 t.user_name,
                 t.channel_id,
                 t.opened / 1000,
-                t.claimed_by.map(|c| format!(", claimed by <@{c}>")).unwrap_or_default(),
+                t.claimed_by
+                    .map(|c| format!(", claimed by <@{c}>"))
+                    .unwrap_or_default(),
                 if t.summary.is_empty() {
                     String::new()
                 } else {
@@ -1114,7 +1419,11 @@ pub async fn list_tickets(ctx: &ToolCtx, args: &Value) -> Result<String, String>
     Ok(if lines.is_empty() {
         "no matching tickets".to_owned()
     } else {
-        format!("Tickets (panel in <#{}>):\n{}", system.panel_channel_id, lines.join("\n"))
+        format!(
+            "Tickets (panel in <#{}>):\n{}",
+            system.panel_channel_id,
+            lines.join("\n")
+        )
     })
 }
 
@@ -1126,11 +1435,18 @@ pub async fn ticket_transcript(ctx: &ToolCtx, args: &Value) -> Result<String, St
     }
     let text = tickets::ticket_text(&ctx.core, guild_id, &ticket);
     if text.trim().is_empty() {
-        return Ok(format!("ticket #{} has no saved transcript yet", ticket.number));
+        return Ok(format!(
+            "ticket #{} has no saved transcript yet",
+            ticket.number
+        ));
     }
     Ok(format!(
         "{}{}",
-        if ticket.summary.is_empty() { String::new() } else { format!("Summary: {}\n\n", ticket.summary) },
+        if ticket.summary.is_empty() {
+            String::new()
+        } else {
+            format!("Summary: {}\n\n", ticket.summary)
+        },
         crate::llm::truncate(&text, 6000)
     ))
 }
@@ -1165,7 +1481,11 @@ pub async fn search_tickets(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     Ok(format!(
         "{} ticket(s) match{}. Use ticket_transcript with a number to read one in full.\n{}",
         hits.len(),
-        if query.is_empty() { String::new() } else { format!(" \"{query}\"") },
+        if query.is_empty() {
+            String::new()
+        } else {
+            format!(" \"{query}\"")
+        },
         lines.join("\n")
     ))
 }
@@ -1178,29 +1498,52 @@ pub async fn create_role_menu(ctx: &ToolCtx, args: &Value) -> Result<String, Str
     let channel_id = resolve_channel(ctx, arg(args, "channel"))?;
     // "Gamer | 🎮 | plays games; Artist | 🎨"
     let mut roles = Vec::new();
-    for item in required(args, "roles")?.split([';', '\n']).map(str::trim).filter(|i| !i.is_empty()) {
+    for item in required(args, "roles")?
+        .split([';', '\n'])
+        .map(str::trim)
+        .filter(|i| !i.is_empty())
+    {
         let parts: Vec<&str> = item.split('|').map(str::trim).collect();
         // An emoji written next to the role name ("Gamer 🎮") is the emoji.
-        let inline_emoji: String = parts[0].chars().filter(|c| !c.is_alphanumeric() && !c.is_whitespace() && !"-_'&".contains(*c)).collect();
+        let inline_emoji: String = parts[0]
+            .chars()
+            .filter(|c| !c.is_alphanumeric() && !c.is_whitespace() && !"-_'&".contains(*c))
+            .collect();
         let (role_id, name, position) = find_role(ctx, guild_id, parts[0])?;
-        if !ctx.acting_as_agent() && ctx.requester.kind != PrincipalKind::Operator && position.max(0) as u32 >= ctx.requester.rank {
-            return Err(format!("denied: @{name} is at or above {}'s highest role", ctx.requester.name));
+        if !ctx.acting_as_agent()
+            && ctx.requester.kind != PrincipalKind::Operator
+            && position.max(0) as u32 >= ctx.requester.rank
+        {
+            return Err(format!(
+                "denied: @{name} is at or above {}'s highest role",
+                ctx.requester.name
+            ));
         }
         roles.push(MenuRole {
             role_id,
             label: name,
-            emoji: parts.get(1).filter(|e| !e.is_empty()).map(|e| (*e).to_owned()).unwrap_or(inline_emoji),
+            emoji: parts
+                .get(1)
+                .filter(|e| !e.is_empty())
+                .map(|e| (*e).to_owned())
+                .unwrap_or(inline_emoji),
             description: parts.get(2).copied().unwrap_or("").to_owned(),
         });
     }
     if roles.is_empty() {
         return Err("list the roles, like \"Gamer | 🎮; Artist | 🎨\"".to_owned());
     }
-    let dropdown = arg(args, "style").is_some_and(|s| s.to_lowercase().contains("drop") || s.to_lowercase().contains("menu")) || roles.len() > 25;
+    let dropdown = arg(args, "style")
+        .is_some_and(|s| s.to_lowercase().contains("drop") || s.to_lowercase().contains("menu"))
+        || roles.len() > 25;
     let body = role_menu_body(
         &arg(args, "title").unwrap_or_else(|| "Pick your roles".to_owned()),
         &arg(args, "message").unwrap_or_else(|| {
-            if dropdown { "Choose from the menu below.".to_owned() } else { "Press a button to get or remove a role.".to_owned() }
+            if dropdown {
+                "Choose from the menu below.".to_owned()
+            } else {
+                "Press a button to get or remove a role.".to_owned()
+            }
         }),
         &roles,
         dropdown,
@@ -1208,20 +1551,32 @@ pub async fn create_role_menu(ctx: &ToolCtx, args: &Value) -> Result<String, Str
     );
     ctx.core
         .http
-        .raw("POST", &format!("/channels/{channel_id}/messages"), Some(body), None)
+        .raw(
+            "POST",
+            &format!("/channels/{channel_id}/messages"),
+            Some(body),
+            None,
+        )
         .await
         .map_err(discord_error)?;
     Ok(format!(
         "posted a role menu in {} with {} ({}) — members pick roles themselves",
         label(ctx, channel_id),
-        roles.iter().map(|r| format!("@{}", r.label)).collect::<Vec<_>>().join(", "),
+        roles
+            .iter()
+            .map(|r| format!("@{}", r.label))
+            .collect::<Vec<_>>()
+            .join(", "),
         if dropdown { "dropdown" } else { "buttons" }
     ))
 }
 
 pub async fn start_giveaway(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    let guild_id = require_guild_perm(ctx, Permissions::MANAGE_GUILD | Permissions::MANAGE_MESSAGES)
-        .or_else(|_| require_guild_perm(ctx, Permissions::MANAGE_MESSAGES))?;
+    let guild_id = require_guild_perm(
+        ctx,
+        Permissions::MANAGE_GUILD | Permissions::MANAGE_MESSAGES,
+    )
+    .or_else(|_| require_guild_perm(ctx, Permissions::MANAGE_MESSAGES))?;
     let channel_id = resolve_channel(ctx, arg(args, "channel"))?;
     let ends = parse_time(&format!(
         "{}",
@@ -1255,7 +1610,12 @@ pub async fn start_giveaway(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     ))
 }
 
-fn giveaway_message(ctx: &ToolCtx, guild_id: u64, args: &Value, ended: bool) -> Result<u64, String> {
+fn giveaway_message(
+    ctx: &ToolCtx,
+    guild_id: u64,
+    args: &Value,
+    ended: bool,
+) -> Result<u64, String> {
     let query = arg(args, "giveaway").unwrap_or_default().to_lowercase();
     ctx.core
         .hive
@@ -1265,10 +1625,19 @@ fn giveaway_message(ctx: &ToolCtx, guild_id: u64, args: &Value, ended: bool) -> 
                 .iter()
                 .rev()
                 .filter(|g| g.ended == ended)
-                .find(|g| query.is_empty() || g.prize.to_lowercase().contains(&query) || g.message_id.to_string() == query)
+                .find(|g| {
+                    query.is_empty()
+                        || g.prize.to_lowercase().contains(&query)
+                        || g.message_id.to_string() == query
+                })
                 .map(|g| g.message_id)
         })
-        .ok_or_else(|| format!("no {} giveaway matching \"{query}\"", if ended { "ended" } else { "running" }))
+        .ok_or_else(|| {
+            format!(
+                "no {} giveaway matching \"{query}\"",
+                if ended { "ended" } else { "running" }
+            )
+        })
 }
 
 pub async fn end_giveaway(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -1282,7 +1651,11 @@ pub async fn end_giveaway(ctx: &ToolCtx, args: &Value) -> Result<String, String>
         format!(
             "{} — winner(s): {}",
             if reroll { "rerolled" } else { "ended" },
-            winners.iter().map(|w| format!("<@{w}>")).collect::<Vec<_>>().join(", ")
+            winners
+                .iter()
+                .map(|w| format!("<@{w}>"))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     })
 }
@@ -1301,7 +1674,14 @@ pub async fn list_giveaways(ctx: &ToolCtx, _args: &Value) -> Result<String, Stri
                     g.channel_id,
                     g.entrants.len(),
                     if g.ended {
-                        format!("ended (winners: {})", g.picked.iter().map(|w| format!("<@{w}>")).collect::<Vec<_>>().join(", "))
+                        format!(
+                            "ended (winners: {})",
+                            g.picked
+                                .iter()
+                                .map(|w| format!("<@{w}>"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     } else {
                         format!("ends <t:{}:R>", g.ends / 1000)
                     }
@@ -1309,7 +1689,11 @@ pub async fn list_giveaways(ctx: &ToolCtx, _args: &Value) -> Result<String, Stri
             })
             .collect()
     });
-    Ok(if lines.is_empty() { "no giveaways yet".to_owned() } else { lines.join("\n") })
+    Ok(if lines.is_empty() {
+        "no giveaways yet".to_owned()
+    } else {
+        lines.join("\n")
+    })
 }
 
 // --- settings, levels & stats ---------------------------------------------------------------
@@ -1318,7 +1702,9 @@ pub async fn list_giveaways(ctx: &ToolCtx, _args: &Value) -> Result<String, Stri
 /// when the owner hasn't restricted it).
 fn ensure_settings(ctx: &ToolCtx) -> Result<u64, String> {
     let guild_id = ctx.require_guild()?;
-    if ctx.acting_as_agent() || crate::runtime::levels::can_manage(&ctx.core, guild_id, &ctx.requester) {
+    if ctx.acting_as_agent()
+        || crate::runtime::levels::can_manage(&ctx.core, guild_id, &ctx.requester)
+    {
         Ok(guild_id)
     } else {
         Err(format!(
@@ -1336,17 +1722,27 @@ pub async fn get_rank(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     };
     let (png, summary) = crate::runtime::levels::rank_card(&ctx.core, guild_id, user_id).await?;
     let name = ctx.media.lock().expect("media poisoned").add(png, true);
-    Ok(format!("{summary}. Attached the rank card ({name}) to your reply."))
+    Ok(format!(
+        "{summary}. Attached the rank card ({name}) to your reply."
+    ))
 }
 
 pub async fn leaderboard(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
-    Ok(crate::runtime::levels::leaderboard(&ctx.core, guild_id, number(args, "count").unwrap_or(10) as usize))
+    Ok(crate::runtime::levels::leaderboard(
+        &ctx.core,
+        guild_id,
+        number(args, "count").unwrap_or(10) as usize,
+    ))
 }
 
 pub async fn server_stats(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
-    Ok(crate::runtime::levels::stats_report(&ctx.core, guild_id, number(args, "days").unwrap_or(7) as usize))
+    Ok(crate::runtime::levels::stats_report(
+        &ctx.core,
+        guild_id,
+        number(args, "days").unwrap_or(7) as usize,
+    ))
 }
 
 pub async fn leveling_settings(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -1356,10 +1752,24 @@ pub async fn leveling_settings(ctx: &ToolCtx, args: &Value) -> Result<String, St
         None => None,
     };
     let mut add_rewards = Vec::new();
-    for item in arg(args, "add_rewards").unwrap_or_default().split([';', ',', '\n']).map(str::trim).filter(|s| !s.is_empty()) {
-        let (level, role) = item.split_once([':', '=']).ok_or_else(|| format!("rewards look like \"10: Regular\", not \"{item}\""))?;
-        let level: u32 = level.trim().trim_start_matches(|c: char| !c.is_ascii_digit()).parse().map_err(|_| format!("bad level in \"{item}\""))?;
-        add_rewards.push(crate::memory::LevelReward { level, role_id: find_role(ctx, guild_id, role.trim())?.0 });
+    for item in arg(args, "add_rewards")
+        .unwrap_or_default()
+        .split([';', ',', '\n'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let (level, role) = item
+            .split_once([':', '='])
+            .ok_or_else(|| format!("rewards look like \"10: Regular\", not \"{item}\""))?;
+        let level: u32 = level
+            .trim()
+            .trim_start_matches(|c: char| !c.is_ascii_digit())
+            .parse()
+            .map_err(|_| format!("bad level in \"{item}\""))?;
+        add_rewards.push(crate::memory::LevelReward {
+            level,
+            role_id: find_role(ctx, guild_id, role.trim())?.0,
+        });
     }
     let remove_levels: Vec<u32> = arg(args, "remove_rewards")
         .unwrap_or_default()
@@ -1372,19 +1782,37 @@ pub async fn leveling_settings(ctx: &ToolCtx, args: &Value) -> Result<String, St
     };
     ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         let l = &mut k.leveling;
-        if let Some(v) = flag(args, "enabled") { l.enabled = v; }
-        if let Some(v) = flag(args, "paused") { l.paused = v; }
-        if let Some(v) = number(args, "xp_min") { l.xp_min = v.clamp(0, 1000) as u32; }
-        if let Some(v) = number(args, "xp_max") { l.xp_max = v.clamp(0, 1000) as u32; }
-        if let Some(v) = number(args, "cooldown_seconds") { l.cooldown_secs = v.clamp(0, 3600) as u32; }
-        if let Some(v) = number(args, "voice_xp_per_minute") { l.voice_xp_per_minute = v.clamp(0, 100) as u32; }
-        if let Some(v) = arg(args, "announce") { l.announce = v.to_lowercase(); }
+        if let Some(v) = flag(args, "enabled") {
+            l.enabled = v;
+        }
+        if let Some(v) = flag(args, "paused") {
+            l.paused = v;
+        }
+        if let Some(v) = number(args, "xp_min") {
+            l.xp_min = v.clamp(0, 1000) as u32;
+        }
+        if let Some(v) = number(args, "xp_max") {
+            l.xp_max = v.clamp(0, 1000) as u32;
+        }
+        if let Some(v) = number(args, "cooldown_seconds") {
+            l.cooldown_secs = v.clamp(0, 3600) as u32;
+        }
+        if let Some(v) = number(args, "voice_xp_per_minute") {
+            l.voice_xp_per_minute = v.clamp(0, 100) as u32;
+        }
+        if let Some(v) = arg(args, "announce") {
+            l.announce = v.to_lowercase();
+        }
         if let Some(v) = announce_channel {
             l.announce_channel = v;
             l.announce = "channel".to_owned();
         }
-        if let Some(v) = arg(args, "message") { l.message = v; }
-        if let Some(v) = flag(args, "stack_rewards") { l.stack_rewards = v; }
+        if let Some(v) = arg(args, "message") {
+            l.message = v;
+        }
+        if let Some(v) = flag(args, "stack_rewards") {
+            l.stack_rewards = v;
+        }
         l.rewards.retain(|r| !remove_levels.contains(&r.level));
         for reward in &add_rewards {
             l.rewards.retain(|r| r.level != reward.level);
@@ -1397,7 +1825,11 @@ pub async fn leveling_settings(ctx: &ToolCtx, args: &Value) -> Result<String, St
             }
         }
     });
-    let l = ctx.core.hive.knowledge.guild(guild_id, |k| k.leveling.clone());
+    let l = ctx
+        .core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| k.leveling.clone());
     Ok(format!(
         "leveling {}{}: {}–{} XP per message every {}s, {} voice XP/min, level-ups {}, rewards: {}",
         if l.enabled { "on" } else { "off" },
@@ -1415,7 +1847,11 @@ pub async fn leveling_settings(ctx: &ToolCtx, args: &Value) -> Result<String, St
         if l.rewards.is_empty() {
             "none".to_owned()
         } else {
-            l.rewards.iter().map(|r| format!("{} → <@&{}>", r.level, r.role_id)).collect::<Vec<_>>().join(", ")
+            l.rewards
+                .iter()
+                .map(|r| format!("{} → <@&{}>", r.level, r.role_id))
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     ))
 }
@@ -1430,7 +1866,9 @@ pub async fn set_xp(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         let entry = k.leveling.members.entry(member.user_id).or_default();
         entry.name = member.display_name().to_owned();
         if let Some(level) = level {
-            entry.xp = (0..level.clamp(0, 500) as u32).map(crate::memory::Leveling::xp_for_next).sum();
+            entry.xp = (0..level.clamp(0, 500) as u32)
+                .map(crate::memory::Leveling::xp_for_next)
+                .sum();
         }
         if let Some(v) = set {
             entry.xp = v.max(0) as u64;
@@ -1441,24 +1879,48 @@ pub async fn set_xp(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         entry.xp
     });
     let (level, _, _) = crate::memory::Leveling::progress(xp);
-    Ok(format!("{} now has {xp} XP (level {level})", member.display_name()))
+    Ok(format!(
+        "{} now has {xp} XP (level {level})",
+        member.display_name()
+    ))
 }
 
-pub async fn design_rank_card(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    let guild_id = ensure_settings(ctx)?;
+/// Apply design_rank_card's styling arguments to one card. Everything is
+/// parsed before anything is written, and it's pure (no Discord), so the
+/// server's card and a person's own go through the same tested path.
+fn apply_card_design(c: &mut crate::memory::RankCard, args: &Value) -> Result<(), String> {
     let hex = |key: &str| -> Result<Option<String>, String> {
         match arg(args, key) {
             Some(v) if v.trim().is_empty() || v.trim() == "default" => Ok(Some(String::new())),
             Some(v) => {
                 let v = v.trim().to_owned();
-                let ok = v.starts_with('#') && (v.len() == 7) && u32::from_str_radix(&v[1..], 16).is_ok();
-                if ok { Ok(Some(v)) } else { Err(format!("{key} should be a hex color like #5865f2, not {v}")) }
+                let ok = v.starts_with('#')
+                    && (v.len() == 7)
+                    && u32::from_str_radix(&v[1..], 16).is_ok();
+                if ok {
+                    Ok(Some(v))
+                } else {
+                    Err(format!("{key} should be a hex color like #5865f2, not {v}"))
+                }
             }
             None => Ok(None),
         }
     };
     let mut colors = Vec::new();
-    for key in ["background", "background2", "accent", "text", "muted", "name_color", "rank_color", "level_color", "xp_color", "bar_color", "bar_track", "ring_color"] {
+    for key in [
+        "background",
+        "background2",
+        "accent",
+        "text",
+        "muted",
+        "name_color",
+        "rank_color",
+        "level_color",
+        "xp_color",
+        "bar_color",
+        "bar_track",
+        "ring_color",
+    ] {
         colors.push((key, hex(key)?));
     }
     let pick = |key: &str, allowed: &[&str]| -> Result<Option<String>, String> {
@@ -1479,8 +1941,170 @@ pub async fn design_rank_card(ctx: &ToolCtx, args: &Value) -> Result<String, Str
     let gradient = pick("gradient", &["horizontal", "vertical", "diagonal"])?;
     let avatar_shape = pick("avatar_shape", &["circle", "rounded", "square"])?;
     let bar_shape = pick("bar_shape", &["round", "square"])?;
-    let total_position = pick("total_position", &["below_bar", "above_bar", "with_xp", "top"])?;
+    let total_position = pick(
+        "total_position",
+        &["below_bar", "above_bar", "with_xp", "top"],
+    )?;
     let weight = pick("font_weight", &["light", "regular", "bold"])?;
+    let hide: Vec<String> = arg(args, "hide")
+        .unwrap_or_default()
+        .split(',')
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    let show: Vec<String> = arg(args, "show")
+        .unwrap_or_default()
+        .split(',')
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    for (key, value) in &colors {
+        let Some(value) = value.clone() else { continue };
+        let slot = match *key {
+            "background" => &mut c.background,
+            "background2" => &mut c.background2,
+            "accent" => &mut c.accent,
+            "text" => &mut c.text,
+            "muted" => &mut c.muted,
+            "name_color" => &mut c.name_color,
+            "rank_color" => &mut c.rank_color,
+            "level_color" => &mut c.level_color,
+            "xp_color" => &mut c.xp_color,
+            "bar_color" => &mut c.bar_color,
+            "bar_track" => &mut c.bar_track,
+            _ => &mut c.ring_color,
+        };
+        if !value.is_empty() || !matches!(*key, "background" | "accent" | "text" | "muted") {
+            *slot = value;
+        }
+    }
+    if let Some(v) = layout.clone() {
+        c.layout = v;
+    }
+    if let Some(v) = style.clone() {
+        c.style = v;
+    }
+    if let Some(v) = gradient.clone() {
+        c.gradient = v;
+    }
+    if let Some(v) = avatar_shape.clone() {
+        c.avatar_shape = v;
+    }
+    if let Some(v) = bar_shape.clone() {
+        c.bar_shape = v;
+    }
+    if let Some(v) = total_position.clone() {
+        c.total_position = v;
+    }
+    if let Some(v) = weight.clone() {
+        c.font_weight = v;
+    }
+    if let Some(v) = arg(args, "font") {
+        c.font = v;
+    }
+    if let Some(v) = arg(args, "background_image") {
+        c.background_url = v;
+    }
+    if let Some(v) = number(args, "image_opacity") {
+        c.image_opacity = v.clamp(1, 100) as u8;
+    }
+    if let Some(v) = number(args, "blur") {
+        c.blur = v.clamp(0, 40) as u8;
+    }
+    if let Some(v) = number(args, "image_brightness") {
+        c.image_brightness = v.clamp(-100, 100) as i32;
+    }
+    if let Some(v) = number(args, "darken") {
+        c.overlay = v.clamp(0, 100) as u8;
+    }
+    if let Some(v) = number(args, "panel_opacity") {
+        c.panel_opacity = v.clamp(0, 100) as u8;
+    }
+    if let Some(v) = number(args, "bar_height") {
+        c.bar_height = v.clamp(4, 80) as u32;
+    }
+    if let Some(v) = number(args, "corner_radius") {
+        c.corner_radius = v.clamp(0, 140) as u32;
+    }
+    if let Some(v) = args.get("text_scale").and_then(|v| {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    }) {
+        c.text_scale = (v as f32).clamp(0.5, 2.0);
+    }
+    if let Some(v) = flag(args, "avatar_ring") {
+        c.avatar_ring = v;
+    }
+    if let Some(v) = arg(args, "rank_label") {
+        c.rank_label = v;
+    }
+    if let Some(v) = arg(args, "level_label") {
+        c.level_label = v;
+    }
+    for (list, value) in [(&hide, false), (&show, true)] {
+        for part in list.iter() {
+            match part.as_str() {
+                "avatar" => c.show_avatar = value,
+                "rank" => c.show_rank = value,
+                "level" => c.show_level = value,
+                "xp" => c.show_xp = value,
+                "total" | "total_xp" | "xp_total" => c.show_total = value,
+                "bar" | "progress" | "progress_bar" => c.show_bar = value,
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where a design_rank_card call lands: the server's card, or (by default)
+/// the requester's own copy-on-write override, which starts from whatever
+/// card they'd see now. A personal reset drops their override — back to
+/// the server's design. Pure, so the routing is testable without Discord.
+fn apply_design(
+    l: &mut crate::memory::Leveling,
+    user_id: u64,
+    server_scope: bool,
+    reset: bool,
+    args: &Value,
+) -> Result<(), String> {
+    if server_scope {
+        if reset {
+            l.card = Default::default();
+        }
+        apply_card_design(&mut l.card, args)
+    } else {
+        if reset {
+            l.card_overrides.remove(&user_id);
+        }
+        let styling = args.as_object().is_some_and(|o| {
+            o.keys()
+                .any(|k| !matches!(k.as_str(), "scope" | "reset" | "look"))
+        });
+        if styling {
+            let mut card = l.card_for(user_id).clone();
+            apply_card_design(&mut card, args)?;
+            l.card_overrides.insert(user_id, card);
+        }
+        Ok(())
+    }
+}
+
+pub async fn design_rank_card(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
+    // Personal by default: this designs the requester's own card, which
+    // needs no settings permission. scope=server changes everyone's and
+    // is settings-gated.
+    let guild_id = ctx.require_guild()?;
+    let server_scope = matches!(
+        arg(args, "scope")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "server" | "server_wide" | "serverwide" | "guild" | "everyone" | "all"
+    );
+    if server_scope {
+        ensure_settings(ctx)?;
+    }
     if let Some(url) = arg(args, "background_image").filter(|u| !u.trim().is_empty()) {
         if !super::web::is_live_image(url.trim()).await {
             return Err(format!(
@@ -1488,68 +2112,12 @@ pub async fn design_rank_card(ctx: &ToolCtx, args: &Value) -> Result<String, Str
             ));
         }
     }
-    let hide: Vec<String> = arg(args, "hide").unwrap_or_default().split(',').map(|h| h.trim().to_lowercase()).filter(|h| !h.is_empty()).collect();
-    let show: Vec<String> = arg(args, "show").unwrap_or_default().split(',').map(|h| h.trim().to_lowercase()).filter(|h| !h.is_empty()).collect();
+    let user_id = ctx.requester.user_id;
+    let reset = flag(args, "reset").unwrap_or(false);
     ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
-        let c = &mut k.leveling.card;
-        if flag(args, "reset").unwrap_or(false) {
-            *c = Default::default();
-        }
-        for (key, value) in &colors {
-            let Some(value) = value.clone() else { continue };
-            let slot = match *key {
-                "background" => &mut c.background,
-                "background2" => &mut c.background2,
-                "accent" => &mut c.accent,
-                "text" => &mut c.text,
-                "muted" => &mut c.muted,
-                "name_color" => &mut c.name_color,
-                "rank_color" => &mut c.rank_color,
-                "level_color" => &mut c.level_color,
-                "xp_color" => &mut c.xp_color,
-                "bar_color" => &mut c.bar_color,
-                "bar_track" => &mut c.bar_track,
-                _ => &mut c.ring_color,
-            };
-            if !value.is_empty() || !matches!(*key, "background" | "accent" | "text" | "muted") {
-                *slot = value;
-            }
-        }
-        if let Some(v) = layout.clone() { c.layout = v; }
-        if let Some(v) = style.clone() { c.style = v; }
-        if let Some(v) = gradient.clone() { c.gradient = v; }
-        if let Some(v) = avatar_shape.clone() { c.avatar_shape = v; }
-        if let Some(v) = bar_shape.clone() { c.bar_shape = v; }
-        if let Some(v) = total_position.clone() { c.total_position = v; }
-        if let Some(v) = weight.clone() { c.font_weight = v; }
-        if let Some(v) = arg(args, "font") { c.font = v; }
-        if let Some(v) = arg(args, "background_image") { c.background_url = v; }
-        if let Some(v) = number(args, "image_opacity") { c.image_opacity = v.clamp(1, 100) as u8; }
-        if let Some(v) = number(args, "blur") { c.blur = v.clamp(0, 40) as u8; }
-        if let Some(v) = number(args, "image_brightness") { c.image_brightness = v.clamp(-100, 100) as i32; }
-        if let Some(v) = number(args, "darken") { c.overlay = v.clamp(0, 100) as u8; }
-        if let Some(v) = number(args, "panel_opacity") { c.panel_opacity = v.clamp(0, 100) as u8; }
-        if let Some(v) = number(args, "bar_height") { c.bar_height = v.clamp(4, 80) as u32; }
-        if let Some(v) = number(args, "corner_radius") { c.corner_radius = v.clamp(0, 140) as u32; }
-        if let Some(v) = args.get("text_scale").and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))) { c.text_scale = (v as f32).clamp(0.5, 2.0); }
-        if let Some(v) = flag(args, "avatar_ring") { c.avatar_ring = v; }
-        if let Some(v) = arg(args, "rank_label") { c.rank_label = v; }
-        if let Some(v) = arg(args, "level_label") { c.level_label = v; }
-        for (list, value) in [(&hide, false), (&show, true)] {
-            for part in list.iter() {
-                match part.as_str() {
-                    "avatar" => c.show_avatar = value,
-                    "rank" => c.show_rank = value,
-                    "level" => c.show_level = value,
-                    "xp" => c.show_xp = value,
-                    "total" | "total_xp" | "xp_total" => c.show_total = value,
-                    "bar" | "progress" | "progress_bar" => c.show_bar = value,
-                    _ => {}
-                }
-            }
-        }
-    });
-    let (png, _) = crate::runtime::levels::rank_card(&ctx.core, guild_id, ctx.requester.user_id).await?;
+        apply_design(&mut k.leveling, user_id, server_scope, reset, args)
+    })?;
+    let (png, _) = crate::runtime::levels::rank_card(&ctx.core, guild_id, user_id).await?;
     // Look at the result when asked to (or to check readability).
     let review = if flag(args, "look").unwrap_or(false) {
         match crate::tools::rankcard::look(
@@ -1565,10 +2133,38 @@ pub async fn design_rank_card(ctx: &ToolCtx, args: &Value) -> Result<String, Str
     } else {
         String::new()
     };
-    let name = ctx.media.lock().expect("media poisoned").add_replacing("rank card", png);
-    let c = ctx.core.hive.knowledge.guild(guild_id, |k| k.leveling.card.clone());
-    let colors_changed = colors.iter().filter(|(_, v)| v.as_ref().is_some_and(|v| !v.is_empty())).count();
-    let tip = if c.background_url.is_empty() && colors_changed >= 3 && arg(args, "background_image").is_none() {
+    let name = ctx
+        .media
+        .lock()
+        .expect("media poisoned")
+        .add_replacing("rank card", png);
+    let c = ctx
+        .core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| k.leveling.card.clone());
+    let color_keys = [
+        "background",
+        "background2",
+        "accent",
+        "text",
+        "muted",
+        "name_color",
+        "rank_color",
+        "level_color",
+        "xp_color",
+        "bar_color",
+        "bar_track",
+        "ring_color",
+    ];
+    let colors_changed = color_keys
+        .iter()
+        .filter(|key| arg(args, key).is_some_and(|v| !v.trim().is_empty()))
+        .count();
+    let tip = if c.background_url.is_empty()
+        && colors_changed >= 3
+        && arg(args, "background_image").is_none()
+    {
         " No background image yet — for a themed card, find a fitting one with image_search and call design_rank_card again with background_image (it's what makes a theme look finished)."
     } else {
         ""
@@ -1580,8 +2176,19 @@ pub async fn design_rank_card(ctx: &ToolCtx, args: &Value) -> Result<String, Str
         c.font,
         c.font_weight,
         c.background,
-        if c.background2.is_empty() { String::new() } else { format!("→{} gradient", c.background2) },
-        if c.background_url.is_empty() { String::new() } else { format!(", image (opacity {}%, blur {}, brightness {})", c.image_opacity, c.blur, c.image_brightness) },
+        if c.background2.is_empty() {
+            String::new()
+        } else {
+            format!("→{} gradient", c.background2)
+        },
+        if c.background_url.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", image (opacity {}%, blur {}, brightness {})",
+                c.image_opacity, c.blur, c.image_brightness
+            )
+        },
         c.accent,
         c.text
     ))
@@ -1591,50 +2198,100 @@ pub async fn stats_settings(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     let guild_id = ensure_settings(ctx)?;
     ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         let s = &mut k.stats;
-        if let Some(v) = flag(args, "enabled") { s.enabled = v; }
-        if let Some(v) = flag(args, "paused") { s.paused = v; }
-        if let Some(v) = flag(args, "track_members") { s.track_members = v; }
-        if let Some(v) = flag(args, "track_messages") { s.track_messages = v; }
-        if let Some(v) = flag(args, "track_voice") { s.track_voice = v; }
-        if let Some(v) = flag(args, "track_joins") { s.track_joins = v; }
-        if flag(args, "clear_data").unwrap_or(false) { s.days.clear(); }
+        if let Some(v) = flag(args, "enabled") {
+            s.enabled = v;
+        }
+        if let Some(v) = flag(args, "paused") {
+            s.paused = v;
+        }
+        if let Some(v) = flag(args, "track_members") {
+            s.track_members = v;
+        }
+        if let Some(v) = flag(args, "track_messages") {
+            s.track_messages = v;
+        }
+        if let Some(v) = flag(args, "track_voice") {
+            s.track_voice = v;
+        }
+        if let Some(v) = flag(args, "track_joins") {
+            s.track_joins = v;
+        }
+        if flag(args, "clear_data").unwrap_or(false) {
+            s.days.clear();
+        }
     });
     let s = ctx.core.hive.knowledge.guild(guild_id, |k| k.stats.clone());
     Ok(format!(
         "statistics {}{}: members {}, messages {}, voice {}, joins {} · {} day(s) kept",
         if s.enabled { "on" } else { "off" },
         if s.paused { " (paused)" } else { "" },
-        s.track_members, s.track_messages, s.track_voice, s.track_joins,
+        s.track_members,
+        s.track_messages,
+        s.track_voice,
+        s.track_joins,
         s.days.len()
     ))
 }
 
 pub async fn settings_access(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
-    let owner = ctx.requester.kind == PrincipalKind::Operator || ctx.requester.level >= AccessLevel::Owner;
-    if !owner && (arg(args, "roles").is_some() || arg(args, "users").is_some() || flag(args, "reset").unwrap_or(false)) {
+    let owner =
+        ctx.requester.kind == PrincipalKind::Operator || ctx.requester.level >= AccessLevel::Owner;
+    if !owner
+        && (arg(args, "roles").is_some()
+            || arg(args, "users").is_some()
+            || flag(args, "reset").unwrap_or(false))
+    {
         return Err("denied: only the server owner decides who can change settings".to_owned());
     }
     if flag(args, "reset").unwrap_or(false) {
-        ctx.core.hive.knowledge.guild_mut(guild_id, |k| k.settings_access = Default::default());
+        ctx.core
+            .hive
+            .knowledge
+            .guild_mut(guild_id, |k| k.settings_access = Default::default());
     }
     if let Some(list) = arg(args, "roles") {
         let roles = roles_list(ctx, guild_id, Some(list))?;
-        ctx.core.hive.knowledge.guild_mut(guild_id, |k| k.settings_access.roles = roles.clone());
+        ctx.core
+            .hive
+            .knowledge
+            .guild_mut(guild_id, |k| k.settings_access.roles = roles.clone());
     }
     if let Some(list) = arg(args, "users") {
         let mut users = Vec::new();
         for who in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             users.push(resolve_member(ctx, who).await?.user_id);
         }
-        ctx.core.hive.knowledge.guild_mut(guild_id, |k| k.settings_access.users = users.clone());
+        ctx.core
+            .hive
+            .knowledge
+            .guild_mut(guild_id, |k| k.settings_access.users = users.clone());
     }
-    let a = ctx.core.hive.knowledge.guild(guild_id, |k| k.settings_access.clone());
+    let a = ctx
+        .core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| k.settings_access.clone());
     Ok(if a.is_restricted() {
         format!(
             "settings can be changed by the owner, {}{}",
-            a.roles.iter().map(|r| format!("<@&{r}>")).collect::<Vec<_>>().join(", "),
-            if a.users.is_empty() { String::new() } else { format!(", {}", a.users.iter().map(|u| format!("<@{u}>")).collect::<Vec<_>>().join(", ")) }
+            a.roles
+                .iter()
+                .map(|r| format!("<@&{r}>"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if a.users.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {}",
+                    a.users
+                        .iter()
+                        .map(|u| format!("<@{u}>"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
         )
     } else {
         "settings can be changed by admins and the owner (not restricted)".to_owned()
@@ -1643,23 +2300,35 @@ pub async fn settings_access(ctx: &ToolCtx, args: &Value) -> Result<String, Stri
 
 pub async fn show_settings(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
-    let section = arg(args, "section").unwrap_or_else(|| "overview".to_owned()).to_lowercase();
+    let section = arg(args, "section")
+        .unwrap_or_else(|| "overview".to_owned())
+        .to_lowercase();
     let section = crate::runtime::setup::SECTIONS
         .iter()
         .find(|(id, label, _)| section.contains(id) || label.to_lowercase().contains(&section))
         .map(|(id, _, _)| *id)
         .unwrap_or("overview");
     let can_edit = crate::runtime::levels::can_manage(&ctx.core, guild_id, &ctx.requester);
-    let owner = ctx.requester.level >= AccessLevel::Owner || ctx.requester.kind == PrincipalKind::Operator;
+    let owner =
+        ctx.requester.level >= AccessLevel::Owner || ctx.requester.kind == PrincipalKind::Operator;
     let body = crate::runtime::setup::render(&ctx.core, guild_id, section, can_edit, owner);
     ctx.core
         .http
-        .raw("POST", &format!("/channels/{}/messages", ctx.channel_id), Some(body), None)
+        .raw(
+            "POST",
+            &format!("/channels/{}/messages", ctx.channel_id),
+            Some(body),
+            None,
+        )
         .await
         .map_err(discord_error)?;
     Ok(format!(
         "posted the {section} settings panel here{} — don't repeat its contents, just point to it",
-        if can_edit { " with buttons to change them" } else { " (view only for them)" }
+        if can_edit {
+            " with buttons to change them"
+        } else {
+            " (view only for them)"
+        }
     ))
 }
 
@@ -1669,7 +2338,12 @@ pub async fn start_translating(ctx: &ToolCtx, args: &Value) -> Result<String, St
     use crate::runtime::translate::{TranslationSession, guess_language, start};
     let guild_id = ctx.require_guild()?;
     let mut users = Vec::new();
-    for who in arg(args, "users").unwrap_or_default().split([',', '&']).map(str::trim).filter(|s| !s.is_empty() && !matches!(s.to_lowercase().as_str(), "everyone" | "all")) {
+    for who in arg(args, "users")
+        .unwrap_or_default()
+        .split([',', '&'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !matches!(s.to_lowercase().as_str(), "everyone" | "all"))
+    {
         users.push(resolve_member(ctx, who).await?);
     }
     // Known languages: given ("uvx: English, Pablo: Spanish"), else guessed
@@ -1684,7 +2358,12 @@ pub async fn start_translating(ctx: &ToolCtx, args: &Value) -> Result<String, St
     }
     let ids: Vec<u64> = users.iter().map(|m| m.user_id).collect();
     let recent: Vec<(u64, String)> = ctx.core.hive.knowledge.channel(ctx.channel_id, |a| {
-        a.messages.iter().rev().take(30).map(|m| (m.author_id, m.content.clone())).collect()
+        a.messages
+            .iter()
+            .rev()
+            .take(30)
+            .map(|m| (m.author_id, m.content.clone()))
+            .collect()
     });
     for (author, text) in recent {
         if (ids.is_empty() || ids.contains(&author)) && !languages.contains_key(&author) {
@@ -1703,14 +2382,20 @@ pub async fn start_translating(ctx: &ToolCtx, args: &Value) -> Result<String, St
             target: target.clone(),
             languages,
             started_by: ctx.requester.user_id,
-            idle_minutes: number(args, "stop_after_quiet_minutes").unwrap_or(15).clamp(1, 240) as u32,
+            idle_minutes: number(args, "stop_after_quiet_minutes")
+                .unwrap_or(15)
+                .clamp(1, 240) as u32,
             ..Default::default()
         },
     );
     let who = if users.is_empty() {
         "everyone here".to_owned()
     } else {
-        users.iter().map(|m| m.display_name().to_owned()).collect::<Vec<_>>().join(" and ")
+        users
+            .iter()
+            .map(|m| m.display_name().to_owned())
+            .collect::<Vec<_>>()
+            .join(" and ")
     };
     let known = session
         .languages
@@ -1721,9 +2406,17 @@ pub async fn start_translating(ctx: &ToolCtx, args: &Value) -> Result<String, St
     Ok(format!(
         "translating {who} {} from now on, until someone asks you to stop or it's quiet for {} minutes{}. \
          Don't translate in your own replies — every new message gets translated automatically.",
-        if target.is_empty() { "into each other's languages".to_owned() } else { format!("into {target}") },
+        if target.is_empty() {
+            "into each other's languages".to_owned()
+        } else {
+            format!("into {target}")
+        },
         session.idle_minutes,
-        if known.is_empty() { String::new() } else { format!(" (languages so far: {known})") }
+        if known.is_empty() {
+            String::new()
+        } else {
+            format!(" (languages so far: {known})")
+        }
     ))
 }
 
@@ -1739,12 +2432,18 @@ pub async fn stop_translating(ctx: &ToolCtx, _args: &Value) -> Result<String, St
 // --- the bot's own profile ---------------------------------------------------------------------
 
 pub async fn set_my_avatar(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    if !(ctx.requester.kind == PrincipalKind::Operator || ctx.requester.level >= AccessLevel::Admin) {
+    if !(ctx.requester.kind == PrincipalKind::Operator || ctx.requester.level >= AccessLevel::Admin)
+    {
         return Err("denied: only admins can change my profile picture".to_owned());
     }
     let source = required(args, "image")?;
     // An image made in this conversation, else a URL / image in the chat.
-    let made = ctx.media.lock().expect("media poisoned").get(&source).cloned();
+    let made = ctx
+        .media
+        .lock()
+        .expect("media poisoned")
+        .get(&source)
+        .cloned();
     let bytes = match made {
         Some(bytes) => bytes,
         None => {
@@ -1755,15 +2454,23 @@ pub async fn set_my_avatar(ctx: &ToolCtx, args: &Value) -> Result<String, String
                     .iter()
                     .find(|i| i.name.eq_ignore_ascii_case(&source))
                     .map(|i| i.url.clone())
-                    .ok_or_else(|| format!("give an image URL or the name of an image here, not \"{source}\""))?
+                    .ok_or_else(|| {
+                        format!("give an image URL or the name of an image here, not \"{source}\"")
+                    })?
             };
             super::web::fetch_bytes(&url, false, 10_000_000).await?
         }
     };
     // Square, 512px, PNG.
-    let image = image::load_from_memory(&bytes).map_err(|e| format!("not an image I can read: {e}"))?;
+    let image =
+        image::load_from_memory(&bytes).map_err(|e| format!("not an image I can read: {e}"))?;
     let side = image.width().min(image.height());
-    let square = image.crop_imm((image.width() - side) / 2, (image.height() - side) / 2, side, side);
+    let square = image.crop_imm(
+        (image.width() - side) / 2,
+        (image.height() - side) / 2,
+        side,
+        side,
+    );
     let square = square.resize_exact(512, 512, image::imageops::FilterType::Lanczos3);
     let mut png = Vec::new();
     square
@@ -1783,189 +2490,42 @@ pub async fn set_my_avatar(ctx: &ToolCtx, args: &Value) -> Result<String, String
             format!("{text} (Discord limits how often a bot can change its avatar)")
         })?;
     let name = ctx.media.lock().expect("media poisoned").add(png, true);
-    Ok(format!("changed my profile picture (cropped to a square); preview {name} attached"))
-}
-
-// --- writing big files ------------------------------------------------------------------------
-
-pub async fn draft_create(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    let filename: String = required(args, "filename")?
-        .chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
-        .take(80)
-        .collect();
-    let sections: Vec<String> = required(args, "sections")?
-        .split(['\n', ';'])
-        .map(|l| l.trim().trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | ' ')).trim().to_owned())
-        .filter(|l| !l.is_empty())
-        .take(60)
-        .collect();
-    if sections.is_empty() {
-        return Err("list the sections, one per line".to_owned());
-    }
-    // Already writing this file (in the last hour)? Continue it.
-    if let Some(existing) = ctx.core.docs.open_draft(&filename, crate::memory::now_ms() - 3_600_000) {
-        return Ok(format!(
-            "You're already writing {} as {} — continue it with draft_write (don't start over).
-{}",
-            filename,
-            existing.id,
-            existing.overview()
-        ));
-    }
-    let draft = ctx.core.docs.new_draft(&filename, sections);
     Ok(format!(
-        "Started {}. Now write it one section at a time with draft_write (keep each section focused; for code, one function or a few small ones per section). \
-         Fix parts with draft_edit instead of rewriting, check it with draft_view, and finish with draft_publish.\n{}",
-        draft.id,
-        draft.overview()
+        "changed my profile picture (cropped to a square); preview {name} attached"
     ))
 }
 
-/// The draft named, or the one being written right now.
-fn draft_id(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    match arg(args, "draft").filter(|d| !d.trim().is_empty()) {
-        Some(id) => Ok(id),
-        None => ctx
-            .core
-            .docs
-            .latest_open()
-            .ok_or_else(|| "which draft? start one with draft_create".to_owned()),
-    }
-}
-
-pub async fn draft_write(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    let id = draft_id(ctx, args)?;
-    let which = arg(args, "section").unwrap_or_default();
-    let content = required(args, "content")?;
-    let append = flag(args, "append").unwrap_or(false);
-    ctx.core.docs.edit_draft(&id, |d| {
-        let index = if which.is_empty() {
-            d.sections.iter().position(|(_, c)| c.is_empty()).ok_or("every section is written — say which one to rewrite")?
-        } else {
-            match section_index(d, &which) {
-                Ok(i) => i,
-                // A new section at the end.
-                Err(_) => {
-                    d.sections.push((which.clone(), String::new()));
-                    d.sections.len() - 1
-                }
-            }
-        };
-        if index == d.sections.len() {
-            d.sections.push((format!("section {}", index + 1), String::new()));
-        }
-        let slot = &mut d.sections[index].1;
-        if append && !slot.is_empty() {
-            slot.push('\n');
-            slot.push_str(&content);
-        } else {
-            *slot = content.clone();
-        }
-        let next = d.sections.iter().enumerate().find(|(_, (_, c))| c.is_empty()).map(|(i, (t, _))| format!(" Next unwritten: {}. {t}.", i + 1));
-        Ok(format!(
-            "Wrote section {} ({} lines).{}",
-            index + 1,
-            d.sections[index].1.lines().count(),
-            next.unwrap_or_else(|| " All sections written — check with draft_view, then draft_publish.".to_owned())
-        ))
-    })
-}
-
-pub async fn draft_edit(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    let id = draft_id(ctx, args)?;
-    let find = required(args, "find")?;
-    let replace = arg(args, "replace").unwrap_or_default();
-    let which = arg(args, "section");
-    ctx.core.docs.edit_draft(&id, |d| {
-        let indices: Vec<usize> = match &which {
-            Some(w) if !w.is_empty() => vec![section_index(d, w)?],
-            _ => (0..d.sections.len()).collect(),
-        };
-        let mut changed = 0;
-        for i in indices {
-            let slot = &mut d.sections[i].1;
-            let count = slot.matches(&find).count();
-            if count > 0 {
-                *slot = slot.replacen(&find, &replace, 1);
-                changed = i + 1;
-                break;
-            }
-        }
-        if changed == 0 {
-            Err(format!("\"{}\" isn't in {} — use draft_view / draft_read to see the exact text", crate::llm::truncate(&find, 80), d.id))
-        } else {
-            Ok(format!("edited section {changed}"))
-        }
-    })
-}
-
-pub async fn draft_view(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    let id = draft_id(ctx, args)?;
-    let which = arg(args, "section");
-    ctx.core.docs.edit_draft(&id, |d| match which.as_deref().filter(|w| !w.is_empty()) {
-        Some(w) => {
-            let i = section_index(d, w)?;
-            let body: Vec<String> = d.sections[i].1.lines().enumerate().map(|(n, l)| format!("{:>4}| {l}", n + 1)).collect();
-            Ok(format!("{} section {} — {}:\n{}", d.id, i + 1, d.sections[i].0, crate::llm::truncate(&body.join("\n"), 6000)))
-        }
-        None => Ok(d.overview()),
-    })
-}
-
-pub async fn draft_publish(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
-    let id = draft_id(ctx, args)?;
-    let (filename, text, missing) = ctx.core.docs.edit_draft(&id, |d| {
-        let missing: Vec<String> = d.sections.iter().filter(|(_, c)| c.is_empty()).map(|(t, _)| t.clone()).collect();
-        Ok((d.filename.clone(), d.assemble(), missing))
-    })?;
-    if !missing.is_empty() && !flag(args, "force").unwrap_or(false) {
-        return Err(format!("not finished — still empty: {} (write them, or publish with force=true)", missing.join(", ")));
-    }
-    ctx.core.docs.edit_draft(&id, |d| {
-        d.published = true;
-        Ok(())
-    })?;
-    if text.len() > 8_000_000 {
-        return Err("that's too big for Discord (8 MB)".to_owned());
-    }
-    match arg(args, "channel") {
-        Some(channel) => {
-            let channel_id = resolve_channel(ctx, Some(channel))?;
-            ctx.core
-                .http
-                .create_message(axis::prelude::ChannelId::new(channel_id))
-                .content(format!("📄 {filename}"))
-                .file(filename.clone(), text.clone().into_bytes())
-                .await
-                .map_err(discord_error)?;
-            Ok(format!("posted {filename} ({} lines) in {}", text.lines().count(), label(ctx, channel_id)))
-        }
-        None => {
-            ctx.media.lock().expect("media poisoned").add_file(&filename, text.clone().into_bytes());
-            Ok(format!(
-                "{filename} ({} lines, {} chars) is attached to your reply — don't paste its contents; just say briefly what's in it and how to use it",
-                text.lines().count(),
-                text.len()
-            ))
-        }
-    }
-}
+// --- writing big files ------------------------------------------------------------------------
 
 pub async fn privacy_settings(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ensure_settings(ctx)?;
     ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         let p = &mut k.privacy;
-        if let Some(v) = flag(args, "member_search") { p.member_search = v; }
-        if let Some(v) = flag(args, "dms") { p.dms = v; }
-        if let Some(v) = flag(args, "outside_messages") { p.outside_messages = v; }
-        if let Some(v) = flag(args, "audit_search") { p.audit_search = v; }
+        if let Some(v) = flag(args, "member_search") {
+            p.member_search = v;
+        }
+        if let Some(v) = flag(args, "dms") {
+            p.dms = v;
+        }
+        if let Some(v) = flag(args, "outside_messages") {
+            p.outside_messages = v;
+        }
+        if let Some(v) = flag(args, "audit_search") {
+            p.audit_search = v;
+        }
     });
-    let p = ctx.core.hive.knowledge.guild(guild_id, |k| k.privacy.clone());
+    let p = ctx
+        .core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| k.privacy.clone());
     let yn = |b: bool| if b { "allowed" } else { "blocked" };
     Ok(format!(
         "from other servers and DMs: member search {}, DMs to members {}, posting in channels {}, audit log search {}",
-        yn(p.member_search), yn(p.dms), yn(p.outside_messages), yn(p.audit_search)
+        yn(p.member_search),
+        yn(p.dms),
+        yn(p.outside_messages),
+        yn(p.audit_search)
     ))
 }
 
@@ -1973,7 +2533,8 @@ pub async fn privacy_settings(ctx: &ToolCtx, args: &Value) -> Result<String, Str
 
 pub async fn discord_api(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
-    let allowed = ctx.requester.kind == PrincipalKind::Operator || ctx.requester.level >= AccessLevel::Admin;
+    let allowed =
+        ctx.requester.kind == PrincipalKind::Operator || ctx.requester.level >= AccessLevel::Admin;
     if !allowed || ctx.autonomous {
         return Err(format!(
             "denied: the raw Discord API is only for server admins (asked by {})",
@@ -1988,20 +2549,29 @@ pub async fn discord_api(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
     for pair in segments.windows(2) {
         let id = pair[1].parse::<u64>().ok();
         match (pair[0], id) {
-            ("guilds", Some(id)) if id != guild_id => return Err("denied: that's another server".to_owned()),
+            ("guilds", Some(id)) if id != guild_id => {
+                return Err("denied: that's another server".to_owned());
+            }
             ("channels", Some(id)) if ctx.core.world.channel(guild_id, id).is_none() => {
-                return Err("denied: that channel isn't in this server (or I can't see it)".to_owned());
+                return Err(
+                    "denied: that channel isn't in this server (or I can't see it)".to_owned(),
+                );
             }
             _ => {}
         }
     }
-    if method == "DELETE" && path.trim_end_matches('/').ends_with(&format!("guilds/{guild_id}")) {
+    if method == "DELETE"
+        && path
+            .trim_end_matches('/')
+            .ends_with(&format!("guilds/{guild_id}"))
+    {
         return Err("denied: not deleting the server".to_owned());
     }
     let body = match arg(args, "body") {
-        Some(text) if !text.trim().is_empty() => {
-            Some(serde_json::from_str::<Value>(&text).map_err(|e| format!("body isn't valid JSON: {e}"))?)
-        }
+        Some(text) if !text.trim().is_empty() => Some(
+            serde_json::from_str::<Value>(&text)
+                .map_err(|e| format!("body isn't valid JSON: {e}"))?,
+        ),
         _ => None,
     };
     let result = ctx
@@ -2010,7 +2580,11 @@ pub async fn discord_api(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
         .raw(&method, &path, body, Some(ctx.reason(arg(args, "reason"))))
         .await
         .map_err(discord_error)?;
-    ctx.core.feed(FeedKind::Tool, format!("Discord API: {method} {path}"), None);
+    ctx.core.feed(
+        FeedKind::Tool,
+        format!("Discord API: {method} {path}"),
+        None,
+    );
     Ok(match result {
         Value::Null => format!("{method} {path} → done"),
         other => crate::llm::truncate(&other.to_string(), 3000),
@@ -2026,10 +2600,19 @@ mod tests {
         let bits = permission_bits("view channel, send messages, read message history").unwrap();
         assert_eq!(
             bits,
-            (Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::READ_MESSAGE_HISTORY).bits()
+            (Permissions::VIEW_CHANNEL
+                | Permissions::SEND_MESSAGES
+                | Permissions::READ_MESSAGE_HISTORY)
+                .bits()
         );
-        assert_eq!(permission_bits("SEND").unwrap(), Permissions::SEND_MESSAGES.bits());
-        assert_eq!(permission_bits("manage-permissions").unwrap(), Permissions::MANAGE_ROLES.bits());
+        assert_eq!(
+            permission_bits("SEND").unwrap(),
+            Permissions::SEND_MESSAGES.bits()
+        );
+        assert_eq!(
+            permission_bits("manage-permissions").unwrap(),
+            Permissions::MANAGE_ROLES.bits()
+        );
         assert!(permission_bits("fly").is_err());
         assert_eq!(permission_bits("").unwrap(), 0);
     }

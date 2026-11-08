@@ -80,7 +80,14 @@ pub async fn resolve_member(ctx: &ToolCtx, query: &str) -> Result<MemberInfo, St
 pub fn resolve_text_channel(ctx: &ToolCtx, query: Option<String>) -> Result<u64, String> {
     if let (Some(q), Some(guild_id)) = (query.as_deref(), ctx.guild_id) {
         if !matches!(q.to_lowercase().as_str(), "this" | "here" | "current") {
-            let text = ctx.core.world.with_guild(guild_id, |g| g.find_channel_where(q, |c| !c.is_voice()).map(|c| c.id.get())).flatten();
+            let text = ctx
+                .core
+                .world
+                .with_guild(guild_id, |g| {
+                    g.find_channel_where(q, |c| !c.is_voice())
+                        .map(|c| c.id.get())
+                })
+                .flatten();
             if let Some(id) = text {
                 return Ok(id);
             }
@@ -443,7 +450,12 @@ pub async fn get_member(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             let mut out = format!(
                 "<@{}> — {}, rank: {}{}",
                 member.user_id,
-                super::person_label(member.nick.as_deref(), member.global_name.as_deref(), &member.username, member.user_id),
+                super::person_label(
+                    member.nick.as_deref(),
+                    member.global_name.as_deref(),
+                    &member.username,
+                    member.user_id
+                ),
                 principal.describe_rank(),
                 if member.bot { ", bot" } else { "" }
             );
@@ -531,7 +543,12 @@ pub async fn list_members(ctx: &ToolCtx, args: &Value) -> Result<String, String>
                 .map(|m| {
                     format!(
                         "- {}{}{}",
-                        super::person_label(m.nick.as_deref(), m.global_name.as_deref(), &m.username, m.user_id),
+                        super::person_label(
+                            m.nick.as_deref(),
+                            m.global_name.as_deref(),
+                            &m.username,
+                            m.user_id
+                        ),
                         if m.bot { " [bot]" } else { "" },
                         g.top_role(m)
                             .map(|r| format!(" — {}", r.name))
@@ -1323,10 +1340,17 @@ fn voice_self_service(ctx: &ToolCtx, target: &MemberInfo) -> bool {
 
 pub async fn join_voice(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
-    let is_voice = |id: u64| ctx.core.world.channel(guild_id, id).is_some_and(|c| c.is_voice());
+    let is_voice = |id: u64| {
+        ctx.core
+            .world
+            .channel(guild_id, id)
+            .is_some_and(|c| c.is_voice())
+    };
     // The named channel; else this channel when it's a voice channel's
     // chat ("join" typed there); else the requester's voice channel.
-    let named = arg(args, "channel").and_then(|q| resolve_channel(ctx, Some(q)).ok()).filter(|id| is_voice(*id));
+    let named = arg(args, "channel")
+        .and_then(|q| resolve_channel(ctx, Some(q)).ok())
+        .filter(|id| is_voice(*id));
     let requesters = ctx
         .core
         .world
@@ -1402,7 +1426,10 @@ pub async fn set_voice(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     };
     let speed = args
         .get("speed")
-        .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        .and_then(|v| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
         .map(|s| s.clamp(0.5, 2.0) as f32);
     if choice.is_none() && speed.is_none() {
         return Err("say which voice (an ID or a description) or what speed".to_owned());
@@ -1431,7 +1458,8 @@ pub async fn set_voice(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         .expect("live poisoned")
         .push((ctx.core.id.clone(), Box::new(apply)));
     ctx.core.live().repaint();
-    ctx.core.feed(FeedKind::System, format!("switched voice to {now}"), None);
+    ctx.core
+        .feed(FeedKind::System, format!("switched voice to {now}"), None);
     Ok(format!("now speaking with {now}"))
 }
 
@@ -1648,7 +1676,10 @@ pub async fn purge_messages(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
         scanned += messages.len();
         before = messages.iter().map(|m| m.id).min();
         for m in &messages {
-            if user.as_ref().is_some_and(|u| m.author.id.get() != u.user_id) {
+            if user
+                .as_ref()
+                .is_some_and(|u| m.author.id.get() != u.user_id)
+            {
                 continue;
             }
             if user.is_none() {
@@ -1677,7 +1708,12 @@ pub async fn purge_messages(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     let mut deleted = 0usize;
     for batch in recent.chunks(100) {
         match batch {
-            [one] => ctx.core.http.delete_message(channel, *one).await.map_err(discord_error)?,
+            [one] => ctx
+                .core
+                .http
+                .delete_message(channel, *one)
+                .await
+                .map_err(discord_error)?,
             _ => ctx
                 .core
                 .http
@@ -1712,7 +1748,12 @@ pub async fn purge_messages(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     let reason = arg(args, "reason").unwrap_or_else(|| "cleanup".to_owned());
     let total = deleted + background;
     if let Some(target) = &user {
-        record_mod_action(ctx, target, &format!("purged {total} messages from"), &reason);
+        record_mod_action(
+            ctx,
+            target,
+            &format!("purged {total} messages from"),
+            &reason,
+        );
     } else {
         ctx.core.feed(
             FeedKind::Moderation,
@@ -1723,7 +1764,10 @@ pub async fn purge_messages(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     if total == 0 {
         return Ok("nothing to delete — no matching messages".to_owned());
     }
-    let mut out = format!("deleted {deleted} message(s) in #{}", channel_name(ctx, channel_id));
+    let mut out = format!(
+        "deleted {deleted} message(s) in #{}",
+        channel_name(ctx, channel_id)
+    );
     if background > 0 {
         out.push_str(&format!(
             "; {background} more are older than 14 days, which Discord only lets bots delete one by one — those are being deleted in the background now (roughly {} s)",
@@ -1731,7 +1775,9 @@ pub async fn purge_messages(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
         ));
     }
     if more {
-        out.push_str(&format!("; stopped after scanning {scanned} messages — run it again to keep going"));
+        out.push_str(&format!(
+            "; stopped after scanning {scanned} messages — run it again to keep going"
+        ));
     }
     Ok(out)
 }

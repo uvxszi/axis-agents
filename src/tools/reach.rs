@@ -14,7 +14,10 @@ use crate::runtime::authority::{Principal, PrincipalKind};
 use crate::runtime::world::parse_snowflake;
 
 fn squash(text: &str) -> String {
-    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// Servers whose name matches (all of them for an empty query).
@@ -26,10 +29,17 @@ pub fn find_guilds(ctx: &ToolCtx, query: Option<&str>) -> Vec<(u64, String)> {
         .into_iter()
         .filter_map(|g| ctx.core.world.with_guild(g, |s| (g, s.name.clone())))
         .collect();
-    let Some(query) = query.map(squash).filter(|q| !q.is_empty() && q != "here" && q != "this") else {
+    let Some(query) = query
+        .map(squash)
+        .filter(|q| !q.is_empty() && q != "here" && q != "this")
+    else {
         return all;
     };
-    let exact: Vec<_> = all.iter().filter(|(_, n)| squash(n) == query).cloned().collect();
+    let exact: Vec<_> = all
+        .iter()
+        .filter(|(_, n)| squash(n) == query)
+        .cloned()
+        .collect();
     if !exact.is_empty() {
         return exact;
     }
@@ -37,7 +47,9 @@ pub fn find_guilds(ctx: &ToolCtx, query: Option<&str>) -> Vec<(u64, String)> {
         .iter()
         .filter(|(_, n)| {
             let n = squash(n);
-            n.contains(&query) || query.contains(&n) || crate::runtime::voice::edit_distance(&n, &query) <= 2
+            n.contains(&query)
+                || query.contains(&n)
+                || crate::runtime::voice::edit_distance(&n, &query) <= 2
         })
         .cloned()
         .collect();
@@ -59,7 +71,11 @@ pub fn reach_allowed(ctx: &ToolCtx, guild_id: u64, reach: Reach) -> bool {
     if ctx.guild_id == Some(guild_id) || ctx.requester.kind == PrincipalKind::Operator {
         return true;
     }
-    let p = ctx.core.hive.knowledge.guild(guild_id, |k| k.privacy.clone());
+    let p = ctx
+        .core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| k.privacy.clone());
     match reach {
         Reach::MemberSearch => p.member_search,
         Reach::Messages => p.outside_messages,
@@ -69,7 +85,11 @@ pub fn reach_allowed(ctx: &ToolCtx, guild_id: u64, reach: Reach) -> bool {
 }
 
 /// Keep only servers that allow this from outside; say which were left out.
-fn allowed(ctx: &ToolCtx, servers: Vec<(u64, String)>, reach: Reach) -> (Vec<(u64, String)>, Vec<String>) {
+fn allowed(
+    ctx: &ToolCtx,
+    servers: Vec<(u64, String)>,
+    reach: Reach,
+) -> (Vec<(u64, String)>, Vec<String>) {
     let mut ok = Vec::new();
     let mut private = Vec::new();
     for (id, name) in servers {
@@ -97,7 +117,10 @@ fn origin(ctx: &ToolCtx) -> String {
         Some(g) => format!(
             "{} from {}",
             ctx.requester.name,
-            ctx.core.world.with_guild(g, |s| s.name.clone()).unwrap_or_else(|| "another server".to_owned())
+            ctx.core
+                .world
+                .with_guild(g, |s| s.name.clone())
+                .unwrap_or_else(|| "another server".to_owned())
         ),
         None => format!("{} in a DM", ctx.requester.name),
     }
@@ -178,7 +201,12 @@ pub async fn search_people(ctx: &ToolCtx, query: &str, servers: &[(u64, String)]
             }
         }
     }
-    let mut add = |user_id: u64, username: &str, display: &str, nick: Option<&str>, server: &str, bot: bool| {
+    let mut add = |user_id: u64,
+                   username: &str,
+                   display: &str,
+                   nick: Option<&str>,
+                   server: &str,
+                   bot: bool| {
         let s = score(query, &[username, display, nick.unwrap_or("")]);
         if s == 0 {
             return;
@@ -203,7 +231,15 @@ pub async fn search_people(ctx: &ToolCtx, query: &str, servers: &[(u64, String)]
             .with_guild(*guild_id, |g| {
                 g.members
                     .values()
-                    .map(|m| (m.user_id, m.username.clone(), m.global_name.clone().unwrap_or_default(), m.nick.clone(), m.bot))
+                    .map(|m| {
+                        (
+                            m.user_id,
+                            m.username.clone(),
+                            m.global_name.clone().unwrap_or_default(),
+                            m.nick.clone(),
+                            m.bot,
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -222,7 +258,14 @@ pub async fn search_people(ctx: &ToolCtx, query: &str, servers: &[(u64, String)]
                 ctx.core.world.upsert_member(*guild_id, &member);
                 if let Some(user) = &member.user {
                     let global = user.global_name.clone().unwrap_or_default();
-                    add(user.id.get(), &user.username, &global, member.nick.as_deref(), server, user.bot.unwrap_or(false));
+                    add(
+                        user.id.get(),
+                        &user.username,
+                        &global,
+                        member.nick.as_deref(),
+                        server,
+                        user.bot.unwrap_or(false),
+                    );
                 }
             }
         }
@@ -233,7 +276,8 @@ pub async fn search_people(ctx: &ToolCtx, query: &str, servers: &[(u64, String)]
 }
 
 fn describe(f: &Found) -> String {
-    let display = (!f.display.trim().is_empty() && f.display != f.username).then_some(f.display.as_str());
+    let display =
+        (!f.display.trim().is_empty() && f.display != f.username).then_some(f.display.as_str());
     format!(
         "{}{} — in {}",
         super::person_label(None, display, &f.username, f.user_id),
@@ -246,11 +290,17 @@ pub async fn find_people(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
     let query = required(args, "name")?;
     let servers = find_guilds(ctx, arg(args, "server").as_deref());
     if servers.is_empty() {
-        return Err(format!("I'm not in a server called \"{}\"", arg(args, "server").unwrap_or_default()));
+        return Err(format!(
+            "I'm not in a server called \"{}\"",
+            arg(args, "server").unwrap_or_default()
+        ));
     }
     let (servers, private) = allowed(ctx, servers, Reach::MemberSearch);
     if servers.is_empty() {
-        return Err(format!("{} keep their member list private from outside searches", private.join(", ")));
+        return Err(format!(
+            "{} keep their member list private from outside searches",
+            private.join(", ")
+        ));
     }
     let found = search_people(ctx, &query, &servers).await;
     let touched: Vec<(u64, String)> = servers
@@ -258,17 +308,28 @@ pub async fn find_people(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
         .filter(|(_, name)| found.iter().any(|f| f.servers.contains(name)))
         .cloned()
         .collect();
-    log_outside(ctx, &touched, &format!("searched members for “{query}” (asked by {})", origin(ctx)));
+    log_outside(
+        ctx,
+        &touched,
+        &format!("searched members for “{query}” (asked by {})", origin(ctx)),
+    );
     if found.is_empty() {
         return Ok(format!(
             "nobody called \"{query}\" in {}",
-            servers.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ")
+            servers
+                .iter()
+                .map(|(_, n)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     let strong: Vec<&Found> = found.iter().filter(|f| f.score >= 55).collect();
     let mut out = String::new();
     if !private.is_empty() {
-        out.push_str(&format!("(Not searched — private from outside: {})\n", private.join(", ")));
+        out.push_str(&format!(
+            "(Not searched — private from outside: {})\n",
+            private.join(", ")
+        ));
     }
     if strong.len() > 1 {
         out.push_str("Several people have names like that — say which one you mean:\n");
@@ -281,7 +342,11 @@ pub async fn find_people(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
 
 /// One person by name for an action: the clear best match, or an error
 /// listing look-alikes.
-async fn one_person(ctx: &ToolCtx, query: &str, servers: &[(u64, String)]) -> Result<Found, String> {
+async fn one_person(
+    ctx: &ToolCtx,
+    query: &str,
+    servers: &[(u64, String)],
+) -> Result<Found, String> {
     if matches!(query.trim().to_lowercase().as_str(), "me" | "myself") {
         return Ok(Found {
             user_id: ctx.requester.user_id,
@@ -296,12 +361,24 @@ async fn one_person(ctx: &ToolCtx, query: &str, servers: &[(u64, String)]) -> Re
     let Some(best) = found.first().cloned() else {
         return Err(format!(
             "I couldn't find anyone called \"{query}\" in {}",
-            servers.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ")
+            servers
+                .iter()
+                .map(|(_, n)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     };
-    let rivals: Vec<&Found> = found.iter().skip(1).filter(|f| f.score >= best.score.saturating_sub(10) && f.score >= 55).collect();
+    let rivals: Vec<&Found> = found
+        .iter()
+        .skip(1)
+        .filter(|f| f.score >= best.score.saturating_sub(10) && f.score >= 55)
+        .collect();
     if best.score < 55 || !rivals.is_empty() {
-        let list: Vec<String> = found.iter().take(6).map(|f| format!("- {}", describe(f))).collect();
+        let list: Vec<String> = found
+            .iter()
+            .take(6)
+            .map(|f| format!("- {}", describe(f)))
+            .collect();
         return Err(format!(
             "not sure who \"{query}\" is — these are close:\n{}\nAsk which one (or use their @username or ID).",
             list.join("\n")
@@ -316,31 +393,48 @@ pub async fn send_dm(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let servers = match arg(args, "server") {
         Some(s) => find_guilds(ctx, Some(&s)),
         None => match ctx.guild_id {
-            Some(g) => find_guilds(ctx, None).into_iter().filter(|(id, _)| *id == g).collect(),
+            Some(g) => find_guilds(ctx, None)
+                .into_iter()
+                .filter(|(id, _)| *id == g)
+                .collect(),
             None => find_guilds(ctx, None),
         },
     };
     let (servers, private) = allowed(ctx, servers, Reach::Dms);
     if servers.is_empty() {
-        return Err(format!("{} don't allow DMs to their members from outside", private.join(", ")));
+        return Err(format!(
+            "{} don't allow DMs to their members from outside",
+            private.join(", ")
+        ));
     }
     let target = one_person(ctx, &query, &servers).await?;
-    // Allowed: DMing yourself, or staff in a server you share with them.
+    // AAv2: DMs are not server actions — no server permission applies.
+    // Anyone who shares a server with the target may ask (Discord itself
+    // blocks DMs the recipient has closed).
     let is_self = target.user_id == ctx.requester.user_id;
-    let staff_somewhere = ctx.requester.kind == PrincipalKind::Operator
+    let shares_server = ctx.requester.kind == PrincipalKind::Operator
         || ctx.acting_as_agent()
         || servers
             .iter()
-            .filter(|(g, _)| ctx.core.world.member(*g, target.user_id).is_some())
-            .any(|(g, _)| principal_in(ctx, *g).level >= AccessLevel::Moderator);
-    if !is_self && !staff_somewhere {
-        return Err("denied: people can only ask me to DM themselves; moderators of a server they share can ask me to DM others".to_owned());
+            .any(|(g, _)| ctx.core.world.member(*g, target.user_id).is_some());
+    if !is_self && !shares_server {
+        return Err(
+            "denied: I can only DM people who share a server with the person asking".to_owned(),
+        );
     }
-    let dm = ctx.core.http.create_dm(UserId::new(target.user_id)).await.map_err(discord_error)?;
+    let dm = ctx
+        .core
+        .http
+        .create_dm(UserId::new(target.user_id))
+        .await
+        .map_err(discord_error)?;
     let text = if is_self || ctx.acting_as_agent() {
         content
     } else {
-        format!("{content}\n-# sent at the request of {}", ctx.requester.name)
+        format!(
+            "{content}\n-# sent at the request of {}",
+            ctx.requester.name
+        )
     };
     for chunk in crate::runtime::brain::split_message(&text) {
         ctx.core
@@ -381,25 +475,36 @@ pub async fn send_to_server(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
         many => {
             return Err(format!(
                 "several servers match: {} — which one?",
-                many.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ")
+                many.iter()
+                    .map(|(_, n)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     };
     if !reach_allowed(ctx, guild_id, Reach::Messages) {
-        return Err(format!("{server} doesn't allow messages from outside the server"));
+        return Err(format!(
+            "{server} doesn't allow messages from outside the server"
+        ));
     }
     let query = required(args, "channel")?;
     let channel_id = ctx
         .core
         .world
         .with_guild(guild_id, |g| {
-            g.find_channel_where(&query, |c| !c.is_voice() || c.r#type == axis::model::ChannelType::GuildVoice)
-                .map(|c| c.id.get())
+            g.find_channel_where(&query, |c| {
+                !c.is_voice() || c.r#type == axis::model::ChannelType::GuildVoice
+            })
+            .map(|c| c.id.get())
         })
         .flatten()
         .ok_or_else(|| format!("no channel \"{query}\" in {server}"))?;
     if let Some(rule) = ctx.core.barred(guild_id, channel_id) {
-        return Err(format!("not sent: I never chat in #{} on {server} ({} set that rule)", query.trim_start_matches('#'), rule.setter_name));
+        return Err(format!(
+            "not sent: I never chat in #{} on {server} ({} set that rule)",
+            query.trim_start_matches('#'),
+            rule.setter_name
+        ));
     }
     // The requester's own permissions in that server apply.
     let who = principal_in(ctx, guild_id);
@@ -408,10 +513,17 @@ pub async fn send_to_server(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
         || ctx
             .core
             .world
-            .with_guild(guild_id, |g| who.channel_permissions(Some(g), channel_id).contains(Permissions::SEND_MESSAGES))
+            .with_guild(guild_id, |g| {
+                who.channel_permissions(Some(g), channel_id)
+                    .contains(Permissions::SEND_MESSAGES)
+            })
             .unwrap_or(false);
     if !allowed {
-        return Err(format!("denied: {} can't post in #{} on {server}", ctx.requester.name, query.trim_start_matches('#')));
+        return Err(format!(
+            "denied: {} can't post in #{} on {server}",
+            ctx.requester.name,
+            query.trim_start_matches('#')
+        ));
     }
     let sent = ctx
         .core
@@ -427,7 +539,11 @@ pub async fn send_to_server(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     } else {
         crate::runtime::activity::log_outside(&ctx.core, guild_id, &note);
     }
-    Ok(format!("posted in #{} on {server} (message {})", query.trim_start_matches('#'), sent.id))
+    Ok(format!(
+        "posted in #{} on {server} (message {})",
+        query.trim_start_matches('#'),
+        sent.id
+    ))
 }
 
 fn action_name(code: u64) -> &'static str {
@@ -490,12 +606,40 @@ fn action_code(name: &str) -> Option<u64> {
     let n = name.to_lowercase();
     // Most specific first ("unban" before "ban", "role created" before "role").
     const PAIRS: [(&str, u64); 34] = [
-        ("unban", 23), ("ban", 22), ("kick", 20), ("prune", 21), ("timeout", 24), ("timed out", 24), ("mute", 24),
-        ("nick", 24), ("rename", 24), ("role creat", 30), ("new role", 30), ("role delet", 32), ("role updat", 31),
-        ("role edit", 31), ("role", 25), ("bulk", 73), ("purge", 73), ("message delet", 72), ("deleted message", 72),
-        ("channel creat", 10), ("new channel", 10), ("channel delet", 12), ("channel", 11), ("permission", 14),
-        ("invite", 40), ("emoji", 60), ("sticker", 90), ("webhook", 50), ("bot", 28), ("thread", 110), ("unpin", 75),
-        ("pin", 74), ("event", 100), ("automod", 143),
+        ("unban", 23),
+        ("ban", 22),
+        ("kick", 20),
+        ("prune", 21),
+        ("timeout", 24),
+        ("timed out", 24),
+        ("mute", 24),
+        ("nick", 24),
+        ("rename", 24),
+        ("role creat", 30),
+        ("new role", 30),
+        ("role delet", 32),
+        ("role updat", 31),
+        ("role edit", 31),
+        ("role", 25),
+        ("bulk", 73),
+        ("purge", 73),
+        ("message delet", 72),
+        ("deleted message", 72),
+        ("channel creat", 10),
+        ("new channel", 10),
+        ("channel delet", 12),
+        ("channel", 11),
+        ("permission", 14),
+        ("invite", 40),
+        ("emoji", 60),
+        ("sticker", 90),
+        ("webhook", 50),
+        ("bot", 28),
+        ("thread", 110),
+        ("unpin", 75),
+        ("pin", 74),
+        ("event", 100),
+        ("automod", 143),
     ];
     PAIRS.iter().find(|(k, _)| n.contains(k)).map(|(_, c)| *c)
 }
@@ -516,7 +660,13 @@ fn describe_change(change: &Value) -> String {
     let key = change.get("key").and_then(Value::as_str).unwrap_or("?");
     let names = |v: Option<&Value>| -> String {
         v.and_then(Value::as_array)
-            .map(|items| items.iter().filter_map(|i| i.get("name").and_then(Value::as_str)).collect::<Vec<_>>().join(", "))
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|i| i.get("name").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default()
     };
     let plain = |v: Option<&Value>| -> String {
@@ -530,10 +680,17 @@ fn describe_change(change: &Value) -> String {
         "$add" => format!("added role {}", names(change.get("new_value"))),
         "$remove" => format!("removed role {}", names(change.get("new_value"))),
         "communication_disabled_until" => match change.get("new_value").and_then(Value::as_str) {
-            Some(until) => format!("timed out until {}", until.chars().take(16).collect::<String>().replace('T', " ")),
+            Some(until) => format!(
+                "timed out until {}",
+                until.chars().take(16).collect::<String>().replace('T', " ")
+            ),
             None => "timeout removed".to_owned(),
         },
-        _ => format!("{key}: {} → {}", plain(change.get("old_value")), plain(change.get("new_value"))),
+        _ => format!(
+            "{key}: {} → {}",
+            plain(change.get("old_value")),
+            plain(change.get("new_value"))
+        ),
     }
 }
 
@@ -543,7 +700,10 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
     // when asked).
     let all = find_guilds(ctx, arg(args, "server").as_deref());
     if all.is_empty() {
-        return Err(format!("I'm not in a server called \"{}\" — list_servers shows where I am", arg(args, "server").unwrap_or_default()));
+        return Err(format!(
+            "I'm not in a server called \"{}\" — list_servers shows where I am",
+            arg(args, "server").unwrap_or_default()
+        ));
     }
     let everywhere = super::flag(args, "all_servers").unwrap_or(false);
     let servers: Vec<(u64, String)> = match (arg(args, "server"), ctx.guild_id) {
@@ -553,10 +713,20 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
     let (servers, private) = allowed(ctx, servers, Reach::Audit);
     let text = arg(args, "text").unwrap_or_default().to_lowercase();
     // A kind of action Discord can filter by; otherwise match its name.
-    let action_arg = arg(args, "action").filter(|a| !a.trim().is_empty() && !matches!(a.trim().to_lowercase().as_str(), "all" | "any" | "everything"));
+    let action_arg = arg(args, "action").filter(|a| {
+        !a.trim().is_empty()
+            && !matches!(
+                a.trim().to_lowercase().as_str(),
+                "all" | "any" | "everything"
+            )
+    });
     let action = action_arg.as_deref().and_then(action_code);
     let action_words: Vec<String> = match (&action_arg, action) {
-        (Some(a), None) => a.to_lowercase().split_whitespace().map(|w| w.chars().take(5).collect()).collect(),
+        (Some(a), None) => a
+            .to_lowercase()
+            .split_whitespace()
+            .map(|w| w.chars().take(5).collect())
+            .collect(),
         _ => Vec::new(),
     };
     let target = arg(args, "target").map(|t| squash(t.trim_start_matches('@')));
@@ -566,7 +736,9 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
     for (guild_id, server) in &servers {
         let who = principal_in(ctx, *guild_id);
         let can = who.kind == PrincipalKind::Operator
-            || who.permissions.intersects(Permissions::VIEW_AUDIT_LOG | Permissions::ADMINISTRATOR)
+            || who
+                .permissions
+                .intersects(Permissions::VIEW_AUDIT_LOG | Permissions::ADMINISTRATOR)
             || who.level >= AccessLevel::Admin;
         if !can {
             skipped.push(format!("{server} (you can't view its audit log)"));
@@ -581,7 +753,8 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
                 Err(_) => by_name = Some(squash(user.trim_start_matches('@'))),
             }
         }
-        let filtering = !text.is_empty() || target.is_some() || by_name.is_some() || !action_words.is_empty();
+        let filtering =
+            !text.is_empty() || target.is_some() || by_name.is_some() || !action_words.is_empty();
         let mut before: Option<String> = None;
         // Without extra filters one page holds the newest; with them, look
         // further back.
@@ -600,7 +773,10 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
                 Ok(log) => log,
                 Err(error) => {
                     if lines.is_empty() && before.is_none() {
-                        skipped.push(format!("{server} (I can't read its audit log: {})", discord_error(error)));
+                        skipped.push(format!(
+                            "{server} (I can't read its audit log: {})",
+                            discord_error(error)
+                        ));
                     }
                     break;
                 }
@@ -612,7 +788,11 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
                 .flatten()
                 .filter_map(|u| {
                     let username = u.get("username").and_then(Value::as_str)?;
-                    let label = match u.get("global_name").and_then(Value::as_str).filter(|g| *g != username) {
+                    let label = match u
+                        .get("global_name")
+                        .and_then(Value::as_str)
+                        .filter(|g| *g != username)
+                    {
                         Some(global) => format!("{global} (@{username})"),
                         None => format!("@{username}"),
                     };
@@ -624,42 +804,100 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
                     Some(id) => users
                         .get(id)
                         .cloned()
-                        .or_else(|| id.parse::<u64>().ok().and_then(|i| ctx.core.world.with_guild(*guild_id, |g| g.channels.get(&i).and_then(|c| c.name.clone()).map(|n| format!("#{n}")).or_else(|| g.roles.get(&i).map(|r| format!("@{}", r.name)))).flatten()))
+                        .or_else(|| {
+                            id.parse::<u64>().ok().and_then(|i| {
+                                ctx.core
+                                    .world
+                                    .with_guild(*guild_id, |g| {
+                                        g.channels
+                                            .get(&i)
+                                            .and_then(|c| c.name.clone())
+                                            .map(|n| format!("#{n}"))
+                                            .or_else(|| {
+                                                g.roles.get(&i).map(|r| format!("@{}", r.name))
+                                            })
+                                    })
+                                    .flatten()
+                            })
+                        })
                         .unwrap_or_else(|| id.to_owned()),
                     None => "-".to_owned(),
                 }
             };
-            let entries: Vec<&Value> = log.get("audit_log_entries").and_then(Value::as_array).into_iter().flatten().collect();
+            let entries: Vec<&Value> = log
+                .get("audit_log_entries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .collect();
             for entry in &entries {
-                let code = entry.get("action_type").and_then(Value::as_u64).unwrap_or(0);
-                let id = entry.get("id").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                let code = entry
+                    .get("action_type")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let id = entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
                 let ms = ((id >> 22) + 1_420_070_400_000) as i64;
                 let when = Timestamp::from_unix_millis(ms)
-                    .map(|t| t.to_string().chars().take(16).collect::<String>().replace('T', " "))
+                    .map(|t| {
+                        t.to_string()
+                            .chars()
+                            .take(16)
+                            .collect::<String>()
+                            .replace('T', " ")
+                    })
                     .unwrap_or_default();
                 let actor = name(entry.get("user_id").and_then(Value::as_str));
                 let mut target_name = name(entry.get("target_id").and_then(Value::as_str));
                 let options = entry.get("options");
-                if let Some(channel) = options.and_then(|o| o.get("channel_id")).and_then(Value::as_str) {
+                if let Some(channel) = options
+                    .and_then(|o| o.get("channel_id"))
+                    .and_then(Value::as_str)
+                {
                     target_name.push_str(&format!(" in {}", name(Some(channel))));
                 }
                 if let Some(count) = options.and_then(|o| o.get("count")).and_then(Value::as_str) {
                     target_name.push_str(&format!(" (×{count})"));
                 }
-                let changes: Vec<String> = entry.get("changes").and_then(Value::as_array).into_iter().flatten().take(5).map(describe_change).collect();
+                let changes: Vec<String> = entry
+                    .get("changes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .take(5)
+                    .map(describe_change)
+                    .collect();
                 let line = format!(
                     "{when} UTC ({}) [{server}] {} — by {} — on {}{}{}",
                     ago(ms),
                     action_name(code),
                     actor,
                     target_name,
-                    entry.get("reason").and_then(Value::as_str).map(|r| format!(" — reason: {r}")).unwrap_or_default(),
-                    if changes.is_empty() { String::new() } else { format!(" ({})", changes.join("; ")) }
+                    entry
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(|r| format!(" — reason: {r}"))
+                        .unwrap_or_default(),
+                    if changes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", changes.join("; "))
+                    }
                 );
                 let keep = (text.is_empty() || line.to_lowercase().contains(&text))
-                    && target.as_ref().is_none_or(|t| squash(&target_name).contains(t.as_str()))
-                    && by_name.as_ref().is_none_or(|b| squash(&actor).contains(b.as_str()))
-                    && (action_words.is_empty() || action_words.iter().any(|w| action_name(code).contains(w.as_str())));
+                    && target
+                        .as_ref()
+                        .is_none_or(|t| squash(&target_name).contains(t.as_str()))
+                    && by_name
+                        .as_ref()
+                        .is_none_or(|b| squash(&actor).contains(b.as_str()))
+                    && (action_words.is_empty()
+                        || action_words
+                            .iter()
+                            .any(|w| action_name(code).contains(w.as_str())));
                 if keep {
                     lines.push(line);
                 }
@@ -667,25 +905,50 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
                     break;
                 }
             }
-            before = entries.last().and_then(|e| e.get("id")).and_then(Value::as_str).map(str::to_owned);
+            before = entries
+                .last()
+                .and_then(|e| e.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             if entries.len() < 100 || lines.len() >= limit || before.is_none() {
                 break;
             }
         }
     }
-    let searched: Vec<(u64, String)> = servers.iter().filter(|(_, n)| !skipped.iter().any(|s| s.starts_with(n.as_str()))).cloned().collect();
-    log_outside(ctx, &searched, &format!("searched the audit log (asked by {})", origin(ctx)));
+    let searched: Vec<(u64, String)> = servers
+        .iter()
+        .filter(|(_, n)| !skipped.iter().any(|s| s.starts_with(n.as_str())))
+        .cloned()
+        .collect();
+    log_outside(
+        ctx,
+        &searched,
+        &format!("searched the audit log (asked by {})", origin(ctx)),
+    );
     for name in private {
         skipped.push(format!("{name} (private from outside)"));
     }
     let mut out = if lines.is_empty() {
         format!(
             "no matching audit log entries in {}{}",
-            searched.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", "),
-            if action.is_some() || filtering_note(args) { " — try fewer filters" } else { "" }
+            searched
+                .iter()
+                .map(|(_, n)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if action.is_some() || filtering_note(args) {
+                " — try fewer filters"
+            } else {
+                ""
+            }
         )
     } else {
-        format!("Audit log, newest first ({} entr{}):\n{}", lines.len(), if lines.len() == 1 { "y" } else { "ies" }, lines.join("\n"))
+        format!(
+            "Audit log, newest first ({} entr{}):\n{}",
+            lines.len(),
+            if lines.len() == 1 { "y" } else { "ies" },
+            lines.join("\n")
+        )
     };
     if !skipped.is_empty() {
         out.push_str(&format!("\n(Not searched: {})", skipped.join(", ")));
@@ -694,7 +957,9 @@ pub async fn search_audit_logs(ctx: &ToolCtx, args: &Value) -> Result<String, St
 }
 
 fn filtering_note(args: &Value) -> bool {
-    ["by", "target", "text"].iter().any(|k| arg(args, k).is_some())
+    ["by", "target", "text"]
+        .iter()
+        .any(|k| arg(args, k).is_some())
 }
 
 /// Every member of another server (or this one), straight from Discord,
@@ -704,13 +969,26 @@ pub async fn list_server_members(ctx: &ToolCtx, args: &Value) -> Result<String, 
     let servers = find_guilds(ctx, arg(args, "server").as_deref());
     let (guild_id, server) = match servers.as_slice() {
         [one] => one.clone(),
-        [] => return Err(format!("I'm not in a server called \"{}\" — list_servers shows where I am", arg(args, "server").unwrap_or_default())),
+        [] => {
+            return Err(format!(
+                "I'm not in a server called \"{}\" — list_servers shows where I am",
+                arg(args, "server").unwrap_or_default()
+            ));
+        }
         many => {
-            return Err(format!("several servers match: {} — which one?", many.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ")));
+            return Err(format!(
+                "several servers match: {} — which one?",
+                many.iter()
+                    .map(|(_, n)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     };
     if !reach_allowed(ctx, guild_id, Reach::MemberSearch) {
-        return Err(format!("{server} keeps its member list private from outside"));
+        return Err(format!(
+            "{server} keeps its member list private from outside"
+        ));
     }
     // Page through the whole list.
     let mut after = 0u64;
@@ -719,7 +997,12 @@ pub async fn list_server_members(ctx: &ToolCtx, args: &Value) -> Result<String, 
         let page = ctx
             .core
             .http
-            .raw("GET", &format!("/guilds/{guild_id}/members?limit=1000&after={after}"), None, None)
+            .raw(
+                "GET",
+                &format!("/guilds/{guild_id}/members?limit=1000&after={after}"),
+                None,
+                None,
+            )
             .await
             .map_err(discord_error)?;
         let Value::Array(page) = page else { break };
@@ -764,27 +1047,61 @@ pub async fn list_server_members(ctx: &ToolCtx, args: &Value) -> Result<String, 
         .filter(|m| role.is_none_or(|r| m.roles.iter().any(|x| x.get() == r)))
         .filter_map(|m| {
             let user = m.user.as_ref()?;
-            let display = m.nick.clone().or_else(|| user.global_name.clone()).unwrap_or_else(|| user.username.clone());
+            let display = m
+                .nick
+                .clone()
+                .or_else(|| user.global_name.clone())
+                .unwrap_or_else(|| user.username.clone());
             if let Some(q) = &query {
-                if !squash(&display).contains(q.as_str()) && !squash(&user.username).contains(q.as_str()) {
+                if !squash(&display).contains(q.as_str())
+                    && !squash(&user.username).contains(q.as_str())
+                {
                     return None;
                 }
             }
             let roles = role_names(&m.roles);
             Some(format!(
                 "- {}{}{}",
-                super::person_label(m.nick.as_deref(), user.global_name.as_deref(), &user.username, user.id.get()),
-                if user.bot.unwrap_or(false) { " [bot]" } else { "" },
-                if roles.is_empty() { String::new() } else { format!(" — {roles}") }
+                super::person_label(
+                    m.nick.as_deref(),
+                    user.global_name.as_deref(),
+                    &user.username,
+                    user.id.get()
+                ),
+                if user.bot.unwrap_or(false) {
+                    " [bot]"
+                } else {
+                    ""
+                },
+                if roles.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {roles}")
+                }
             ))
         })
         .collect();
     if ctx.guild_id != Some(guild_id) {
-        crate::runtime::activity::log_outside(&ctx.core, guild_id, &format!("listed members (asked by {})", origin(ctx)));
+        crate::runtime::activity::log_outside(
+            &ctx.core,
+            guild_id,
+            &format!("listed members (asked by {})", origin(ctx)),
+        );
     }
-    Ok(format!("{} member(s) in {server}{}:
-{}", lines.len(), if role.is_some() || query.is_some() { " matching" } else { "" }, lines.join("
-")))
+    Ok(format!(
+        "{} member(s) in {server}{}:
+{}",
+        lines.len(),
+        if role.is_some() || query.is_some() {
+            " matching"
+        } else {
+            ""
+        },
+        lines.join(
+            "
+"
+        )
+    ))
 }
 
 /// The servers the agent is in, for "which servers are you in".
@@ -792,12 +1109,23 @@ pub async fn list_servers(ctx: &ToolCtx, _args: &Value) -> Result<String, String
     let lines: Vec<String> = find_guilds(ctx, None)
         .into_iter()
         .map(|(id, name)| {
-            let members = ctx.core.world.with_guild(id, |g| g.member_count.max(g.members.len() as u64)).unwrap_or(0);
+            let members = ctx
+                .core
+                .world
+                .with_guild(id, |g| g.member_count.max(g.members.len() as u64))
+                .unwrap_or(0);
             let you = ctx.core.world.member(id, ctx.requester.user_id).is_some();
-            format!("- {name} (ID {id}) — {members} members{}", if you { ", you're in it" } else { "" })
+            format!(
+                "- {name} (ID {id}) — {members} members{}",
+                if you { ", you're in it" } else { "" }
+            )
         })
         .collect();
-    Ok(if lines.is_empty() { "I'm not in any servers".to_owned() } else { lines.join("\n") })
+    Ok(if lines.is_empty() {
+        "I'm not in any servers".to_owned()
+    } else {
+        lines.join("\n")
+    })
 }
 
 #[cfg(test)]
@@ -813,7 +1141,8 @@ mod tests {
         assert_eq!(action_code("channel deleted"), Some(12));
         assert_eq!(action_code("timeouts"), Some(24));
         assert_eq!(action_code("delete"), None);
-        let change = serde_json::json!({ "key": "$add", "new_value": [{ "name": "Mod", "id": "1" }] });
+        let change =
+            serde_json::json!({ "key": "$add", "new_value": [{ "name": "Mod", "id": "1" }] });
         assert_eq!(describe_change(&change), "added role Mod");
     }
 

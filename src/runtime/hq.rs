@@ -121,8 +121,11 @@ pub fn leaders(core: &AgentCore, guild_id: u64) -> (u64, Vec<u64>, Vec<u64>) {
                 .values()
                 .filter(|r| r.id.get() != guild_id && !r.managed)
                 .filter(|r| {
-                    r.permissions.intersects(Permissions::ADMINISTRATOR | Permissions::MANAGE_GUILD)
-                        || ["owner", "founder", "co-owner", "admin", "head"].iter().any(|k| r.name.to_lowercase().contains(k))
+                    r.permissions
+                        .intersects(Permissions::ADMINISTRATOR | Permissions::MANAGE_GUILD)
+                        || ["owner", "founder", "co-owner", "admin", "head"]
+                            .iter()
+                            .any(|k| r.name.to_lowercase().contains(k))
                             && !r.name.to_lowercase().contains("mod")
                 })
                 .map(|r| r.id.get())
@@ -142,7 +145,11 @@ pub fn leaders(core: &AgentCore, guild_id: u64) -> (u64, Vec<u64>, Vec<u64>) {
 /// Tell the server's leaders something: in a channel the bot can write
 /// in (tagging the owner and top staff roles), or by DM if it can't post
 /// anywhere. Returns the channel and message when posted in the server.
-pub async fn notify_leaders(core: &Arc<AgentCore>, guild_id: u64, text: &str) -> Option<(u64, u64)> {
+pub async fn notify_leaders(
+    core: &Arc<AgentCore>,
+    guild_id: u64,
+    text: &str,
+) -> Option<(u64, u64)> {
     let (owner, roles, people) = leaders(core, guild_id);
     let mut tags: Vec<String> = Vec::new();
     if owner != 0 {
@@ -155,8 +162,16 @@ pub async fn notify_leaders(core: &Arc<AgentCore>, guild_id: u64, text: &str) ->
             .create_message(ChannelId::new(target))
             .content(format!("{} {text}", tags.join(" ")))
             .allowed_mentions(AllowedMentions {
-                users: if owner != 0 { vec![axis::prelude::UserId::new(owner)] } else { Vec::new() },
-                roles: roles.iter().take(3).map(|r| axis::prelude::RoleId::new(*r)).collect(),
+                users: if owner != 0 {
+                    vec![axis::prelude::UserId::new(owner)]
+                } else {
+                    Vec::new()
+                },
+                roles: roles
+                    .iter()
+                    .take(3)
+                    .map(|r| axis::prelude::RoleId::new(*r))
+                    .collect(),
                 ..AllowedMentions::none()
             })
             .await;
@@ -165,7 +180,10 @@ pub async fn notify_leaders(core: &Arc<AgentCore>, guild_id: u64, text: &str) ->
         }
     }
     // Nowhere to post: DM the owner and the people holding top roles.
-    let server = core.world.with_guild(guild_id, |g| g.name.clone()).unwrap_or_default();
+    let server = core
+        .world
+        .with_guild(guild_id, |g| g.name.clone())
+        .unwrap_or_default();
     let mut recipients = vec![owner];
     recipients.extend(people);
     recipients.retain(|u| *u != 0);
@@ -258,7 +276,11 @@ async fn ask(
             asked_at: now_ms(),
         });
     });
-    core.feed(FeedKind::Coordination, "asked the server's leaders for a private HQ channel", None);
+    core.feed(
+        FeedKind::Coordination,
+        "asked the server's leaders for a private HQ channel",
+        None,
+    );
 }
 
 const YES: &[&str] = &[

@@ -159,7 +159,11 @@ impl GuildState {
 
     /// Like `find_channel`, among channels that pass `keep` (so "ticket
     /// support" finds the text channel, not the category of that name).
-    pub fn find_channel_where(&self, query: &str, keep: impl Fn(&Channel) -> bool) -> Option<&Channel> {
+    pub fn find_channel_where(
+        &self,
+        query: &str,
+        keep: impl Fn(&Channel) -> bool,
+    ) -> Option<&Channel> {
         let query = query.trim();
         let id = parse_snowflake(query);
         if let Some(id) = id {
@@ -188,7 +192,12 @@ impl GuildState {
         // finds "scratchpad3".
         let spoken: String = name
             .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
-            .filter(|w| !matches!(*w, "the" | "channel" | "chat" | "text" | "in" | "my" | "our"))
+            .filter(|w| {
+                !matches!(
+                    *w,
+                    "the" | "channel" | "chat" | "text" | "in" | "my" | "our"
+                )
+            })
             .map(|w| match w {
                 "zero" => "0",
                 "one" => "1",
@@ -215,10 +224,11 @@ impl GuildState {
                 .filter(|c| keep(c))
                 .find(|c| c.name.as_deref().is_some_and(|n| squash(n) == wanted))
                 .or_else(|| {
-                    self.channels
-                        .values()
-                        .filter(|c| keep(c))
-                        .find(|c| c.name.as_deref().is_some_and(|n| squash(n).contains(&wanted)))
+                    self.channels.values().filter(|c| keep(c)).find(|c| {
+                        c.name
+                            .as_deref()
+                            .is_some_and(|n| squash(n).contains(&wanted))
+                    })
                 });
             if found.is_some() {
                 return found;
@@ -253,15 +263,26 @@ impl GuildState {
         // Letters and digits only ("Gamer 🎮" finds "Gamer"), and plurals
         // ("Moderators" finds "Moderator").
         let squash = |text: &str| -> String {
-            text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+            text.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect()
         };
         let wanted = squash(&name);
         let singular = wanted.trim_end_matches('s').to_owned();
         self.roles
             .values()
             .find(|r| r.name.to_lowercase() == name)
-            .or_else(|| self.roles.values().find(|r| !wanted.is_empty() && squash(&r.name) == wanted))
-            .or_else(|| self.roles.values().find(|r| !singular.is_empty() && squash(&r.name).trim_end_matches('s') == singular))
+            .or_else(|| {
+                self.roles
+                    .values()
+                    .find(|r| !wanted.is_empty() && squash(&r.name) == wanted)
+            })
+            .or_else(|| {
+                self.roles.values().find(|r| {
+                    !singular.is_empty() && squash(&r.name).trim_end_matches('s') == singular
+                })
+            })
             .or_else(|| {
                 self.roles
                     .values()
@@ -328,12 +349,15 @@ pub struct World {
 }
 
 impl World {
-    /// Put a guild in the cache directly (experiments and tests).
-    #[cfg(test)]
+    /// Put a guild in the cache directly (simulation harness, experiments
+    /// and tests).
     pub fn insert_guild(&self, guild: &Guild, edit: impl FnOnce(&mut GuildState)) {
         let mut state = GuildState::from_guild(guild);
         edit(&mut state);
-        self.guilds.write().expect("world poisoned").insert(state.id, state);
+        self.guilds
+            .write()
+            .expect("world poisoned")
+            .insert(state.id, state);
     }
 
     pub fn set_me(&self, user: User) {
@@ -589,7 +613,12 @@ mod tests {
         }))
         .unwrap();
         let mut state = GuildState::from_guild(&guild);
-        for (id, name) in [(10, "general"), (11, "scratchpad3"), (12, "🪶sue-updates"), (13, "c-md")] {
+        for (id, name) in [
+            (10, "general"),
+            (11, "scratchpad3"),
+            (12, "🪶sue-updates"),
+            (13, "c-md"),
+        ] {
             let channel: Channel = serde_json::from_value(serde_json::json!({
                 "id": id.to_string(), "type": 0, "name": name
             }))

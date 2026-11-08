@@ -40,7 +40,10 @@ pub fn can_manage(core: &AgentCore, guild_id: u64, who: &Principal) -> bool {
     if who.kind == PrincipalKind::Operator || who.level >= AccessLevel::Owner {
         return true;
     }
-    let access = core.hive.knowledge.guild(guild_id, |k| k.settings_access.clone());
+    let access = core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| k.settings_access.clone());
     if access.is_restricted() {
         access.users.contains(&who.user_id) || who.roles.iter().any(|r| access.roles.contains(r))
     } else {
@@ -106,16 +109,26 @@ pub fn on_message(core: &Arc<AgentCore>, guild_id: u64, message: &Message) {
     });
     if let Some(level) = level_up {
         let core = Arc::clone(core);
-        tokio::spawn(async move { leveled_up(&core, guild_id, user_id, level, Some(channel_id)).await });
+        tokio::spawn(
+            async move { leveled_up(&core, guild_id, user_id, level, Some(channel_id)).await },
+        );
     }
 }
 
 /// Role rewards and the level-up message.
-async fn leveled_up(core: &AgentCore, guild_id: u64, user_id: u64, level: u32, channel: Option<u64>) {
+async fn leveled_up(
+    core: &AgentCore,
+    guild_id: u64,
+    user_id: u64,
+    level: u32,
+    channel: Option<u64>,
+) {
     let l = core.hive.knowledge.guild(guild_id, |k| k.leveling.clone());
     let has: Vec<u64> = core
         .world
-        .with_guild(guild_id, |g| g.members.get(&user_id).map(|m| m.roles.clone()))
+        .with_guild(guild_id, |g| {
+            g.members.get(&user_id).map(|m| m.roles.clone())
+        })
         .flatten()
         .unwrap_or_default();
     let earned: Vec<_> = l.rewards.iter().filter(|r| r.level <= level).collect();
@@ -123,28 +136,54 @@ async fn leveled_up(core: &AgentCore, guild_id: u64, user_id: u64, level: u32, c
     let mut new_roles = Vec::new();
     for reward in &earned {
         let keep = l.stack_rewards || Some(reward.role_id) == top;
-        let path = format!("/guilds/{guild_id}/members/{user_id}/roles/{}", reward.role_id);
+        let path = format!(
+            "/guilds/{guild_id}/members/{user_id}/roles/{}",
+            reward.role_id
+        );
         if keep && !has.contains(&reward.role_id) {
-            if core.http.raw("PUT", &path, None, Some(format!("level {level} reward"))).await.is_ok() {
+            if core
+                .http
+                .raw("PUT", &path, None, Some(format!("level {level} reward")))
+                .await
+                .is_ok()
+            {
                 new_roles.push(reward.role_id);
             }
         } else if !keep && has.contains(&reward.role_id) {
-            let _ = core.http.raw("DELETE", &path, None, Some("replaced by a higher level reward".to_owned())).await;
+            let _ = core
+                .http
+                .raw(
+                    "DELETE",
+                    &path,
+                    None,
+                    Some("replaced by a higher level reward".to_owned()),
+                )
+                .await;
         }
     }
-    let name = l.members.get(&user_id).map(|e| e.name.clone()).unwrap_or_default();
+    let name = l
+        .members
+        .get(&user_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_default();
     let mut text = l
-        .message
+        .message_for(user_id)
         .replace("{user}", &format!("<@{user_id}>"))
         .replace("{name}", &name)
         .replace("{level}", &level.to_string());
     if !new_roles.is_empty() {
         text.push_str(&format!(
             " You unlocked {}.",
-            new_roles.iter().map(|r| format!("<@&{r}>")).collect::<Vec<_>>().join(", ")
+            new_roles
+                .iter()
+                .map(|r| format!("<@&{r}>"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
-    let target = match l.announce.as_str() {
+    // The server's announce setting, unless this person chose their own.
+    let announce = l.announce_for(user_id);
+    let target = match announce {
         "off" => return,
         "dm" => match core.http.create_dm(UserId::new(user_id)).await {
             Ok(dm) => Some(dm.id.get()),
@@ -154,7 +193,7 @@ async fn leveled_up(core: &AgentCore, guild_id: u64, user_id: u64, level: u32, c
         _ => channel.or((l.announce_channel != 0).then_some(l.announce_channel)),
     };
     // Not in a channel it was told never to chat in.
-    let target = target.filter(|t| l.announce == "dm" || core.barred(guild_id, *t).is_none());
+    let target = target.filter(|t| announce == "dm" || core.barred(guild_id, *t).is_none());
     if let Some(target) = target {
         let _ = core
             .http
@@ -185,7 +224,11 @@ pub async fn tick(core: &AgentCore) {
                         by_channel.entry(*channel).or_default().push(*user);
                     }
                 }
-                by_channel.into_values().filter(|v| v.len() >= 2).flatten().collect()
+                by_channel
+                    .into_values()
+                    .filter(|v| v.len() >= 2)
+                    .flatten()
+                    .collect()
             })
             .unwrap_or_default();
         let members = core
@@ -261,7 +304,11 @@ pub fn on_join(core: &AgentCore, guild_id: u64, user_id: u64, joined: bool) {
 }
 
 /// A member's rank card and a one-line summary.
-pub async fn rank_card(core: &AgentCore, guild_id: u64, user_id: u64) -> Result<(Vec<u8>, String), String> {
+pub async fn rank_card(
+    core: &AgentCore,
+    guild_id: u64,
+    user_id: u64,
+) -> Result<(Vec<u8>, String), String> {
     let l = core.hive.knowledge.guild(guild_id, |k| k.leveling.clone());
     let entry = l.members.get(&user_id).cloned().unwrap_or_default();
     let (level, into, needed) = Leveling::progress(entry.xp);
@@ -272,14 +319,28 @@ pub async fn rank_card(core: &AgentCore, guild_id: u64, user_id: u64) -> Result<
             g.members.get(&user_id).map(|m| {
                 (
                     m.display_name().to_owned(),
-                    crate::tools::images::avatar_url(Some(guild_id), user_id, m.avatar.as_deref(), m.guild_avatar.as_deref()),
+                    crate::tools::images::avatar_url(
+                        Some(guild_id),
+                        user_id,
+                        m.avatar.as_deref(),
+                        m.guild_avatar.as_deref(),
+                    ),
                 )
             })
         })
         .flatten()
-        .unwrap_or_else(|| (if entry.name.is_empty() { "member".to_owned() } else { entry.name.clone() }, String::new()));
+        .unwrap_or_else(|| {
+            (
+                if entry.name.is_empty() {
+                    "member".to_owned()
+                } else {
+                    entry.name.clone()
+                },
+                String::new(),
+            )
+        });
     let png = crate::tools::rankcard::render(
-        &l.card,
+        l.card_for(user_id),
         &crate::tools::rankcard::RankCardData {
             name: name.clone(),
             avatar_url: (!avatar.is_empty()).then_some(avatar),
@@ -321,7 +382,11 @@ pub fn leaderboard(core: &AgentCore, guild_id: u64, count: usize) -> String {
                 2 => "🥉".to_owned(),
                 n => format!("**{}.**", n + 1),
             };
-            format!("{medal} <@{user}> — level {} · {} XP", Leveling::progress(e.xp).0, e.xp)
+            format!(
+                "{medal} <@{user}> — level {} · {} XP",
+                Leveling::progress(e.xp).0,
+                e.xp
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -330,7 +395,12 @@ pub fn leaderboard(core: &AgentCore, guild_id: u64, count: usize) -> String {
 /// Totals over the last `days` days, for answering questions.
 pub fn stats_report(core: &AgentCore, guild_id: u64, days: usize) -> String {
     let stats = core.hive.knowledge.guild(guild_id, |k| k.stats.clone());
-    let recent: Vec<(&String, &DayStats)> = stats.days.iter().rev().take(days.clamp(1, KEEP_DAYS)).collect();
+    let recent: Vec<(&String, &DayStats)> = stats
+        .days
+        .iter()
+        .rev()
+        .take(days.clamp(1, KEEP_DAYS))
+        .collect();
     if recent.is_empty() {
         return "No statistics collected yet (they build up from now on).".to_owned();
     }
@@ -338,7 +408,10 @@ pub fn stats_report(core: &AgentCore, guild_id: u64, days: usize) -> String {
     let joins: u32 = recent.iter().map(|(_, d)| d.joins).sum();
     let leaves: u32 = recent.iter().map(|(_, d)| d.leaves).sum();
     let voice: u32 = recent.iter().map(|(_, d)| d.voice_minutes).sum();
-    let mut active: Vec<u64> = recent.iter().flat_map(|(_, d)| d.active.iter().copied()).collect();
+    let mut active: Vec<u64> = recent
+        .iter()
+        .flat_map(|(_, d)| d.active.iter().copied())
+        .collect();
     active.sort_unstable();
     active.dedup();
     let mut channels: std::collections::BTreeMap<u64, u32> = Default::default();
@@ -353,21 +426,46 @@ pub fn stats_report(core: &AgentCore, guild_id: u64, days: usize) -> String {
     }
     let mut top: Vec<(u64, u32)> = channels.into_iter().collect();
     top.sort_by(|a, b| b.1.cmp(&a.1));
-    let busiest = hours.iter().enumerate().max_by_key(|(_, n)| **n).map(|(h, _)| h).unwrap_or(0);
+    let busiest = hours
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, n)| **n)
+        .map(|(h, _)| h)
+        .unwrap_or(0);
     let first = recent.last().map(|(_, d)| d.members).unwrap_or(0);
     let last = recent.first().map(|(_, d)| d.members).unwrap_or(0);
     let daily: Vec<String> = recent
         .iter()
         .take(14)
-        .map(|(day, d)| format!("{day}: {} msgs, {} active, {} members, +{}/-{}, {} voice min", d.messages, d.active.len(), d.members, d.joins, d.leaves, d.voice_minutes))
+        .map(|(day, d)| {
+            format!(
+                "{day}: {} msgs, {} active, {} members, +{}/-{}, {} voice min",
+                d.messages,
+                d.active.len(),
+                d.members,
+                d.joins,
+                d.leaves,
+                d.voice_minutes
+            )
+        })
         .collect();
     format!(
         "Last {} day(s){}: {messages} messages from {} active people, {joins} joined / {leaves} left, members {first} → {last}, {voice} voice minutes. \
          Busiest hour (UTC): {busiest}:00. Top channels: {}.\nDaily (newest first):\n{}",
         recent.len(),
-        if stats.paused { " (collection is PAUSED)" } else if !stats.enabled { " (collection is OFF)" } else { "" },
+        if stats.paused {
+            " (collection is PAUSED)"
+        } else if !stats.enabled {
+            " (collection is OFF)"
+        } else {
+            ""
+        },
         active.len(),
-        top.iter().take(5).map(|(c, n)| format!("<#{c}> {n}")).collect::<Vec<_>>().join(", "),
+        top.iter()
+            .take(5)
+            .map(|(c, n)| format!("<#{c}> {n}"))
+            .collect::<Vec<_>>()
+            .join(", "),
         daily.join("\n")
     )
 }

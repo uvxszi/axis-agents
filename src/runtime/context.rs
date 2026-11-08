@@ -80,14 +80,25 @@ pub fn build(
     let profile = core.profile();
     let compact = is_compact(core);
     let window = core.context_window() as usize;
-    let room = core.thinking_room.load(std::sync::atomic::Ordering::Relaxed);
-    let reply = profile.model.max_output_tokens.clamp(128, (window / 3).max(256) as u32);
+    let room = core
+        .thinking_room
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let reply = profile
+        .model
+        .max_output_tokens
+        .clamp(128, (window / 3).max(256) as u32);
     // LM Studio: thinking is capped, and the request gets that much extra
     // room so the answer keeps its full length.
-    let thinking_budget = (profile.model.provider == crate::llm::ProviderKind::LmStudio).then(|| {
-        if profile.model.thinking_budget > 0 { profile.model.thinking_budget } else { reply.max(512) }
-    });
-    let max_output = (reply + room + thinking_budget.unwrap_or(0)).min((window / 2).max(256) as u32);
+    let thinking_budget =
+        (profile.model.provider == crate::llm::ProviderKind::LmStudio).then(|| {
+            if profile.model.thinking_budget > 0 {
+                profile.model.thinking_budget
+            } else {
+                reply.max(512)
+            }
+        });
+    let max_output =
+        (reply + room + thinking_budget.unwrap_or(0)).min((window / 2).max(256) as u32);
     let cpt = *core.chars_per_token.lock().expect("calibration poisoned") as f64;
     let total_chars =
         (((window as f64 - max_output as f64) * 0.92 * shrink as f64) * cpt).max(2000.0) as usize;
@@ -111,7 +122,11 @@ pub fn build(
         .triggers
         .iter()
         .map(|m| m.content.as_str())
-        .chain(job.triggers.iter().filter_map(|m| m.referenced_message.as_deref().map(|r| r.content.as_str())))
+        .chain(
+            job.triggers
+                .iter()
+                .filter_map(|m| m.referenced_message.as_deref().map(|r| r.content.as_str())),
+        )
         .chain(job.question.as_deref())
         .chain(job.task.as_ref().map(|t| t.instruction.as_str()))
         .collect::<Vec<_>>()
@@ -166,14 +181,19 @@ pub fn build(
         Vec::new()
     } else {
         // A short follow-up ("delete them") is about what came before.
-        let about = if current_text.len() < 80 { format!("{current_text}\n{recent_talk}") } else { current_text.clone() };
+        let about = if current_text.len() < 80 {
+            format!("{current_text}\n{recent_talk}")
+        } else {
+            current_text.clone()
+        };
         crate::tools::blocked_tools(core, &job.requester, in_guild, &about)
     };
     let (guild_name, member_count) = job
         .guild_id
         .and_then(|g| {
-            core.world
-                .with_guild(g, |g| (g.name.clone(), g.member_count.max(g.members.len() as u64)))
+            core.world.with_guild(g, |g| {
+                (g.name.clone(), g.member_count.max(g.members.len() as u64))
+            })
         })
         .unwrap_or_default();
     let me = core.world.me();
@@ -211,11 +231,23 @@ pub fn build(
             profile.aliases.join(", ")
         ));
     }
+    // AAv2: the agent must know its own name so it never joins in when
+    // people joke about it, and recognizes when it's the topic.
+    system.push_str(&format!(
+        "
+- You ARE \"{name}\": every mention of \"{name}\" or your aliases in this chat is about YOU, including jokes and insults. Never react as if \"{name}\" were someone else, never join in mocking yourself, and never act hurt. Either answer the point calmly, defend yourself with plain facts, or ignore it (NO_REPLY). When people talk about \"{name}\" to others, that is still you.",
+        name = profile.name
+    ));
+    system.push_str("- Facts about what you are (model, framework) come from the agent_info tool: call it instead of guessing.
+");
     system.push_str(&format!("\n- Your specialty: {}.\n", profile.specialty));
     if in_guild {
         system.push_str("- Your slash commands (people can use them too): /ask, /rank, /leaderboard, /setup, /tasks, /memories, /status. Leveling, rank cards, stats, tickets, giveaways and role menus are yours to run — use your tools for them.\n");
     }
-    if let Some(session) = job.guild_id.and_then(|g| super::translate::session_in(core, g, job.channel_id)) {
+    if let Some(session) = job
+        .guild_id
+        .and_then(|g| super::translate::session_in(core, g, job.channel_id))
+    {
         system.push_str(&format!(
             "- You're live-translating this channel{} — every new message is translated automatically, so don't translate in your replies. Call stop_translating when asked to stop.
 ",
@@ -224,7 +256,9 @@ pub fn build(
     }
     if let Some(guild_id) = job.guild_id {
         match core.voice.channel(guild_id) {
-            Some(voice_channel) if voice_channel == job.channel_id && matches!(job.outlet, Outlet::Channel) => {
+            Some(voice_channel)
+                if voice_channel == job.channel_id && matches!(job.outlet, Outlet::Channel) =>
+            {
                 system.push_str(
                     "- You're in this channel's voice call right now. This is its text chat: some people here read instead of listening. Reply in text as usual; when it helps people in the call, also say something out loud by putting it on its own line starting with SAY: (e.g. SAY: Posted the link in chat).\n",
                 );
@@ -238,7 +272,11 @@ pub fn build(
             None => {
                 // Older messages may say it's in a call; this is the truth.
                 system.push_str("- You are NOT in any voice channel right now (whatever earlier messages say). If someone asks you to join or hop in, call join_voice — never claim you're already there.\n");
-                if core.world.channel(guild_id, job.channel_id).is_some_and(|c| c.is_voice()) {
+                if core
+                    .world
+                    .channel(guild_id, job.channel_id)
+                    .is_some_and(|c| c.is_voice())
+                {
                     system.push_str("- This is the text chat of a voice channel. \"Join\" here means this voice channel.\n");
                 }
             }
@@ -420,19 +458,25 @@ pub fn build(
             ));
         }
         if let Some(guild_id) = job.guild_id {
-            let barred: Vec<String> = core.hive.knowledge.guild(guild_id, |k| {
-                k.no_chat
-                    .iter()
-                    .filter(|r| r.agent_id.as_deref().is_none_or(|a| a == core.id))
-                    .map(|r| (r.channel_id, r.setter_name.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .into_iter()
-            .map(|(id, by)| {
-                let name = core.world.with_guild(guild_id, |g| g.channel_name(id)).unwrap_or_else(|| id.to_string());
-                format!("- #{name} (set by {by})")
-            })
-            .collect();
+            let barred: Vec<String> = core
+                .hive
+                .knowledge
+                .guild(guild_id, |k| {
+                    k.no_chat
+                        .iter()
+                        .filter(|r| r.agent_id.as_deref().is_none_or(|a| a == core.id))
+                        .map(|r| (r.channel_id, r.setter_name.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .into_iter()
+                .map(|(id, by)| {
+                    let name = core
+                        .world
+                        .with_guild(guild_id, |g| g.channel_name(id))
+                        .unwrap_or_else(|| id.to_string());
+                    format!("- #{name} (set by {by})")
+                })
+                .collect();
             if !barred.is_empty() {
                 system.push_str(&format!(
                     "\n## Channels you never chat in (no replies, no posts — not even when asked to post there; allow_chatting_in lifts it)\n{}\n",
@@ -506,21 +550,22 @@ pub fn build(
         ReplyLength::Detailed => "Be thorough when it helps, but stay readable.",
     };
     system.push_str(&format!(
-        "\n## How to talk\n- You're a regular in this community, not a corporate assistant: match the room's tone, skip filler (no \"As an AI…\", no \"Great question!\").\n- {length}\n\
+        "\n## How to talk\n- You're a capable, professional presence in this community. Be warm but composed: helpful and direct, never needy, never performatively casual. Skip filler (no \"As an AI…\", no \"Great question!\", no \"Happy to help!\").\n- {length}\n\
          - Write Discord markdown. When you talk ABOUT someone, just use their name. Only write @name when you are deliberately pinging them because you were asked to reach them (\"ping/tell/remind X\"). Never ping roles, @everyone, or @here.\n\
          - Don't prefix your reply with your name, a timestamp, or the other person's name (you're already replying to them). Don't narrate your tool use — just use tools and give the result.\n\
-         - Emojis: almost never. No emoji at the end of messages, no 👀, no emoji habits. Use one only when it genuinely adds meaning.\n\
-         - When someone asks you to do something and you have a tool for it, do it — don't ask them to pick between options or confirm unless the request is genuinely ambiguous or destructive. Act on every item they mean (e.g. every post), not just one.\n\
+         - Emojis: almost never. Never use laughing emojis (😂, 🤣) unless the person is clearly joking around and it would land naturally. No emoji at the end of messages, no emoji habits.\n\
+         - When someone asks you to do something and you have a tool for it, do it — don't ask them to pick between options or confirm unless the request is genuinely ambiguous. Act on every item they mean (e.g. every post), not just one. Destructive actions post their own confirmation buttons automatically — just say what's queued.
+         - NEVER end a reply with a filler question (\"any questions?\", \"want me to do anything else?\", \"just vibing?\"). Ask a question ONLY when the answer is genuinely needed for the task and a wrong guess would matter. Otherwise: do the thing, state the result, stop.\n\
          - Questions about what's in a channel or the server right now (latest updates, versions, announcements, who said what) must be answered by reading it with tools first, not from memory or notes — those may be stale. If someone says you're wrong, re-check with tools and give the corrected answer right away; don't offer to check.\n\
          - Never make up links. Only post a URL (especially image links) that appeared in a tool result or the conversation; to find an image, use image_search.\n\
          - Only say you did something if a tool result in this conversation confirms it, and describe exactly what the result says you did.\n\
-         - Don't ask for details the conversation already gives (look back at what was said: the image, the channel, the size, the topic) — and when something small is unspecified, pick a sensible default and do it. Ask only when it's truly ambiguous and a wrong guess would matter.\n\
+         - Don't ask for details the conversation already gives (look back at what was said: the image, the channel, the size, the topic) — and when something small is unspecified, pick a sensible default and do it.\n\
          - Never tell someone Discord or your tools can't do something a member or admin could do in Discord — find the tool for it (admins also have discord_api for anything else).
          - For a big or multi-part job, call make_plan first (one step per line), then do the steps one at a time with your tools, calling step_done after each — you'll be kept going until every step is done.\n\
          - For creative jobs (\"make an ocean-themed rank card\", a profile picture, a server setup), decide every detail yourself — colors, fonts, layout, images (find real ones with image_search) — apply it, look at the result, and fix anything off. Don't ask them to pick details.\n\
-         - To write anything long (code, a guide, a report), don't write it in one reply: draft_create with an outline, then draft_write one section per call (with make_plan, one section per step), fix things with draft_edit, check with draft_view, and draft_publish to attach the file.\n\
+         - Files: to produce a file (code, a guide, a big list, generated data), use write_file — never paste huge content into chat. For anything repetitive, large (\"a 1MB file of the word X repeated\") or computational, write a small script and run it with run_script instead of generating content yourself; attach what it makes with attach_file. To edit or annotate an image (text, arrows, highlights), call edit_image or draw_image rather than describing what it should look like.\n\
          - Images and files you attach always appear below your whole message, never between paragraphs — refer to them as \"below\" (e.g. \"their profile pictures are below\"), and don't leave gaps for them.\n\
-         - If a tool you need isn't in your list, call load_tools with what you want to do before saying you can't. You never \"lack a tool\" for something a Discord admin could do; when someone isn't allowed, say it's their permission.\n\
+         - If a tool you need isn't in your list, call load_tools with what you want to do before saying you can't. You never \"lack a tool\" for something a Discord admin could do. When a tool result says the system already told someone they lack permissions, do not repeat it — move on or suggest what they CAN do.\n\
          - Do things in the order they asked. \"Make 10 copies and then delete them one every 5 seconds\" means: make all 10 first, then delete one, call wait for 5 seconds, delete the next, and so on. Use the wait tool for any timing; count as you go, and only report what your tool results show.\n\
          - Long tool results come back as a document outline: open only the sections you need with read_section (big sections open into smaller ones) instead of guessing.\n\
          - When one message asks for several things (\"switch to gaming and move me there\"), do every part — call a tool for each — before you answer.\n\
@@ -665,7 +710,9 @@ fn instruction(core: &AgentCore, job: &Job) -> String {
             "You were just talking with {who}; their latest message ({ids}) may be meant for you. If it is, reply. If they're clearly talking to someone else, reply exactly NO_REPLY."
         ),
         Reason::Ambient => match job.question.as_deref() {
-            Some(hint) => format!("Nobody addressed you, but you noticed something (latest message: {ids}): {hint}"),
+            Some(hint) => format!(
+                "Nobody addressed you, but you noticed something (latest message: {ids}): {hint}"
+            ),
             None => format!(
                 "Nobody addressed you — you're just in the room. Chime in only if you'd genuinely add something (answer an open question, correct a mistake, or a remark that fits the vibe). Otherwise reply exactly NO_REPLY. (Latest message: {ids}.)"
             ),

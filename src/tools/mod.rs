@@ -14,6 +14,7 @@
 pub mod discord;
 pub mod docs;
 pub mod extra;
+pub mod files;
 pub mod images;
 pub mod mcp;
 pub mod power;
@@ -506,26 +507,6 @@ fn build_catalog() -> Vec<ToolDef> {
             keywords: ["avatar", "profile picture", "pfp", "profile icon", "your icon", "your picture"],
             "Change your own (the bot's) profile picture to an image — a URL (e.g. from image_search) or an image made/edited in this conversation. Admins only; it shows in every server.",
             { "image": ("string", "Image URL or the name of an image here") }, required: ["image"]),
-        tool!("draft_create", Utilities, Conversational, none, guild: false, core: false,
-            keywords: ["write", "file", "document", "code", "script", "guide", "readme", "essay", "report", "make a", "create a", "long", "big", "program", "doc"],
-            "Start writing a big file (code, a guide, a report…) a section at a time — the way to write anything long without losing track. Give the filename (with extension) and the planned sections.",
-            { "filename": ("string", "e.g. bot.py, guide.md"), "sections": ("string", "Planned sections, one per line (for code: imports, each function or group, main…)") }, required: ["filename", "sections"]),
-        tool!("draft_write", Utilities, Conversational, none, guild: false, core: false,
-            keywords: ["write", "section", "draft"],
-            "Write (or rewrite, or append to) one section of a draft. Omit section to write the next empty one.",
-            { "draft": ("string", "Draft ID, e.g. draft2 (omit for the current one)"), "section": ("string", "Section number or title (omit for the next empty one)"), "content": ("string", "The section's full text"), "append": ("boolean", "Add to the end of the section instead") }, required: ["content"]),
-        tool!("draft_edit", Utilities, Conversational, none, guild: false, core: false,
-            keywords: ["edit", "fix", "change", "draft", "replace"],
-            "Change part of a draft: replace exact text (first match) — cheaper and safer than rewriting a section.",
-            { "draft": ("string", "Draft ID"), "find": ("string", "Exact text to replace"), "replace": ("string", "New text"), "section": ("string", "Limit to this section") }, required: ["find"]),
-        tool!("draft_view", Utilities, Conversational, none, guild: false, core: false,
-            keywords: ["draft", "view", "check", "review"],
-            "See a draft's outline (what's written), or one section with line numbers.",
-            { "draft": ("string", "Draft ID"), "section": ("string", "Section to show (omit for the outline)") }, required: []),
-        tool!("draft_publish", Utilities, Conversational, none, guild: false, core: false,
-            keywords: ["publish", "send the file", "post the file", "attach", "draft"],
-            "Put the draft together and attach it to your reply as a file (or post it in a channel).",
-            { "draft": ("string", "Draft ID"), "channel": ("string", "Post it in this channel instead"), "force": ("boolean", "Publish even with empty sections") }, required: []),
         tool!("find_people", ServerInfo, Conversational, none, guild: false, core: false,
             keywords: ["who is", "find", "username", "member", "user", "someone", "person", "people", "named", "called", "dm", "message", "from", "server"],
             "Find people by name across every server you're in (or one), from anywhere — even DMs. Shows look-alike names so you can ask which one.",
@@ -607,6 +588,26 @@ fn build_catalog() -> Vec<ToolDef> {
             "Look at an image and describe it or answer a question about it (needs a vision model). image works like edit_image.",
             { "image": ("string", "Which image"), "question": ("string", "What you want to know") },
             required: ["image"]),
+        tool!("write_file", Utilities, Conversational, none, guild: false, core: true,
+            keywords: ["file", "write", "make a file", "create a file", "save", "document", "txt", "csv", "json", "generate", "repeated", "1mb", "mb file"],
+            "Write a file into this channel's file sandbox. For normal content pass `content`. For generated data (e.g. a file of a word repeated, dummy data, big lists) pass `repeat` plus `times` or `until_bytes` — the app builds it instantly, you do NOT write the bytes yourself. Max 8 MB. Attach the result with attach_file.",
+            { "name": ("string", "File name, e.g. legion.txt"), "content": ("string", "The file's text content (omit when using repeat)"), "repeat": ("string", "A short pattern to repeat (e.g. a word or line)"), "times": ("number", "Repeat count (with repeat)"), "until_bytes": ("number", "Target size in bytes (with repeat)"), "join": ("string", "Separator between repeats (default newline)") }, required: ["name"]),
+        tool!("run_script", Utilities, Conversational, none, guild: false, core: true,
+            keywords: ["script", "python", "code", "compute", "calculate", "generate", "loop", "program", "execute", "sandbox"],
+            "Run a short Python script in this channel's sandbox (isolated mode, 30s limit). Use it whenever the job is computational or repetitive: generate files, crunch numbers, transform data — write 5 lines of code instead of producing content by hand. The script sees and writes files in the sandbox; anything it writes can be attached with attach_file. Output (stdout+stderr) comes back to you.",
+            { "code": ("string", "Python source to run") }, required: ["code"]),
+        tool!("attach_file", Utilities, Conversational, none, guild: false, core: true,
+            keywords: ["attach", "upload", "send file", "here's the file", "file below"],
+            "Attach a file from this channel's sandbox to your reply (it appears below the message).",
+            { "name": ("string", "File name from write_file/run_script/list_files") }, required: ["name"]),
+        tool!("convert_file", Utilities, Conversational, none, guild: false, core: false,
+            keywords: ["convert", "png", "jpeg", "jpg", "webp", "format", "re-encode"],
+            "Convert a sandbox file between formats: images (png, jpeg, webp) or re-encode text as UTF-8 (txt).",
+            { "name": ("string", "File name in the sandbox"), "to": ("string", "Target format: png, jpeg, webp, or txt") }, required: ["name", "to"]),
+        tool!("list_files", Utilities, Conversational, none, guild: false, core: false,
+            keywords: ["files", "sandbox", "what files", "my files"],
+            "List the files in this channel's file sandbox with sizes.",
+            {}, required: []),
         tool!("attach_image", Images, Conversational, none, guild: false, core: false,
             keywords: ["show", "post the image", "send the picture", "attach"],
             "Attach an image (a URL, imageN, avatar:NAME, server icon) to your reply.",
@@ -713,6 +714,9 @@ impl ToolCtx {
 pub struct ToolOutcome {
     pub text: String,
     pub ok: bool,
+    /// A fixed message the app posts to Discord itself (permission
+    /// denials). The model is instructed not to repeat it.
+    pub notice: Option<String>,
 }
 
 const RESULT_MAX: usize = 3500;
@@ -736,7 +740,10 @@ pub mod lab_fake {
             "clone_channel" => {
                 let mut channels = CHANNELS.lock().unwrap();
                 let made = match super::arg(&call.arguments, "name") {
-                    Some(name) => name.trim_start_matches('#').to_lowercase().replace(' ', "-"),
+                    Some(name) => name
+                        .trim_start_matches('#')
+                        .to_lowercase()
+                        .replace(' ', "-"),
                     None => format!("general-copy-{}", channels.len() + 1),
                 };
                 let base = "general";
@@ -750,12 +757,18 @@ pub mod lab_fake {
                         channels.remove(i);
                         format!("deleted #{channel}")
                     }
-                    None => format!("error: no channel called {channel} (copies left: {})", channels.join(", ")),
+                    None => format!(
+                        "error: no channel called {channel} (copies left: {})",
+                        channels.join(", ")
+                    ),
                 }
             }
             _ => return None,
         };
-        LOG.lock().unwrap().push((std::time::Instant::now(), format!("{} {channel}", call.name)));
+        LOG.lock().unwrap().push((
+            std::time::Instant::now(),
+            format!("{} {channel}", call.name),
+        ));
         Some(text)
     }
 }
@@ -763,7 +776,11 @@ pub mod lab_fake {
 pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
     #[cfg(test)]
     if let Some(text) = lab_fake::answer(call) {
-        return ToolOutcome { ok: !text.starts_with("error"), text };
+        return ToolOutcome {
+            ok: !text.starts_with("error"),
+            text,
+            notice: None,
+        };
     }
     let profile = ctx.core.profile();
     if call.arguments.get("_malformed").is_some() {
@@ -773,6 +790,7 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
                 call.name
             ),
             ok: false,
+            notice: None,
         };
     }
     if call.name.starts_with("mcp_") {
@@ -782,6 +800,7 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
         return ToolOutcome {
             text: format!("error: there is no tool named {}", call.name),
             ok: false,
+            notice: None,
         };
     };
     if !def.group.enabled(&profile.tools) {
@@ -809,14 +828,56 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
         );
         let have = ctx.requester_permissions_in(ctx.channel_id);
         if !have.contains(def.requires) && !self_service {
-            return denied(format!(
-                "{} lacks the Discord permission {} needed for {}",
-                ctx.requester.name,
-                missing(def.requires, have),
-                def.name
+            // AAv2: the app tells the user directly; the model is told the
+            // user already knows, so it must not narrate the denial.
+            let needed = missing(def.requires, have);
+            let outcome = denied(format!(
+                "{} lacks the Discord permission {} needed for {} — the system already told them; do not repeat this, just continue or suggest what they can do",
+                ctx.requester.name, needed, def.name
             ));
+            return ToolOutcome {
+                notice: Some(format!(
+                    "You don't have the required permissions for that: {needed}."
+                )),
+                ..outcome
+            };
         }
     }
+    // AAv2: big or irreversible actions wait for a button click first.
+    // The model cannot talk its way past this gate.
+    {
+        let mode = crate::runtime::confirm::mode_of(&ctx.core, ctx.guild_id);
+        if let Some(label) = crate::runtime::confirm::gate(
+            &ctx.core,
+            ctx.guild_id,
+            def.name,
+            &call.arguments,
+            mode == crate::memory::OperationMode::Autonomous,
+        ) {
+            let text = ctx
+                .core
+                .hive
+                .confirmations
+                .request(
+                    &ctx.core,
+                    crate::runtime::confirm::Pending {
+                        tool: def.name,
+                        args: call.arguments.clone(),
+                        requester: ctx.requester.clone(),
+                        guild_id: ctx.guild_id,
+                        channel_id: ctx.channel_id,
+                    },
+                    label,
+                )
+                .await;
+            return ToolOutcome {
+                text,
+                ok: true,
+                notice: None,
+            };
+        }
+    }
+
     let run = dispatch(ctx, def.name, &call.arguments);
     let result = match tokio::time::timeout(std::time::Duration::from_secs(90), run).await {
         Ok(result) => result,
@@ -825,7 +886,9 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
     // From a DM: log it in the servers where the requester has the rank
     // that let them ask.
     if let (Ok(text), None) = (&result, ctx.guild_id) {
-        if !crate::runtime::activity::is_read_only(def.name) && !matches!(def.name, "send_dm" | "send_to_server") {
+        if !crate::runtime::activity::is_read_only(def.name)
+            && !matches!(def.name, "send_dm" | "send_to_server")
+        {
             let theirs: Vec<u64> = ctx
                 .core
                 .world
@@ -837,13 +900,21 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
                 crate::runtime::activity::log_outside(
                     &ctx.core,
                     guild_id,
-                    &format!("{} — asked by {} in a DM: {}", step_label(def.name, &call.arguments), ctx.requester.name, crate::llm::truncate(text, 160)),
+                    &format!(
+                        "{} — asked by {} in a DM: {}",
+                        step_label(def.name, &call.arguments),
+                        ctx.requester.name,
+                        crate::llm::truncate(text, 160)
+                    ),
                 );
             }
         }
     }
     if let (Ok(text), Some(guild_id)) = (&result, ctx.guild_id) {
-        if !crate::runtime::activity::is_read_only(def.name) && def.name != "send_dm" && def.name != "send_to_server" {
+        if !crate::runtime::activity::is_read_only(def.name)
+            && def.name != "send_dm"
+            && def.name != "send_to_server"
+        {
             let place = ctx.core.channel_label(Some(guild_id), ctx.channel_id);
             crate::runtime::activity::log(
                 &ctx.core,
@@ -851,7 +922,11 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
                 &format!(
                     "{} — asked by {} in {place}{}: {}",
                     step_label(def.name, &call.arguments),
-                    if ctx.acting_as_agent() { "itself".to_owned() } else { ctx.requester.name.clone() },
+                    if ctx.acting_as_agent() {
+                        "itself".to_owned()
+                    } else {
+                        ctx.requester.name.clone()
+                    },
                     "",
                     crate::llm::truncate(text, 160)
                 ),
@@ -861,20 +936,46 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
     match result {
         // Too long to take in at once: an outline to read section by section.
         Ok(text) if text.len() > docs::LONG && def.name != "read_section" => ToolOutcome {
-            text: docs::store(&ctx.core.docs, &step_label(def.name, &call.arguments), &text),
+            text: docs::store(
+                &ctx.core.docs,
+                &step_label(def.name, &call.arguments),
+                &text,
+            ),
             ok: true,
+            notice: None,
         },
         Ok(text) => ToolOutcome {
             text: crate::llm::truncate(&text, RESULT_MAX),
             ok: true,
+            notice: None,
         },
+        Err(error) if error.starts_with("denied") => {
+            // A permission failure inside the tool: the app posts the
+            // fixed message so the model does not have to.
+            let needed = error
+                .split("lacks")
+                .nth(1)
+                .map(|rest| {
+                    rest.split(" in ")
+                        .next()
+                        .unwrap_or(rest)
+                        .trim()
+                        .trim_end_matches('.')
+                        .to_owned()
+                })
+                .unwrap_or_else(|| "the required permissions".to_owned());
+            ToolOutcome {
+                text: format!("{error} — the system already told them; do not repeat this"),
+                ok: false,
+                notice: Some(format!(
+                    "You don't have the required permissions for that: {needed}."
+                )),
+            }
+        }
         Err(error) => ToolOutcome {
-            text: if error.starts_with("denied") {
-                error
-            } else {
-                format!("error: {error}")
-            },
+            text: format!("error: {error}"),
             ok: false,
+            notice: None,
         },
     }
 }
@@ -883,6 +984,7 @@ fn denied(text: String) -> ToolOutcome {
     ToolOutcome {
         text: format!("denied: {text}"),
         ok: false,
+        notice: None,
     }
 }
 
@@ -901,6 +1003,7 @@ async fn run_mcp(ctx: &ToolCtx, call: &ToolCall, config: &ToolConfig) -> ToolOut
         return ToolOutcome {
             text: format!("error: MCP tool {} is not available right now", call.name),
             ok: false,
+            notice: None,
         };
     };
     let allowed = ctx.requester.kind == PrincipalKind::Operator
@@ -924,11 +1027,47 @@ async fn run_mcp(ctx: &ToolCtx, call: &ToolCall, config: &ToolConfig) -> ToolOut
         Ok(text) => ToolOutcome {
             text: crate::llm::truncate(&text, RESULT_MAX),
             ok: true,
+            notice: None,
         },
         Err(error) => ToolOutcome {
             text: format!("error: {error}"),
             ok: false,
+            notice: None,
         },
+    }
+}
+
+/// Run a tool whose confirmation button was clicked. The action was
+/// permission-checked for the original requester when it was queued;
+/// `run_confirmed` re-runs it with that same authority (the approver
+/// proved they are the requester or a moderator).
+pub async fn run_confirmed(
+    core: &Arc<AgentCore>,
+    name: &str,
+    args: Value,
+    requester: Principal,
+    channel_id: u64,
+) -> Result<String, String> {
+    let guild_id = core.world.guild_ids().into_iter().find(|g| {
+        core.world
+            .with_guild(*g, |k| k.channels.contains_key(&channel_id))
+            .unwrap_or(false)
+    });
+    let ctx = ToolCtx {
+        core: Arc::clone(core),
+        guild_id,
+        channel_id,
+        message_id: None,
+        requester,
+        autonomous: false,
+        replies_here: true,
+        media: Arc::default(),
+        inputs: Vec::new(),
+    };
+    let run = dispatch(&ctx, name, &args);
+    match tokio::time::timeout(std::time::Duration::from_secs(90), run).await {
+        Ok(result) => result,
+        Err(_) => Err("the tool timed out".to_owned()),
     }
 }
 
@@ -939,7 +1078,9 @@ async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<String, Str
         "list_channels" => d::list_channels(ctx).await,
         "list_roles" => d::list_roles(ctx).await,
         "get_member" => d::get_member(ctx, args).await,
-        "list_members" if arg(args, "server").is_some() || ctx.guild_id.is_none() => reach::list_server_members(ctx, args).await,
+        "list_members" if arg(args, "server").is_some() || ctx.guild_id.is_none() => {
+            reach::list_server_members(ctx, args).await
+        }
         "list_members" => d::list_members(ctx, args).await,
         "read_messages" => d::read_messages(ctx, args).await,
         "search_messages" => d::search_messages(ctx, args).await,
@@ -1023,13 +1164,21 @@ async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<String, Str
         "send_to_server" => reach::send_to_server(ctx, args).await,
         "search_audit_logs" => reach::search_audit_logs(ctx, args).await,
         "list_servers" => reach::list_servers(ctx, args).await,
-        "draft_create" => power::draft_create(ctx, args).await,
-        "draft_write" => power::draft_write(ctx, args).await,
-        "draft_edit" => power::draft_edit(ctx, args).await,
-        "draft_view" => power::draft_view(ctx, args).await,
-        "draft_publish" => power::draft_publish(ctx, args).await,
-        "find_in_document" => docs::find(&ctx.core.docs, &required(args, "document")?, &required(args, "text")?),
-        "read_section" => docs::read(&ctx.core.docs, &required(args, "document")?, &arg(args, "section").unwrap_or_default()),
+        "write_file" => files::write_file(ctx, args).await,
+        "run_script" => files::run_script(ctx, args).await,
+        "attach_file" => files::attach_file(ctx, args).await,
+        "convert_file" => files::convert_file(ctx, args).await,
+        "list_files" => files::list_files(ctx, args).await,
+        "find_in_document" => docs::find(
+            &ctx.core.docs,
+            &required(args, "document")?,
+            &required(args, "text")?,
+        ),
+        "read_section" => docs::read(
+            &ctx.core.docs,
+            &required(args, "document")?,
+            &arg(args, "section").unwrap_or_default(),
+        ),
         "set_my_avatar" => power::set_my_avatar(ctx, args).await,
         "make_plan" | "step_done" => Err("plans are handled by the agent loop".to_owned()),
         "start_translating" => power::start_translating(ctx, args).await,
@@ -1074,15 +1223,27 @@ fn all_words(text: &str, keyword: &str) -> bool {
         && keyword
             .split(' ')
             .filter(|w| w.len() >= 3 && !matches!(*w, "the" | "and" | "for"))
-            .all(|w| text.split(|c: char| !c.is_alphanumeric()).any(|t| t == w || t.strip_suffix('s') == Some(w)))
+            .all(|w| {
+                text.split(|c: char| !c.is_alphanumeric())
+                    .any(|t| t == w || t.strip_suffix('s') == Some(w))
+            })
 }
 
 /// Tools for "what": the agent asked for one it doesn't have. Returns
 /// (tools it may use, "tool (needs X)" for ones this person can't).
-pub fn find_tools(core: &AgentCore, requester: &Principal, in_guild: bool, what: &str, have: &[String]) -> (Vec<ToolSpec>, Vec<String>) {
+pub fn find_tools(
+    core: &AgentCore,
+    requester: &Principal,
+    in_guild: bool,
+    what: &str,
+    have: &[String],
+) -> (Vec<ToolSpec>, Vec<String>) {
     let profile = core.profile();
     let query = what.to_lowercase();
-    let words: Vec<&str> = query.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 3).collect();
+    let words: Vec<&str> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .collect();
     let mut scored: Vec<(usize, &ToolDef)> = catalog()
         .iter()
         .filter(|d| d.group.enabled(&profile.tools) && (in_guild || !d.guild_only))
@@ -1095,7 +1256,11 @@ pub fn find_tools(core: &AgentCore, requester: &Principal, in_guild: bool, what:
                 .map(|w| {
                     let stem = w.trim_end_matches('s');
                     (if name.contains(stem) { 4 } else { 0 })
-                        + (if d.keywords.iter().any(|k| k.contains(stem)) { 2 } else { 0 })
+                        + (if d.keywords.iter().any(|k| k.contains(stem)) {
+                            2
+                        } else {
+                            0
+                        })
                         + usize::from(description.contains(stem))
                 })
                 .sum::<usize>();
@@ -1107,13 +1272,23 @@ pub fn find_tools(core: &AgentCore, requester: &Principal, in_guild: bool, what:
     let mut allowed = Vec::new();
     let mut blocked = Vec::new();
     for (_, d) in scored.into_iter().take(6) {
-        let may = d.requires.is_empty() || requester.kind == PrincipalKind::Operator || requester.permissions.contains(d.requires);
+        let may = d.requires.is_empty()
+            || requester.kind == PrincipalKind::Operator
+            || requester.permissions.contains(d.requires);
         if may {
             if allowed.len() < 4 {
-                allowed.push(ToolSpec { name: d.name.to_owned(), description: d.description.to_owned(), parameters: d.params.clone() });
+                allowed.push(ToolSpec {
+                    name: d.name.to_owned(),
+                    description: d.description.to_owned(),
+                    parameters: d.params.clone(),
+                });
             }
         } else {
-            blocked.push(format!("{} (needs {})", d.name, crate::runtime::authority::missing(d.requires, requester.permissions)));
+            blocked.push(format!(
+                "{} (needs {})",
+                d.name,
+                crate::runtime::authority::missing(d.requires, requester.permissions)
+            ));
         }
     }
     (allowed, blocked)
@@ -1121,7 +1296,12 @@ pub fn find_tools(core: &AgentCore, requester: &Principal, in_guild: bool, what:
 
 /// Tools a message asks for that this person isn't allowed to use — so
 /// the agent says "you don't have permission" instead of "I can't".
-pub fn blocked_tools(core: &AgentCore, requester: &Principal, in_guild: bool, message_text: &str) -> Vec<String> {
+pub fn blocked_tools(
+    core: &AgentCore,
+    requester: &Principal,
+    in_guild: bool,
+    message_text: &str,
+) -> Vec<String> {
     if requester.kind == PrincipalKind::Operator {
         return Vec::new();
     }
@@ -1132,9 +1312,24 @@ pub fn blocked_tools(core: &AgentCore, requester: &Principal, in_guild: bool, me
         .iter()
         .filter(|d| d.group.enabled(&profile.tools) && (in_guild || !d.guild_only))
         .filter(|d| !d.requires.is_empty() && !requester.permissions.contains(d.requires))
-        .filter(|d| !matches!(d.name, "move_member" | "disconnect_member" | "delete_message" | "pin_message"))
-        .filter(|d| d.keywords.iter().any(|k| k.len() >= 4 && (text.contains(k) || all_words(text, k))))
-        .map(|d| format!("{} (needs {})", d.name, crate::runtime::authority::missing(d.requires, requester.permissions)))
+        .filter(|d| {
+            !matches!(
+                d.name,
+                "move_member" | "disconnect_member" | "delete_message" | "pin_message"
+            )
+        })
+        .filter(|d| {
+            d.keywords
+                .iter()
+                .any(|k| k.len() >= 4 && (text.contains(k) || all_words(text, k)))
+        })
+        .map(|d| {
+            format!(
+                "{} (needs {})",
+                d.name,
+                crate::runtime::authority::missing(d.requires, requester.permissions)
+            )
+        })
         .take(6)
         .collect()
 }
@@ -1153,14 +1348,18 @@ pub fn select_tools(
     let text = message_text.to_lowercase();
     let recent = recent_text.to_lowercase();
     // Words of the message, for typo-tolerant matching ("leaderbaord").
-    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 5).collect();
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 5)
+        .collect();
     let close = |keyword: &str| {
         !keyword.contains(' ')
             && keyword.len() >= 5
             && words.iter().any(|w| {
                 w.chars().next() == keyword.chars().next()
                     && w.len().abs_diff(keyword.len()) <= 2
-                    && crate::runtime::voice::edit_distance(w, keyword) <= if keyword.len() >= 8 { 2 } else { 1 }
+                    && crate::runtime::voice::edit_distance(w, keyword)
+                        <= if keyword.len() >= 8 { 2 } else { 1 }
             })
     };
     let staff =
@@ -1168,9 +1367,12 @@ pub fn select_tools(
     // "delete them", "do what she said", "do it again": the earlier
     // conversation says what.
     let follow_up = text.len() < 80
-        && text
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|w| matches!(w, "them" | "it" | "those" | "these" | "that" | "said" | "again" | "same" | "rest"));
+        && text.split(|c: char| !c.is_alphanumeric()).any(|w| {
+            matches!(
+                w,
+                "them" | "it" | "those" | "these" | "that" | "said" | "again" | "same" | "rest"
+            )
+        });
     let mut scored: Vec<(i32, &ToolDef)> = catalog()
         .iter()
         .filter(|d| d.group.enabled(&profile.tools))
@@ -1193,9 +1395,18 @@ pub fn select_tools(
             // What the message asks for outranks everything: a tool it
             // names beats the always-on core set, which beats tools the
             // earlier conversation touched on.
-            let hits = d.keywords.iter().filter(|k| text.contains(*k) || close(k) || all_words(&text, k)).count() as i32;
+            let hits = d
+                .keywords
+                .iter()
+                .filter(|k| text.contains(*k) || close(k) || all_words(&text, k))
+                .count() as i32;
             let earlier = d.keywords.iter().filter(|k| recent.contains(*k)).count() as i32;
-            let mut score = hits * 30 + if follow_up { earlier.min(3) * 15 } else { earlier.min(2) * 4 };
+            let mut score = hits * 30
+                + if follow_up {
+                    earlier.min(3) * 15
+                } else {
+                    earlier.min(2) * 4
+                };
             if d.core {
                 score += 25;
             }
@@ -1203,7 +1414,8 @@ pub fn select_tools(
                 score += 5;
             }
             if d.name == "discord_api"
-                && (requester.kind == PrincipalKind::Operator || requester.level >= AccessLevel::Admin)
+                && (requester.kind == PrincipalKind::Operator
+                    || requester.level >= AccessLevel::Admin)
             {
                 score += 12;
             }
@@ -1217,12 +1429,25 @@ pub fn select_tools(
         ("get_avatar", &["avatar_grid"]),
         ("avatar_grid", &["get_avatar", "list_members"]),
         ("design_rank_card", &["image_search", "get_rank"]),
-        ("set_my_avatar", &["image_search", "edit_image", "draw_image"]),
+        (
+            "set_my_avatar",
+            &["image_search", "edit_image", "draw_image"],
+        ),
         ("create_emoji", &["image_search", "edit_image"]),
         ("edit_ticket_panel", &["list_channels"]),
         ("create_role_menu", &["list_roles"]),
         ("make_plan", &["step_done"]),
-        ("draft_create", &["draft_write", "draft_edit", "draft_view", "draft_publish", "make_plan", "step_done"]),
+        (
+            "draft_create",
+            &[
+                "draft_write",
+                "draft_edit",
+                "draft_view",
+                "draft_publish",
+                "make_plan",
+                "step_done",
+            ],
+        ),
     ];
     // Requests the agent recognizes on its own always get their tool.
     let recognized = [
@@ -1238,7 +1463,11 @@ pub fn select_tools(
     }
     let wanted: Vec<&str> = COMPANIONS
         .iter()
-        .filter(|(tool, _)| scored.iter().any(|(score, d)| d.name == *tool && *score >= 30))
+        .filter(|(tool, _)| {
+            scored
+                .iter()
+                .any(|(score, d)| d.name == *tool && *score >= 30)
+        })
         .flat_map(|(_, companions)| companions.iter().copied())
         .collect();
     for (score, def) in scored.iter_mut() {
@@ -1423,7 +1652,9 @@ pub fn person_label(nick: Option<&str>, global: Option<&str>, username: &str, id
     let nick = nick.map(str::trim).filter(|n| !n.is_empty());
     let global = global.map(str::trim).filter(|g| !g.is_empty());
     let display = match (nick, global) {
-        (Some(n), Some(g)) if n != g => format!("display name “{n}” (server nickname; their global display name is “{g}”)"),
+        (Some(n), Some(g)) if n != g => {
+            format!("display name “{n}” (server nickname; their global display name is “{g}”)")
+        }
         (Some(n), _) => format!("display name “{n}” (server nickname)"),
         (None, Some(g)) => format!("display name “{g}”"),
         (None, None) => format!("display name “{username}” (none set, so it shows their username)"),

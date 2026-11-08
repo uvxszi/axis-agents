@@ -122,10 +122,16 @@ fn candidates(message: &Message) -> Vec<(String, String, String)> {
             words.replace_range(a..=b, "");
         }
         let lower = message.content.to_lowercase();
-        let about = ["emoji", "emote", "this", "what", "mean"].iter().any(|w| lower.contains(w));
+        let about = ["emoji", "emote", "this", "what", "mean"]
+            .iter()
+            .any(|w| lower.contains(w));
         if words.trim().chars().count() <= 20 || about {
             for (name, url) in emojis.into_iter().take(3) {
-                out.push((format!(":{name}:"), url, format!("the custom emoji :{name}: used by {who}")));
+                out.push((
+                    format!(":{name}:"),
+                    url,
+                    format!("the custom emoji :{name}: used by {who}"),
+                ));
             }
         }
     }
@@ -244,14 +250,21 @@ pub fn prepare_with_note(bytes: &[u8]) -> Option<(String, Option<String>)> {
     DynamicImage::ImageRgb8(image.to_rgb8())
         .write_to(&mut Cursor::new(&mut jpeg), ImageFormat::Jpeg)
         .ok()?;
-    Some((format!("data:image/jpeg;base64,{}", super::brain::base64(&jpeg)), note))
+    Some((
+        format!("data:image/jpeg;base64,{}", super::brain::base64(&jpeg)),
+        note,
+    ))
 }
 
 /// Evenly spaced frames of an animated GIF — the first, the last, and
 /// some in between — tiled in reading order, with a note saying so.
 fn gif_sheet(bytes: &[u8]) -> Option<(DynamicImage, String)> {
     let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
-    let frames: Vec<_> = decoder.into_frames().take(600).filter_map(Result::ok).collect();
+    let frames: Vec<_> = decoder
+        .into_frames()
+        .take(600)
+        .filter_map(Result::ok)
+        .collect();
     if frames.len() < 2 {
         return None;
     }
@@ -263,13 +276,23 @@ fn gif_sheet(bytes: &[u8]) -> Option<(DynamicImage, String)> {
         })
         .sum();
     // Long GIFs get six frames (3×2), short ones four (2×2).
-    let (count, columns) = if frames.len() >= 24 { (6usize, 3u32) } else { (4, 2) };
+    let (count, columns) = if frames.len() >= 24 {
+        (6usize, 3u32)
+    } else {
+        (4, 2)
+    };
     let count = count.min(frames.len());
-    let picks: Vec<_> = (0..count).map(|i| &frames[(i * (frames.len() - 1)) / (count - 1)]).collect();
+    let picks: Vec<_> = (0..count)
+        .map(|i| &frames[(i * (frames.len() - 1)) / (count - 1)])
+        .collect();
     let (w, h) = picks[0].buffer().dimensions();
     let rows = (count as u32).div_ceil(columns);
     let gap = 6;
-    let mut sheet = image::RgbaImage::from_pixel(w * columns + gap * (columns - 1), h * rows + gap * (rows - 1), image::Rgba([255, 255, 255, 255]));
+    let mut sheet = image::RgbaImage::from_pixel(
+        w * columns + gap * (columns - 1),
+        h * rows + gap * (rows - 1),
+        image::Rgba([255, 255, 255, 255]),
+    );
     for (index, frame) in picks.iter().enumerate() {
         let x = (index as u32 % columns) * (w + gap);
         let y = (index as u32 / columns) * (h + gap);
@@ -287,7 +310,8 @@ fn gif_sheet(bytes: &[u8]) -> Option<(DynamicImage, String)> {
 /// version is what shows the motion.
 pub fn animated_variant(url: &str) -> Option<String> {
     let base = url.split(['?', '#']).next()?;
-    if base.contains("media.tenor.com/") || base.contains("tenor.com/") && base.contains("/media/") {
+    if base.contains("media.tenor.com/") || base.contains("tenor.com/") && base.contains("/media/")
+    {
         // .../{id}{5-letter format code}/{slug}.{ext}; AAAAC is the GIF.
         let mut parts: Vec<String> = base.split('/').map(str::to_owned).collect();
         let n = parts.len();
@@ -295,7 +319,11 @@ pub fn animated_variant(url: &str) -> Option<String> {
             let key = &parts[n - 2];
             parts[n - 2] = format!("{}AAAAC", &key[..key.len() - 5]);
             let file = &parts[n - 1];
-            let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file).to_owned();
+            let stem = file
+                .rsplit_once('.')
+                .map(|(s, _)| s)
+                .unwrap_or(file)
+                .to_owned();
             parts[n - 1] = format!("{stem}.gif");
             return Some(parts.join("/"));
         }
@@ -316,9 +344,16 @@ pub fn custom_emojis(text: &str) -> Vec<(String, String)> {
         let Some(end) = tail.find('>') else { break };
         let inner = &tail[..end];
         let parts: Vec<&str> = inner.split(':').collect();
-        if parts.len() == 3 && (parts[0].is_empty() || parts[0] == "a") && parts[2].chars().all(|c| c.is_ascii_digit()) && !parts[2].is_empty() {
+        if parts.len() == 3
+            && (parts[0].is_empty() || parts[0] == "a")
+            && parts[2].chars().all(|c| c.is_ascii_digit())
+            && !parts[2].is_empty()
+        {
             let ext = if parts[0] == "a" { "gif" } else { "png" };
-            let url = format!("https://cdn.discordapp.com/emojis/{}.{ext}?size=128", parts[2]);
+            let url = format!(
+                "https://cdn.discordapp.com/emojis/{}.{ext}?size=128",
+                parts[2]
+            );
             if !out.iter().any(|(_, u)| *u == url) {
                 out.push((parts[1].to_owned(), url));
             }
@@ -359,7 +394,10 @@ pub async fn gather(core: &AgentCore, triggers: &[Message]) -> Vec<SeenImage> {
         let bytes = match crate::tools::web::fetch_bytes(&source.url, false, MAX_BYTES).await {
             Ok(bytes) => bytes,
             Err(_) if source.url.contains("AAAAC/") => {
-                let still = source.url.replace("AAAAC/", "AAAAe/").replace(".gif", ".png");
+                let still = source
+                    .url
+                    .replace("AAAAC/", "AAAAe/")
+                    .replace(".gif", ".png");
                 match crate::tools::web::fetch_bytes(&still, false, MAX_BYTES).await {
                     Ok(bytes) => bytes,
                     Err(_) => continue,

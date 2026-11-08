@@ -42,7 +42,8 @@ pub fn guess_language(text: &str) -> Option<&'static str> {
     if letters.len() < 4 {
         return None;
     }
-    let share = |test: fn(char) -> bool| letters.iter().filter(|c| test(**c)).count() * 2 > letters.len();
+    let share =
+        |test: fn(char) -> bool| letters.iter().filter(|c| test(**c)).count() * 2 > letters.len();
     if share(|c| ('\u{3040}'..='\u{30FF}').contains(&c)) {
         return Some("Japanese");
     }
@@ -53,7 +54,13 @@ pub fn guess_language(text: &str) -> Option<&'static str> {
         return Some("Chinese");
     }
     if share(|c| ('\u{0400}'..='\u{04FF}').contains(&c)) {
-        return Some(if text.contains('і') || text.contains('ї') || text.contains('є') { "Ukrainian" } else { "Russian" });
+        return Some(
+            if text.contains('і') || text.contains('ї') || text.contains('є') {
+                "Ukrainian"
+            } else {
+                "Russian"
+            },
+        );
     }
     if share(|c| ('\u{0600}'..='\u{06FF}').contains(&c)) {
         return Some("Arabic");
@@ -72,16 +79,100 @@ pub fn guess_language(text: &str) -> Option<&'static str> {
     }
     // Latin script: count each language's most common words.
     const WORDS: [(&str, &[&str]); 10] = [
-        ("English", &["the", "and", "is", "you", "it", "that", "what", "to", "are", "this", "i", "my", "do", "have", "not", "with"]),
-        ("Spanish", &["el", "la", "que", "de", "y", "es", "no", "en", "los", "por", "qué", "como", "pero", "tengo", "eres", "estoy", "hola", "gracias", "muy"]),
-        ("French", &["le", "la", "et", "est", "je", "tu", "les", "des", "pas", "que", "une", "vous", "c'est", "bonjour", "merci", "oui", "avec", "mais"]),
-        ("German", &["der", "die", "das", "und", "ist", "ich", "nicht", "du", "ein", "eine", "mit", "auf", "wie", "danke", "ja", "aber", "was"]),
-        ("Portuguese", &["o", "a", "que", "não", "de", "é", "um", "uma", "você", "eu", "com", "obrigado", "olá", "tudo", "bem", "mas", "isso"]),
-        ("Italian", &["il", "che", "di", "non", "è", "un", "una", "sono", "per", "ciao", "grazie", "come", "anche", "questo", "ma", "io"]),
-        ("Dutch", &["de", "het", "een", "en", "is", "ik", "niet", "je", "dat", "wat", "van", "hoe", "dank", "maar", "ook"]),
-        ("Turkish", &["ve", "bir", "bu", "ne", "ben", "sen", "değil", "için", "nasıl", "evet", "hayır", "teşekkürler", "merhaba", "çok"]),
-        ("Polish", &["i", "nie", "to", "jest", "się", "że", "na", "jak", "co", "tak", "ale", "dziękuję", "cześć", "mam"]),
-        ("Indonesian", &["dan", "yang", "di", "ini", "itu", "tidak", "saya", "kamu", "apa", "ada", "terima", "kasih", "aku", "juga"]),
+        (
+            "English",
+            &[
+                "the", "and", "is", "you", "it", "that", "what", "to", "are", "this", "i", "my",
+                "do", "have", "not", "with",
+            ],
+        ),
+        (
+            "Spanish",
+            &[
+                "el", "la", "que", "de", "y", "es", "no", "en", "los", "por", "qué", "como",
+                "pero", "tengo", "eres", "estoy", "hola", "gracias", "muy",
+            ],
+        ),
+        (
+            "French",
+            &[
+                "le", "la", "et", "est", "je", "tu", "les", "des", "pas", "que", "une", "vous",
+                "c'est", "bonjour", "merci", "oui", "avec", "mais",
+            ],
+        ),
+        (
+            "German",
+            &[
+                "der", "die", "das", "und", "ist", "ich", "nicht", "du", "ein", "eine", "mit",
+                "auf", "wie", "danke", "ja", "aber", "was",
+            ],
+        ),
+        (
+            "Portuguese",
+            &[
+                "o", "a", "que", "não", "de", "é", "um", "uma", "você", "eu", "com", "obrigado",
+                "olá", "tudo", "bem", "mas", "isso",
+            ],
+        ),
+        (
+            "Italian",
+            &[
+                "il", "che", "di", "non", "è", "un", "una", "sono", "per", "ciao", "grazie",
+                "come", "anche", "questo", "ma", "io",
+            ],
+        ),
+        (
+            "Dutch",
+            &[
+                "de", "het", "een", "en", "is", "ik", "niet", "je", "dat", "wat", "van", "hoe",
+                "dank", "maar", "ook",
+            ],
+        ),
+        (
+            "Turkish",
+            &[
+                "ve",
+                "bir",
+                "bu",
+                "ne",
+                "ben",
+                "sen",
+                "değil",
+                "için",
+                "nasıl",
+                "evet",
+                "hayır",
+                "teşekkürler",
+                "merhaba",
+                "çok",
+            ],
+        ),
+        (
+            "Polish",
+            &[
+                "i",
+                "nie",
+                "to",
+                "jest",
+                "się",
+                "że",
+                "na",
+                "jak",
+                "co",
+                "tak",
+                "ale",
+                "dziękuję",
+                "cześć",
+                "mam",
+            ],
+        ),
+        (
+            "Indonesian",
+            &[
+                "dan", "yang", "di", "ini", "itu", "tidak", "saya", "kamu", "apa", "ada", "terima",
+                "kasih", "aku", "juga",
+            ],
+        ),
     ];
     let words: Vec<String> = text
         .to_lowercase()
@@ -95,7 +186,10 @@ pub fn guess_language(text: &str) -> Option<&'static str> {
     let mut best: Option<(&str, usize)> = None;
     let mut second = 0;
     for (language, common) in WORDS {
-        let hits = words.iter().filter(|w| common.contains(&w.as_str())).count();
+        let hits = words
+            .iter()
+            .filter(|w| common.contains(&w.as_str()))
+            .count();
         match best {
             Some((_, top)) if hits > top => {
                 second = top;
@@ -106,7 +200,8 @@ pub fn guess_language(text: &str) -> Option<&'static str> {
         }
     }
     // Confident only with a clear winner.
-    best.filter(|(_, hits)| *hits >= 2 && *hits > second).map(|(language, _)| language)
+    best.filter(|(_, hits)| *hits >= 2 && *hits > second)
+        .map(|(language, _)| language)
 }
 
 pub fn session_in(core: &AgentCore, guild_id: u64, channel_id: u64) -> Option<TranslationSession> {
@@ -118,7 +213,11 @@ pub fn session_in(core: &AgentCore, guild_id: u64, channel_id: u64) -> Option<Tr
     })
 }
 
-pub fn start(core: &AgentCore, guild_id: u64, mut session: TranslationSession) -> TranslationSession {
+pub fn start(
+    core: &AgentCore,
+    guild_id: u64,
+    mut session: TranslationSession,
+) -> TranslationSession {
     session.agent_id = core.id.clone();
     session.started = now_ms();
     session.last_activity = now_ms();
@@ -126,17 +225,23 @@ pub fn start(core: &AgentCore, guild_id: u64, mut session: TranslationSession) -
         session.idle_minutes = 15;
     }
     core.hive.knowledge.guild_mut(guild_id, |k| {
-        k.translations.retain(|s| !(s.channel_id == session.channel_id && s.agent_id == core.id));
+        k.translations
+            .retain(|s| !(s.channel_id == session.channel_id && s.agent_id == core.id));
         k.translations.push(session.clone());
     });
-    core.feed(FeedKind::System, "started translating", Some(core.channel_label(Some(guild_id), session.channel_id)));
+    core.feed(
+        FeedKind::System,
+        "started translating",
+        Some(core.channel_label(Some(guild_id), session.channel_id)),
+    );
     session
 }
 
 pub fn stop(core: &AgentCore, guild_id: u64, channel_id: u64) -> bool {
     core.hive.knowledge.guild_mut(guild_id, |k| {
         let before = k.translations.len();
-        k.translations.retain(|s| !(s.channel_id == channel_id && s.agent_id == core.id));
+        k.translations
+            .retain(|s| !(s.channel_id == channel_id && s.agent_id == core.id));
         before != k.translations.len()
     })
 }
@@ -154,9 +259,19 @@ pub enum Handled {
 
 fn asks_to_stop(text: &str) -> bool {
     let t = text.to_lowercase();
-    ["stop translat", "no more translat", "don't translate", "dont translate", "quit translat", "end translat", "deja de traducir", "para de traducir", "arrête de traduire"]
-        .iter()
-        .any(|p| t.contains(p))
+    [
+        "stop translat",
+        "no more translat",
+        "don't translate",
+        "dont translate",
+        "quit translat",
+        "end translat",
+        "deja de traducir",
+        "para de traducir",
+        "arrête de traduire",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
 }
 
 /// A new message: translate it if this channel is being translated.
@@ -193,7 +308,11 @@ pub fn on_message(core: &Arc<AgentCore>, guild_id: u64, message: &Message) -> Ha
         return Handled::Translating;
     }
     core.hive.knowledge.guild_mut(guild_id, |k| {
-        if let Some(s) = k.translations.iter_mut().find(|s| s.channel_id == channel_id && s.agent_id == core.id) {
+        if let Some(s) = k
+            .translations
+            .iter_mut()
+            .find(|s| s.channel_id == channel_id && s.agent_id == core.id)
+        {
             s.last_activity = now_ms();
             if !s.users.is_empty() || s.target.is_empty() {
                 if !s.users.contains(&author) && s.target.is_empty() {
@@ -220,7 +339,13 @@ struct Translated {
     translations: BTreeMap<String, String>,
 }
 
-async fn translate_message(core: &AgentCore, guild_id: u64, session: &TranslationSession, message: &Message, text: &str) -> Result<(), String> {
+async fn translate_message(
+    core: &AgentCore,
+    guild_id: u64,
+    session: &TranslationSession,
+    message: &Message,
+    text: &str,
+) -> Result<(), String> {
     // Never post in a channel it was told never to chat in.
     if core.barred(guild_id, session.channel_id).is_some() {
         return Ok(());
@@ -247,17 +372,29 @@ async fn translate_message(core: &AgentCore, guild_id: u64, session: &Translatio
     };
     targets.retain(|t| own.as_deref().is_none_or(|o| !o.eq_ignore_ascii_case(t)));
     let (language, translations) = translate_text(core, text, &targets).await?;
-    let language = if language.is_empty() { own.unwrap_or_default() } else { language };
+    let language = if language.is_empty() {
+        own.unwrap_or_default()
+    } else {
+        language
+    };
     if !language.is_empty() {
         core.hive.knowledge.guild_mut(guild_id, |k| {
-            if let Some(s) = k.translations.iter_mut().find(|s| s.channel_id == session.channel_id && s.agent_id == core.id) {
+            if let Some(s) = k
+                .translations
+                .iter_mut()
+                .find(|s| s.channel_id == session.channel_id && s.agent_id == core.id)
+            {
                 s.languages.insert(author, language.clone());
             }
         });
     }
     let lines: Vec<(String, String)> = translations
         .into_iter()
-        .filter(|(target, t)| !t.trim().is_empty() && !target.eq_ignore_ascii_case(&language) && t.trim() != text.trim())
+        .filter(|(target, t)| {
+            !t.trim().is_empty()
+                && !target.eq_ignore_ascii_case(&language)
+                && t.trim() != text.trim()
+        })
         .collect();
     if lines.is_empty() {
         return Ok(());
@@ -266,7 +403,11 @@ async fn translate_message(core: &AgentCore, guild_id: u64, session: &Translatio
         let (target, translation) = &lines[0];
         format!("{translation}\n-# 🌐 {language} → {target}")
     } else {
-        let mut out = lines.iter().map(|(t, tr)| format!("**{t}:** {tr}")).collect::<Vec<_>>().join("\n");
+        let mut out = lines
+            .iter()
+            .map(|(t, tr)| format!("**{t}:** {tr}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         out.push_str(&format!("\n-# 🌐 from {language}"));
         out
     };
@@ -289,17 +430,28 @@ async fn translate_message(core: &AgentCore, guild_id: u64, session: &Translatio
 
 /// Translate text into each target language (skipping ones it's already
 /// in). Returns the language it's written in and the translations.
-pub async fn translate_text(core: &AgentCore, text: &str, targets: &[String]) -> Result<(String, Vec<(String, String)>), String> {
+pub async fn translate_text(
+    core: &AgentCore,
+    text: &str,
+    targets: &[String],
+) -> Result<(String, Vec<(String, String)>), String> {
     let system = format!(
         "You translate chat messages. Reply with JSON only: {{\"language\": \"<the language the message is written in, in English>\", \"translations\": {{\"<target language>\": \"<translation>\"}}}}.          Translate into: {}. Leave out any target the message is already written in. Keep the tone, slang, names, and emojis; translate meaning, not word for word; add nothing.",
-        if targets.is_empty() { "(none — just report the language)".to_owned() } else { targets.join(", ") }
+        if targets.is_empty() {
+            "(none — just report the language)".to_owned()
+        } else {
+            targets.join(", ")
+        }
     );
     let raw = brain::quick_completion(core, &system, text, 600, true).await?;
     let raw = crate::llm::text::split_think(&raw).0;
     let start = raw.find('{').ok_or("no JSON in the translation")?;
     let end = raw.rfind('}').ok_or("no JSON in the translation")?;
     let parsed: Translated = serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())?;
-    Ok((parsed.language.trim().to_owned(), parsed.translations.into_iter().collect()))
+    Ok((
+        parsed.language.trim().to_owned(),
+        parsed.translations.into_iter().collect(),
+    ))
 }
 
 /// End sessions whose conversation went quiet (called every minute).
@@ -309,7 +461,8 @@ pub async fn tick(core: &AgentCore) {
         let ended: Vec<u64> = core.hive.knowledge.guild_mut(guild_id, |k| {
             let mut ended = Vec::new();
             k.translations.retain(|s| {
-                let idle = s.agent_id == core.id && now - s.last_activity > s.idle_minutes.max(1) as i64 * 60_000;
+                let idle = s.agent_id == core.id
+                    && now - s.last_activity > s.idle_minutes.max(1) as i64 * 60_000;
                 if idle {
                     ended.push(s.channel_id);
                 }
@@ -339,22 +492,29 @@ pub fn maybe_offer(core: &Arc<AgentCore>, guild_id: u64, message: &Message) {
         return;
     }
     let channel_id = message.channel_id.get();
-    let Some(mine) = guess_language(&message.content) else { return };
+    let Some(mine) = guess_language(&message.content) else {
+        return;
+    };
     let author = message.author.id.get();
     let since = now_ms() - 10 * 60_000;
     // The other people talking here recently, and their languages.
-    let others: Vec<(u64, String, &'static str)> = core.hive.knowledge.channel(channel_id, |archive| {
-        let mut seen: Vec<(u64, String, &'static str)> = Vec::new();
-        for m in archive.messages.iter().rev().take(12) {
-            if m.ts < since || m.author_bot || m.author_id == author || seen.iter().any(|(u, _, _)| *u == m.author_id) {
-                continue;
+    let others: Vec<(u64, String, &'static str)> =
+        core.hive.knowledge.channel(channel_id, |archive| {
+            let mut seen: Vec<(u64, String, &'static str)> = Vec::new();
+            for m in archive.messages.iter().rev().take(12) {
+                if m.ts < since
+                    || m.author_bot
+                    || m.author_id == author
+                    || seen.iter().any(|(u, _, _)| *u == m.author_id)
+                {
+                    continue;
+                }
+                if let Some(language) = guess_language(&m.content) {
+                    seen.push((m.author_id, m.author.clone(), language));
+                }
             }
-            if let Some(language) = guess_language(&m.content) {
-                seen.push((m.author_id, m.author.clone(), language));
-            }
-        }
-        seen
-    });
+            seen
+        });
     let Some((other, other_name, theirs)) = others.into_iter().find(|(_, _, l)| *l != mine) else {
         return;
     };
@@ -390,9 +550,18 @@ mod tests {
 
     #[test]
     fn guesses_common_languages() {
-        assert_eq!(guess_language("hey what are you doing tonight"), Some("English"));
-        assert_eq!(guess_language("hola, qué tal? estoy muy bien gracias"), Some("Spanish"));
-        assert_eq!(guess_language("bonjour, c'est vraiment pas mal je pense"), Some("French"));
+        assert_eq!(
+            guess_language("hey what are you doing tonight"),
+            Some("English")
+        );
+        assert_eq!(
+            guess_language("hola, qué tal? estoy muy bien gracias"),
+            Some("Spanish")
+        );
+        assert_eq!(
+            guess_language("bonjour, c'est vraiment pas mal je pense"),
+            Some("French")
+        );
         assert_eq!(guess_language("ich weiß nicht was das ist"), Some("German"));
         assert_eq!(guess_language("привет как дела"), Some("Russian"));
         assert_eq!(guess_language("こんにちは、元気ですか"), Some("Japanese"));

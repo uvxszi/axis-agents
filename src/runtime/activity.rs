@@ -18,10 +18,32 @@ pub fn is_read_only(tool: &str) -> bool {
         || tool.starts_with("draft_")
         || matches!(
             tool,
-            "web_search" | "fetch_url" | "recall" | "calculate" | "get_time" | "roll_dice" | "random_pick" | "look_at_image"
-                | "image_search" | "voice_overview" | "server_stats" | "leaderboard" | "ticket_transcript" | "make_plan"
-                | "step_done" | "draw_image" | "make_chart" | "edit_image" | "attach_image" | "get_avatar" | "remember"
-                | "forget_memory" | "list_voices" | "show_settings" | "server_activity" | "ask_agent"
+            "web_search"
+                | "fetch_url"
+                | "recall"
+                | "calculate"
+                | "get_time"
+                | "roll_dice"
+                | "random_pick"
+                | "look_at_image"
+                | "image_search"
+                | "voice_overview"
+                | "server_stats"
+                | "leaderboard"
+                | "ticket_transcript"
+                | "make_plan"
+                | "step_done"
+                | "draw_image"
+                | "make_chart"
+                | "edit_image"
+                | "attach_image"
+                | "get_avatar"
+                | "remember"
+                | "forget_memory"
+                | "list_voices"
+                | "show_settings"
+                | "server_activity"
+                | "ask_agent"
         )
 }
 
@@ -33,7 +55,10 @@ fn creating() -> &'static tokio::sync::Mutex<()> {
 /// The activity channel, made under the HQ category when there is one.
 async fn channel(core: &AgentCore, guild_id: u64) -> Option<u64> {
     let _guard = creating().lock().await;
-    let (existing, category) = core.hive.knowledge.guild(guild_id, |k| (k.hq.activity_channel_id, k.hq.category_id));
+    let (existing, category) = core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| (k.hq.activity_channel_id, k.hq.category_id));
     if let Some(id) = existing.filter(|id| core.world.channel(guild_id, *id).is_some()) {
         return Some(id);
     }
@@ -59,7 +84,9 @@ async fn channel(core: &AgentCore, guild_id: u64) -> Option<u64> {
     if let Ok(channel) = serde_json::from_value::<axis::model::Channel>(created) {
         core.world.upsert_channel(&channel);
     }
-    core.hive.knowledge.guild_mut(guild_id, |k| k.hq.activity_channel_id = Some(id));
+    core.hive
+        .knowledge
+        .guild_mut(guild_id, |k| k.hq.activity_channel_id = Some(id));
     Some(id)
 }
 
@@ -67,9 +94,16 @@ async fn channel(core: &AgentCore, guild_id: u64) -> Option<u64> {
 /// server): log it in HQ — or, without an HQ, tell the server's leaders
 /// at most once a day (and offer to set HQ up).
 pub fn log_outside(core: &Arc<AgentCore>, guild_id: u64, text: &str) {
-    let has_hq = core.hive.knowledge.guild(guild_id, |k| k.hq.category_id.is_some());
+    let has_hq = core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| k.hq.category_id.is_some());
     if has_hq {
-        log(core, guild_id, &format!("{text} — from outside this server"));
+        log(
+            core,
+            guild_id,
+            &format!("{text} — from outside this server"),
+        );
         return;
     }
     let now = crate::memory::now_ms();
@@ -113,7 +147,11 @@ pub fn log_outside(core: &Arc<AgentCore>, guild_id: u64, text: &str) {
 /// Log one action in a server's activity channel (in the background).
 pub fn log(core: &Arc<AgentCore>, guild_id: u64, text: &str) {
     let core = Arc::clone(core);
-    let line = format!("-# 🤖 **{}** · {}", core.name(), crate::llm::truncate(&text.replace('\n', " "), 400));
+    let line = format!(
+        "-# 🤖 **{}** · {}",
+        core.name(),
+        crate::llm::truncate(&text.replace('\n', " "), 400)
+    );
     tokio::spawn(async move {
         if let Some(channel_id) = channel(&core, guild_id).await {
             let _ = core

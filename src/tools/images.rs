@@ -360,8 +360,15 @@ pub async fn get_avatar(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
 pub async fn avatar_grid(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
     let names: Vec<String> = match args.get("users") {
-        Some(Value::Array(items)) => items.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
-        Some(Value::String(text)) => text.split([',', '\n', ';']).map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        Some(Value::String(text)) => text
+            .split([',', '\n', ';'])
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect(),
         _ => Vec::new(),
     };
     let mut people: Vec<crate::runtime::world::MemberInfo> = Vec::new();
@@ -379,7 +386,13 @@ pub async fn avatar_grid(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
             .world
             .with_guild(guild_id, |g| {
                 let id = g.find_role(&role)?.id.get();
-                Some(g.members.values().filter(|m| m.roles.contains(&id)).cloned().collect::<Vec<_>>())
+                Some(
+                    g.members
+                        .values()
+                        .filter(|m| m.roles.contains(&id))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
             })
             .flatten()
             .ok_or_else(|| format!("no role matches \"{role}\""))?;
@@ -395,8 +408,18 @@ pub async fn avatar_grid(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
             .core
             .world
             .with_guild(guild_id, |g| {
-                let channel = g.voice.get(&ctx.requester.user_id).or_else(|| g.voice.get(&me)).copied()?;
-                Some(g.voice.iter().filter(|(_, c)| **c == channel).filter_map(|(u, _)| g.members.get(u).cloned()).collect::<Vec<_>>())
+                let channel = g
+                    .voice
+                    .get(&ctx.requester.user_id)
+                    .or_else(|| g.voice.get(&me))
+                    .copied()?;
+                Some(
+                    g.voice
+                        .iter()
+                        .filter(|(_, c)| **c == channel)
+                        .filter_map(|(u, _)| g.members.get(u).cloned())
+                        .collect::<Vec<_>>(),
+                )
             })
             .flatten()
             .ok_or("you're not in a voice channel")?;
@@ -418,20 +441,50 @@ pub async fn avatar_grid(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
     let downloads: Vec<_> = people
         .iter()
         .map(|m| {
-            let url = avatar_url(Some(guild_id), m.user_id, m.avatar.as_deref(), m.guild_avatar.as_deref()).replace("size=1024", "size=256");
-            tokio::spawn(async move { download(&url, true).await.ok().and_then(|b| decode(&b).ok()) })
+            let url = avatar_url(
+                Some(guild_id),
+                m.user_id,
+                m.avatar.as_deref(),
+                m.guild_avatar.as_deref(),
+            )
+            .replace("size=1024", "size=256");
+            tokio::spawn(async move {
+                download(&url, true)
+                    .await
+                    .ok()
+                    .and_then(|b| decode(&b).ok())
+            })
         })
         .collect();
     let mut pictures = Vec::new();
     for handle in downloads {
         pictures.push(handle.await.ok().flatten());
     }
-    let entries: Vec<(String, String)> = people.iter().map(|m| (m.display_name().to_owned(), format!("@{}", m.username))).collect();
+    let entries: Vec<(String, String)> = people
+        .iter()
+        .map(|m| (m.display_name().to_owned(), format!("@{}", m.username)))
+        .collect();
     let png = encode(DynamicImage::ImageRgba8(avatar_sheet(&pictures, &entries)))?;
-    let name = ctx.media.lock().expect("media poisoned").add_replacing("avatar grid", png);
-    let mut out = format!("{name}: a grid of {} profile picture(s), attached below your message:\n", people.len());
+    let name = ctx
+        .media
+        .lock()
+        .expect("media poisoned")
+        .add_replacing("avatar grid", png);
+    let mut out = format!(
+        "{name}: a grid of {} profile picture(s), attached below your message:\n",
+        people.len()
+    );
     for (i, m) in people.iter().enumerate() {
-        out.push_str(&format!("{}. {}\n", i + 1, super::person_label(m.nick.as_deref(), m.global_name.as_deref(), &m.username, m.user_id)));
+        out.push_str(&format!(
+            "{}. {}\n",
+            i + 1,
+            super::person_label(
+                m.nick.as_deref(),
+                m.global_name.as_deref(),
+                &m.username,
+                m.user_id
+            )
+        ));
     }
     if !missing.is_empty() {
         out.push_str(&format!("Couldn't find: {}\n", missing.join(", ")));
@@ -446,11 +499,17 @@ pub fn avatar_sheet(pictures: &[Option<DynamicImage>], entries: &[(String, Strin
     const GAP: u32 = 24;
     const TEXT: u32 = 52;
     let n = entries.len().max(1) as u32;
-    let cols = ((n as f32).sqrt().ceil() as u32).clamp(1, 6).max(if n >= 4 { 2 } else { n });
+    let cols = ((n as f32).sqrt().ceil() as u32)
+        .clamp(1, 6)
+        .max(if n >= 4 { 2 } else { n });
     let rows = n.div_ceil(cols);
     let cell_w = TILE + GAP;
     let cell_h = TILE + TEXT + GAP;
-    let mut canvas = RgbaImage::from_pixel(cols * cell_w + GAP, rows * cell_h + GAP, Rgba([30, 31, 34, 255]));
+    let mut canvas = RgbaImage::from_pixel(
+        cols * cell_w + GAP,
+        rows * cell_h + GAP,
+        Rgba([30, 31, 34, 255]),
+    );
     let font = FontRef::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).expect("bundled font");
     let fit = |text: &str, size: f32| -> String {
         let max = (cell_w - 6) as f32;
@@ -471,36 +530,98 @@ pub fn avatar_sheet(pictures: &[Option<DynamicImage>], entries: &[(String, Strin
         let y0 = GAP + row * cell_h;
         match pictures.get(i).cloned().flatten() {
             Some(picture) => {
-                let picture = picture.resize_to_fill(TILE, TILE, imageops::FilterType::Triangle).to_rgba8();
+                let picture = picture
+                    .resize_to_fill(TILE, TILE, imageops::FilterType::Triangle)
+                    .to_rgba8();
                 for (px, py, pixel) in picture.enumerate_pixels() {
                     let dx = px as f32 + 0.5 - r;
                     let dy = py as f32 + 0.5 - r;
                     let edge = (r - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
                     if edge > 0.0 {
-                        blend(&mut canvas, (x0 + px) as i64, (y0 + py) as i64, Rgba([pixel[0], pixel[1], pixel[2], 255]), edge * pixel[3] as f32 / 255.0);
+                        blend(
+                            &mut canvas,
+                            (x0 + px) as i64,
+                            (y0 + py) as i64,
+                            Rgba([pixel[0], pixel[1], pixel[2], 255]),
+                            edge * pixel[3] as f32 / 255.0,
+                        );
                     }
                 }
             }
             None => {
-                ellipse(&mut canvas, x0 as f32 + r, y0 as f32 + r, r, r, Rgba([88, 101, 242, 255]), true, 0.0);
-                let initial: String = display.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                ellipse(
+                    &mut canvas,
+                    x0 as f32 + r,
+                    y0 as f32 + r,
+                    r,
+                    r,
+                    Rgba([88, 101, 242, 255]),
+                    true,
+                    0.0,
+                );
+                let initial: String = display
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().collect())
+                    .unwrap_or_default();
                 let w = line_width(&font, &initial, 64.0);
-                draw_text(&mut canvas, &font, &initial, 64.0, x0 as f32 + r - w / 2.0, y0 as f32 + r - 38.0, Rgba([255, 255, 255, 255]));
+                draw_text(
+                    &mut canvas,
+                    &font,
+                    &initial,
+                    64.0,
+                    x0 as f32 + r - w / 2.0,
+                    y0 as f32 + r - 38.0,
+                    Rgba([255, 255, 255, 255]),
+                );
             }
         }
         // Number badge.
         let label = (i + 1).to_string();
-        ellipse(&mut canvas, x0 as f32 + 18.0, y0 as f32 + 18.0, 17.0, 17.0, Rgba([235, 69, 158, 255]), true, 0.0);
+        ellipse(
+            &mut canvas,
+            x0 as f32 + 18.0,
+            y0 as f32 + 18.0,
+            17.0,
+            17.0,
+            Rgba([235, 69, 158, 255]),
+            true,
+            0.0,
+        );
         let w = line_width(&font, &label, 20.0);
-        draw_text(&mut canvas, &font, &label, 20.0, x0 as f32 + 18.0 - w / 2.0, y0 as f32 + 6.0, Rgba([255, 255, 255, 255]));
+        draw_text(
+            &mut canvas,
+            &font,
+            &label,
+            20.0,
+            x0 as f32 + 18.0 - w / 2.0,
+            y0 as f32 + 6.0,
+            Rgba([255, 255, 255, 255]),
+        );
         // Names, centered under the picture.
         let center = x0 as f32 + r;
         let display = fit(display, 19.0);
         let w = line_width(&font, &display, 19.0);
-        draw_text(&mut canvas, &font, &display, 19.0, center - w / 2.0, (y0 + TILE + 6) as f32, Rgba([242, 243, 245, 255]));
+        draw_text(
+            &mut canvas,
+            &font,
+            &display,
+            19.0,
+            center - w / 2.0,
+            (y0 + TILE + 6) as f32,
+            Rgba([242, 243, 245, 255]),
+        );
         let username = fit(username, 15.0);
         let w = line_width(&font, &username, 15.0);
-        draw_text(&mut canvas, &font, &username, 15.0, center - w / 2.0, (y0 + TILE + 30) as f32, Rgba([148, 155, 164, 255]));
+        draw_text(
+            &mut canvas,
+            &font,
+            &username,
+            15.0,
+            center - w / 2.0,
+            (y0 + TILE + 30) as f32,
+            Rgba([148, 155, 164, 255]),
+        );
     }
     canvas
 }
@@ -670,7 +791,11 @@ async fn search_openverse(query: &str, limit: usize) -> Result<Vec<FoundImage>, 
         .flatten()
         .filter_map(|r| {
             Some(FoundImage {
-                title: r.get("title").and_then(Value::as_str).unwrap_or("image").to_owned(),
+                title: r
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image")
+                    .to_owned(),
                 url: r.get("url")?.as_str()?.to_owned(),
                 page: r
                     .get("foreign_landing_url")
@@ -688,7 +813,13 @@ fn relevant(image: &FoundImage, query: &str) -> bool {
     let words: Vec<String> = query
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 3 && !matches!(*w, "the" | "and" | "for" | "with" | "image" | "picture" | "photo" | "png" | "jpg"))
+        .filter(|w| {
+            w.len() >= 3
+                && !matches!(
+                    *w,
+                    "the" | "and" | "for" | "with" | "image" | "picture" | "photo" | "png" | "jpg"
+                )
+        })
         .map(str::to_owned)
         .collect();
     words.is_empty()
@@ -1833,7 +1964,13 @@ mod live {
         for query in ["zebra", "red panda"] {
             let mut found = search_commons(query, 6).await.unwrap();
             found.extend(search_openverse(query, 6).await.unwrap_or_default());
-            found.extend(search_bing(query, 8).await.unwrap_or_default().into_iter().filter(|i| relevant(i, query)));
+            found.extend(
+                search_bing(query, 8)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|i| relevant(i, query)),
+            );
             assert!(found.len() >= 3, "{query}: {found:?}");
             for image in &found {
                 println!("{query}: {} | {}", image.title, image.url);
@@ -1843,11 +1980,27 @@ mod live {
 
     #[test]
     fn off_topic_results_are_dropped() {
-        let image = |title: &str, url: &str| FoundImage { title: title.into(), url: url.into(), page: String::new() };
-        assert!(relevant(&image("Zebra portrait", "https://x/1.jpg"), "zebra"));
-        assert!(relevant(&image("Plains zebras", "https://x/2.jpg"), "zebras"));
-        assert!(!relevant(&image("Long Sleeve Wool Dress", "https://etsy/il_1080.jpg"), "zebra"));
-        assert!(!relevant(&image("Class of '74 (1972)", "https://tmdb/x.jpg"), "a zebra"));
+        let image = |title: &str, url: &str| FoundImage {
+            title: title.into(),
+            url: url.into(),
+            page: String::new(),
+        };
+        assert!(relevant(
+            &image("Zebra portrait", "https://x/1.jpg"),
+            "zebra"
+        ));
+        assert!(relevant(
+            &image("Plains zebras", "https://x/2.jpg"),
+            "zebras"
+        ));
+        assert!(!relevant(
+            &image("Long Sleeve Wool Dress", "https://etsy/il_1080.jpg"),
+            "zebra"
+        ));
+        assert!(!relevant(
+            &image("Class of '74 (1972)", "https://tmdb/x.jpg"),
+            "a zebra"
+        ));
     }
 
     /// `cargo test live_ -- --ignored`
@@ -1863,7 +2016,12 @@ mod live {
             alive += ok as usize;
         }
         assert!(alive >= 2, "too few working links");
-        assert!(!super::super::web::is_live_image("https://images.unsplash.com/photo-1529187034699-4d8b914e0c2a?q=80").await);
+        assert!(
+            !super::super::web::is_live_image(
+                "https://images.unsplash.com/photo-1529187034699-4d8b914e0c2a?q=80"
+            )
+            .await
+        );
         let commons = search_commons("cow", 3).await.unwrap();
         assert!(!commons.is_empty());
     }

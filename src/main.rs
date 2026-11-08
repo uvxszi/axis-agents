@@ -7,13 +7,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod config;
-mod llm;
-mod memory;
-mod paths;
-mod runtime;
-mod tools;
-mod ui;
+use axis_agents::{paths, ui};
 
 fn main() -> eframe::Result<()> {
     let log_dir = paths::data_dir();

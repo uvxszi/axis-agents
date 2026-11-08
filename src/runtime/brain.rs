@@ -150,9 +150,8 @@ fn render_view(
 ) -> String {
     // A steady, compact status — the header plus what it's doing now —
     // so the message doesn't grow and then collapse when the reply lands.
-    let secs = view.started.elapsed().as_secs();
     let size = if small { "-# " } else { "" };
-    let mut out = format!("{size}{} thinking… · {secs}s", emojis.thinking.trim());
+    let mut out = format!("{size}{} thinking…", emojis.thinking.trim());
     if style == ThinkingStyle::Placeholder {
         return out;
     }
@@ -163,16 +162,36 @@ fn render_view(
             Some(true) => "✅",
             Some(false) => "⚠️",
         };
-        let count = if step.count > 1 { format!(" ×{}", step.count) } else { String::new() };
-        let progress = if view.steps.len() > 1 { format!(" · step {}", view.steps.len()) } else { String::new() };
-        out.push_str(&format!("
-{size}{mark} {}{count}{progress}", step.label));
+        let count = if step.count > 1 {
+            format!(" ×{}", step.count)
+        } else {
+            String::new()
+        };
+        let progress = if view.steps.len() > 1 {
+            format!(" · step {}", view.steps.len())
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "
+{size}{mark} {}{count}{progress}",
+            step.label
+        ));
     }
     if style == ThinkingStyle::LiveWithReasoning && !view.reasoning.trim().is_empty() {
         // The latest line of reasoning, in place.
-        if let Some(line) = view.reasoning.trim().lines().rev().find(|l| !l.trim().is_empty()) {
-            out.push_str(&format!("
-> {}", crate::llm::truncate(line.trim(), 160)));
+        if let Some(line) = view
+            .reasoning
+            .trim()
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+        {
+            out.push_str(&format!(
+                "
+> {}",
+                crate::llm::truncate(line.trim(), 160)
+            ));
         }
     }
     crate::llm::truncate(&out, 1990)
@@ -193,20 +212,38 @@ pub struct Outcome {
 /// Run a job to the end. Returns false when the model failed (nothing
 /// could be said).
 pub async fn run(core: &Arc<AgentCore>, job: Job) -> bool {
-    *core.running.lock().expect("running poisoned").entry(job.channel_id).or_default() += 1;
+    *core
+        .running
+        .lock()
+        .expect("running poisoned")
+        .entry(job.channel_id)
+        .or_default() += 1;
     struct Done<'a>(&'a AgentCore, u64);
     impl Drop for Done<'_> {
         fn drop(&mut self) {
-            if let Some(n) = self.0.running.lock().expect("running poisoned").get_mut(&self.1) {
+            if let Some(n) = self
+                .0
+                .running
+                .lock()
+                .expect("running poisoned")
+                .get_mut(&self.1)
+            {
                 *n = n.saturating_sub(1);
             }
         }
     }
     let _done = Done(core, job.channel_id);
     // Follow-ups from the person this job works for join it.
-    let steered = matches!(job.outlet, Outlet::Channel) && matches!(job.reason, Reason::Direct | Reason::Conversation | Reason::Hq);
+    let steered = matches!(job.outlet, Outlet::Channel)
+        && matches!(
+            job.reason,
+            Reason::Direct | Reason::Conversation | Reason::Hq
+        );
     if steered {
-        core.running_for.lock().expect("running poisoned").insert(job.channel_id, job.requester.user_id);
+        core.running_for
+            .lock()
+            .expect("running poisoned")
+            .insert(job.channel_id, job.requester.user_id);
     }
     let profile = core.profile();
     let style = profile.behavior.thinking_style;
@@ -306,7 +343,12 @@ pub async fn run(core: &Arc<AgentCore>, job: Job) -> bool {
             running_for.remove(&job.channel_id);
         }
         drop(running_for);
-        let leftover = core.steering.lock().expect("steering poisoned").remove(&job.channel_id).unwrap_or_default();
+        let leftover = core
+            .steering
+            .lock()
+            .expect("steering poisoned")
+            .remove(&job.channel_id)
+            .unwrap_or_default();
         for (message, reason) in leftover {
             super::agent::enqueue(core, message, reason);
         }
@@ -327,7 +369,10 @@ async fn present(
     let channel = ChannelId::new(job.channel_id);
     // Already showing "thinking…" (posted when the message arrived)?
     let early = if matches!(job.outlet, Outlet::Channel) {
-        core.early.lock().expect("early poisoned").remove(&job.channel_id)
+        core.early
+            .lock()
+            .expect("early poisoned")
+            .remove(&job.channel_id)
     } else {
         None
     };
@@ -340,7 +385,9 @@ async fn present(
     let mut shown_version = 0;
     // Never post (even "thinking…") where it was told never to chat.
     let channel_outlet = matches!(job.outlet, Outlet::Channel)
-        && !job.guild_id.is_some_and(|g| core.barred(g, job.channel_id).is_some());
+        && !job
+            .guild_id
+            .is_some_and(|g| core.barred(g, job.channel_id).is_some());
     loop {
         // Mirror progress into the dashboard.
         let (rendered, version, revealed) = {
@@ -422,7 +469,9 @@ async fn present(
                 last_edit = Instant::now();
             }
             // Keep "… is typing" showing for the whole time the agent works.
-            if (revealed || placeholder.is_some()) && last_typing.is_none_or(|t| t.elapsed() >= Duration::from_secs(8)) {
+            if (revealed || placeholder.is_some())
+                && last_typing.is_none_or(|t| t.elapsed() >= Duration::from_secs(8))
+            {
                 let _ = core.http.trigger_typing(channel).await;
                 last_typing = Some(Instant::now());
             }
@@ -585,8 +634,15 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             .get(&job.channel_id)
             .is_some_and(|t| *t >= job_started);
         if stopped {
-            core.interrupts.lock().expect("interrupts poisoned").remove(&job.channel_id);
-            let done: Vec<String> = plan.iter().filter(|s| s.done).map(|s| format!("✓ {}", s.text)).collect();
+            core.interrupts
+                .lock()
+                .expect("interrupts poisoned")
+                .remove(&job.channel_id);
+            let done: Vec<String> = plan
+                .iter()
+                .filter(|s| s.done)
+                .map(|s| format!("✓ {}", s.text))
+                .collect();
             return Outcome {
                 text: Some(if done.is_empty() {
                     "Okay, stopped.".to_owned()
@@ -630,11 +686,21 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             Vec::new()
         } else {
             let mut tools = prompt.tools.clone();
-            tools.extend(loaded.iter().filter(|l| !tools.iter().any(|t| t.name == l.name)).cloned().collect::<Vec<_>>());
+            tools.extend(
+                loaded
+                    .iter()
+                    .filter(|l| !tools.iter().any(|t| t.name == l.name))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
             tools
         };
         let request = ChatRequest {
-            thinking_budget: if think_off { Some(0) } else { prompt.thinking_budget },
+            thinking_budget: if think_off {
+                Some(0)
+            } else {
+                prompt.thinking_budget
+            },
             model: &profile.model.model,
             messages: &messages,
             tools: &tools,
@@ -695,7 +761,10 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                 let window = core.context_window();
                 match available_context(&message) {
                     Some(real) if real < window => {
-                        core.model_info.write().expect("model info poisoned").context_window = Some(real);
+                        core.model_info
+                            .write()
+                            .expect("model info poisoned")
+                            .context_window = Some(real);
                     }
                     _ => {
                         shrink *= 0.6;
@@ -792,9 +861,13 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         {
             room_retries += 1;
             let cap = (core.context_window() / 2).max(512);
-            let room = core.thinking_room.load(std::sync::atomic::Ordering::Relaxed);
-            let grown = (room.max(prompt.max_output / 2) * 2).min(cap.saturating_sub(profile.model.max_output_tokens.min(cap)));
-            core.thinking_room.store(grown, std::sync::atomic::Ordering::Relaxed);
+            let room = core
+                .thinking_room
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let grown = (room.max(prompt.max_output / 2) * 2)
+                .min(cap.saturating_sub(profile.model.max_output_tokens.min(cap)));
+            core.thinking_room
+                .store(grown, std::sync::atomic::Ordering::Relaxed);
             out_budget = (out_budget * 2).min(cap).max(out_budget);
             think_off = true;
             core.feed(
@@ -813,7 +886,11 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         // when it's on offer.
         let rule_tool = request_text(job)
             .filter(|_| job.task.is_none())
-            .and_then(|t| channel_rule_request(&t).or_else(|| github_request(&t)).or_else(|| schedule_request(&t)))
+            .and_then(|t| {
+                channel_rule_request(&t)
+                    .or_else(|| github_request(&t))
+                    .or_else(|| schedule_request(&t))
+            })
             .filter(|tool| prompt.text_tools || prompt.tools.iter().any(|t| t.name == *tool));
         // Small models love "Want me to check X?" instead of checking X.
         // When it offers something it could just do, make it do it.
@@ -868,7 +945,12 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             && !pushed_follow_through
             && tools_used == 0
             && !last_round
-            && !calls.iter().any(|c| matches!(c.name.as_str(), "create_task" | "set_reminder" | "make_plan"))
+            && !calls.iter().any(|c| {
+                matches!(
+                    c.name.as_str(),
+                    "create_task" | "set_reminder" | "make_plan"
+                )
+            })
         {
             pushed_follow_through = true;
             convo.push(Msg::assistant(content.clone()));
@@ -918,22 +1000,39 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         {
             continuations += 1;
             written = join_continued(&written, &content);
-            out_budget = (out_budget * 2).min((core.context_window() / 2).max(512)).max(out_budget);
-            core.feed(FeedKind::System, "the answer hit the length limit — continuing it", None);
+            out_budget = (out_budget * 2)
+                .min((core.context_window() / 2).max(512))
+                .max(out_budget);
+            core.feed(
+                FeedKind::System,
+                "the answer hit the length limit — continuing it",
+                None,
+            );
             convo.push(Msg::assistant(content.clone()));
             convo.push(Msg::user(
                 "You were cut off by the length limit. Continue exactly where you stopped — no repeating, no preamble, just the rest.",
             ));
             continue;
         }
-        let content = if written.is_empty() { content } else { join_continued(&written, &content) };
+        let content = if written.is_empty() {
+            content
+        } else {
+            join_continued(&written, &content)
+        };
         // A counted job ending short ("delete 10", 9 done): finish it first.
         if calls.is_empty() && !last_round && count_nudges < 3 && requested >= 3 {
             let short = tool_uses
                 .iter()
                 .map(|(name, tried)| (name, *tried, ok_uses.get(name).copied().unwrap_or(0)))
-                .filter(|(name, tried, worked)| *tried >= 2 && *worked < requested && !is_work_tool(name) && !matches!(name.as_str(), "make_plan" | "step_done" | "load_tools"))
-                .map(|(name, _, worked)| format!("{name} has worked {worked} of the {requested} times asked"))
+                .filter(|(name, tried, worked)| {
+                    *tried >= 2
+                        && *worked < requested
+                        && !is_work_tool(name)
+                        && !matches!(name.as_str(), "make_plan" | "step_done" | "load_tools")
+                })
+                .map(|(name, _, worked)| {
+                    format!("{name} has worked {worked} of the {requested} times asked")
+                })
                 .collect::<Vec<_>>();
             if !short.is_empty() {
                 count_nudges += 1;
@@ -948,7 +1047,11 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         }
         if calls.is_empty() || last_round {
             // Pushed to act and still only claimed it: don't pass that on.
-            let content = if calls.is_empty() && pushed_follow_through && tools_used == 0 && claims_action(&content) {
+            let content = if calls.is_empty()
+                && pushed_follow_through
+                && tools_used == 0
+                && claims_action(&content)
+            {
                 tracing::warn!(agent = %core.id, draft = %content, "claimed an action without doing it");
                 "Sorry — I didn't actually manage to do that. Can you ask me again?".to_owned()
             } else {
@@ -965,9 +1068,14 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         if prompt.text_tools {
             convo.push(Msg::assistant(output.content.clone()));
         } else {
-            convo.push(Msg::assistant_with_tools(content.clone(), calls.clone()));
+            // Only the calls that will actually receive results may enter
+            // the history — strict servers reject orphaned tool_calls.
+            let executed: Vec<_> = calls.iter().take(8).cloned().collect();
+            convo.push(Msg::assistant_with_tools(content.clone(), executed));
         }
         let mut text_results = Vec::new();
+        let mut posted_notices: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for call in calls.iter().take(8) {
             let key = format!("{}|{}", call.name, call.arguments);
             let count = {
@@ -977,14 +1085,21 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             };
             let label = match call.name.as_str() {
                 "make_plan" | "step_done" => {
-                    let next = plan.iter().position(|s| !s.done).map(|i| i + 1 + usize::from(call.name == "step_done"));
+                    let next = plan
+                        .iter()
+                        .position(|s| !s.done)
+                        .map(|i| i + 1 + usize::from(call.name == "step_done"));
                     match (call.name.as_str(), next) {
                         ("make_plan", _) => "📋 planning the steps".to_owned(),
                         (_, Some(n)) if n <= plan.len() => format!("📋 step {n} of {}", plan.len()),
                         _ => "📋 wrapping up".to_owned(),
                     }
                 }
-                _ => humanize_ids(core, job.guild_id, &tools::step_label(&call.name, &call.arguments)),
+                _ => humanize_ids(
+                    core,
+                    job.guild_id,
+                    &tools::step_label(&call.name, &call.arguments),
+                ),
             };
             {
                 let mut v = view.lock().expect("view poisoned");
@@ -1019,15 +1134,38 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             };
             let plan_result = match call.name.as_str() {
                 "load_tools" => {
-                    let what = call.arguments.get("what").and_then(|v| v.as_str()).unwrap_or_default();
-                    let have: Vec<String> = prompt.tools.iter().chain(loaded.iter()).map(|t| t.name.clone()).collect();
-                    let (found, blocked) = tools::find_tools(core, &job.requester, job.guild_id.is_some(), what, &have);
+                    let what = call
+                        .arguments
+                        .get("what")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let have: Vec<String> = prompt
+                        .tools
+                        .iter()
+                        .chain(loaded.iter())
+                        .map(|t| t.name.clone())
+                        .collect();
+                    let (found, blocked) = tools::find_tools(
+                        core,
+                        &job.requester,
+                        job.guild_id.is_some(),
+                        what,
+                        &have,
+                    );
                     let mut text = if found.is_empty() {
                         format!("no other tool matches \"{what}\"")
                     } else {
                         format!(
                             "added — call them now: {}",
-                            found.iter().map(|t| format!("{} ({})", t.name, crate::llm::truncate(&t.description, 90))).collect::<Vec<_>>().join("; ")
+                            found
+                                .iter()
+                                .map(|t| format!(
+                                    "{} ({})",
+                                    t.name,
+                                    crate::llm::truncate(&t.description, 90)
+                                ))
+                                .collect::<Vec<_>>()
+                                .join("; ")
                         )
                     };
                     if !blocked.is_empty() {
@@ -1038,16 +1176,32 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                         ));
                     }
                     loaded.extend(found);
-                    Some(tools::ToolOutcome { text, ok: true })
+                    Some(tools::ToolOutcome {
+                        text,
+                        ok: true,
+                        notice: None,
+                    })
                 }
                 "make_plan" => {
-                    let text = call.arguments.get("steps").map(|v| match v {
-                        serde_json::Value::Array(items) => items.iter().filter_map(|i| i.as_str()).collect::<Vec<_>>().join("\n"),
-                        other => other.as_str().unwrap_or_default().to_owned(),
-                    }).unwrap_or_default();
+                    let text = call
+                        .arguments
+                        .get("steps")
+                        .map(|v| match v {
+                            serde_json::Value::Array(items) => items
+                                .iter()
+                                .filter_map(|i| i.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            other => other.as_str().unwrap_or_default().to_owned(),
+                        })
+                        .unwrap_or_default();
                     plan = parse_steps(&text);
                     if plan.is_empty() {
-                        Some(tools::ToolOutcome { text: "error: list the steps, one per line".to_owned(), ok: false })
+                        Some(tools::ToolOutcome {
+                            text: "error: list the steps, one per line".to_owned(),
+                            ok: false,
+                            notice: None,
+                        })
                     } else {
                         max_rounds = max_rounds.max((plan.len() as u32 * 5 + 4).min(80));
                         step_nudges = 0;
@@ -1058,11 +1212,17 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                                 plan[0].text
                             ),
                             ok: true,
+                            notice: None,
                         })
                     }
                 }
                 "step_done" => {
-                    let result = call.arguments.get("result").and_then(|v| v.as_str()).unwrap_or("done").to_owned();
+                    let result = call
+                        .arguments
+                        .get("result")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("done")
+                        .to_owned();
                     match plan.iter_mut().find(|s| !s.done) {
                         Some(step) => {
                             step.done = true;
@@ -1075,9 +1235,15 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                                     None => "All steps are done — write your final reply: what you did and the results.".to_owned(),
                                 },
                                 ok: true,
+                                notice: None,
                             })
                         }
-                        None => Some(tools::ToolOutcome { text: "There's no unfinished step (make a plan first, or just answer).".to_owned(), ok: true }),
+                        None => Some(tools::ToolOutcome {
+                            text: "There's no unfinished step (make a plan first, or just answer)."
+                                .to_owned(),
+                            ok: true,
+                            notice: None,
+                        }),
                     }
                 }
                 _ => None,
@@ -1087,8 +1253,7 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             } else if count > 2 && count > requested && call.name != "wait" {
                 tools::ToolOutcome {
                     text: "error: you already made this exact call; use the earlier result or try something else".to_owned(),
-                    ok: false,
-                }
+                    ok: false, notice: None }
             } else if uses > 5 && uses > requested + 2 && !is_work_tool(&call.name) {
                 tools::ToolOutcome {
                     text: format!(
@@ -1096,6 +1261,7 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                         call.name
                     ),
                     ok: false,
+                    notice: None,
                 }
             } else {
                 let mut outcome = tools::execute(&ctx, call).await;
@@ -1110,7 +1276,11 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                         "
 ({} has worked {done} time(s) so far — they asked for {requested}{})",
                         call.name,
-                        if done >= requested { "; that's all of them" } else { "" }
+                        if done >= requested {
+                            "; that's all of them"
+                        } else {
+                            ""
+                        }
                     ));
                 }
                 if uses >= 3 && uses >= requested && !is_work_tool(&call.name) {
@@ -1137,6 +1307,26 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                     format!("{label} → {}", crate::llm::truncate(&outcome.text, 140)),
                     None,
                 );
+            }
+            // AAv2: permission denials are posted by the app, not narrated
+            // by the model — one fixed message, deduped per job.
+            if let Some(notice) = &outcome.notice {
+                if posted_notices.insert(notice.clone()) {
+                    let channel = job.channel_id;
+                    let _ = core
+                        .http
+                        .raw(
+                            "POST",
+                            &format!("/channels/{channel}/messages"),
+                            Some(serde_json::json!({
+                                "content": notice,
+                                "allowed_mentions": { "parse": [] },
+                                "flags": 0
+                            })),
+                            None,
+                        )
+                        .await;
+                }
             }
             if prompt.text_tools {
                 text_results.push(format!("TOOL RESULT ({}): {}", call.name, outcome.text));
@@ -1192,27 +1382,56 @@ pub fn join_continued(before: &str, after: &str) -> String {
     }
     let needs_space = !before.ends_with(char::is_whitespace)
         && after.starts_with(|c: char| c.is_alphanumeric() || c == '*' || c == '(')
-        && before.ends_with(|c: char| c.is_alphanumeric() || matches!(c, '.' | ',' | ':' | ';' | '!' | '?' | ')' | '*'));
+        && before.ends_with(|c: char| {
+            c.is_alphanumeric() || matches!(c, '.' | ',' | ':' | ';' | '!' | '?' | ')' | '*')
+        });
     // The model sometimes repeats the last few words; drop the overlap.
-    let tail: String = before.chars().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String = before
+        .chars()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     let trimmed = after.trim_start();
     let mut skip = 0;
     for len in (8..=tail.len().min(trimmed.len())).rev() {
-        if tail.is_char_boundary(tail.len() - len) && trimmed.is_char_boundary(len) && tail[tail.len() - len..].trim_start() == trimmed[..len].trim_start() && !trimmed[..len].trim().is_empty() {
+        if tail.is_char_boundary(tail.len() - len)
+            && trimmed.is_char_boundary(len)
+            && tail[tail.len() - len..].trim_start() == trimmed[..len].trim_start()
+            && !trimmed[..len].trim().is_empty()
+        {
             skip = len;
             break;
         }
     }
     let rest = if skip > 0 { &trimmed[skip..] } else { after };
-    format!("{before}{}{rest}", if needs_space && skip == 0 { " " } else { "" })
+    format!(
+        "{before}{}{rest}",
+        if needs_space && skip == 0 { " " } else { "" }
+    )
 }
 
 /// Did they ask for the whole thing at once (no page buttons)?
 pub fn wants_everything(text: &str) -> bool {
     let t = text.to_lowercase();
-    ["all at once", "at once", "no pages", "don't page", "dont page", "without pages", "whole thing", "in full", "full list", "send it all", "everything in one", "no paging"]
-        .iter()
-        .any(|p| t.contains(p))
+    [
+        "all at once",
+        "at once",
+        "no pages",
+        "don't page",
+        "dont page",
+        "without pages",
+        "whole thing",
+        "in full",
+        "full list",
+        "send it all",
+        "everything in one",
+        "no paging",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
 }
 
 /// Split a long answer into pages of about a screenful, at paragraph or
@@ -1227,14 +1446,26 @@ pub fn paginate(text: &str) -> Vec<String> {
         let would = current.len() + line.len() + 1;
         // Break at a blank line or between items once a page is full; force
         // a break well before Discord's limit.
-        let soft = would > PAGE && !in_code && (line.trim().is_empty() || line.trim_start().starts_with(['-', '*', '•', '#']) || line.trim_start().chars().next().is_some_and(|c| c.is_ascii_digit()));
+        let soft = would > PAGE
+            && !in_code
+            && (line.trim().is_empty()
+                || line.trim_start().starts_with(['-', '*', '•', '#'])
+                || line
+                    .trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit()));
         let hard = would > 1_850;
         if (soft || hard) && !current.trim().is_empty() {
             if in_code {
                 current.push_str("```");
             }
             pages.push(current.trim_end().to_owned());
-            current = if in_code { "```\n".to_owned() } else { String::new() };
+            current = if in_code {
+                "```\n".to_owned()
+            } else {
+                String::new()
+            };
         }
         if toggles {
             in_code = !in_code;
@@ -1247,7 +1478,12 @@ pub fn paginate(text: &str) -> Vec<String> {
     }
     // A footer line (-# thought for…) stays on every page.
     if pages.len() > 1 {
-        if let Some(footer) = pages.last().and_then(|p| p.lines().last()).filter(|l| l.starts_with("-# ")).map(str::to_owned) {
+        if let Some(footer) = pages
+            .last()
+            .and_then(|p| p.lines().last())
+            .filter(|l| l.starts_with("-# "))
+            .map(str::to_owned)
+        {
             let n = pages.len();
             for (i, page) in pages.iter_mut().enumerate() {
                 if i + 1 < n {
@@ -1274,7 +1510,14 @@ pub fn page_buttons(index: usize, total: usize) -> Vec<serde_json::Value> {
 fn is_work_tool(name: &str) -> bool {
     matches!(
         name,
-        "draft_write" | "draft_edit" | "draft_view" | "read_section" | "find_in_document" | "step_done" | "design_rank_card" | "wait"
+        "draft_write"
+            | "draft_edit"
+            | "draft_view"
+            | "read_section"
+            | "find_in_document"
+            | "step_done"
+            | "design_rank_card"
+            | "wait"
     )
 }
 
@@ -1282,11 +1525,25 @@ fn is_work_tool(name: &str) -> bool {
 /// when none — how many calls of one tool to expect.
 pub fn requested_count(text: &str) -> u32 {
     const WORDS: [(&str, u32); 11] = [
-        ("two", 2), ("three", 3), ("four", 4), ("five", 5), ("six", 6), ("seven", 7), ("eight", 8), ("nine", 9), ("ten", 10), ("twelve", 12), ("twenty", 20),
+        ("two", 2),
+        ("three", 3),
+        ("four", 4),
+        ("five", 5),
+        ("six", 6),
+        ("seven", 7),
+        ("eight", 8),
+        ("nine", 9),
+        ("ten", 10),
+        ("twelve", 12),
+        ("twenty", 20),
     ];
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter_map(|w| w.parse::<u32>().ok().or_else(|| WORDS.iter().find(|(n, _)| *n == w).map(|(_, v)| *v)))
+        .filter_map(|w| {
+            w.parse::<u32>()
+                .ok()
+                .or_else(|| WORDS.iter().find(|(n, _)| *n == w).map(|(_, v)| *v))
+        })
         .filter(|n| (2..=50).contains(n))
         .max()
         .unwrap_or(0)
@@ -1305,13 +1562,18 @@ pub fn parse_steps(text: &str) -> Vec<PlanStep> {
     text.split(['\n', ';'])
         .map(|line| {
             line.trim()
-                .trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | '•' | ' ' | '\t'))
+                .trim_start_matches(|c: char| {
+                    c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | '•' | ' ' | '\t')
+                })
                 .trim()
                 .to_owned()
         })
         .filter(|line| line.len() > 2)
         .take(25)
-        .map(|text| PlanStep { text, ..Default::default() })
+        .map(|text| PlanStep {
+            text,
+            ..Default::default()
+        })
         .collect()
 }
 
@@ -1322,8 +1584,13 @@ pub fn is_interrupt(text: &str) -> bool {
     if t.len() > 40 {
         return false;
     }
-    let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
-    ["stop", "cancel", "abort", "nevermind", "halt", "quit"].iter().any(|w| words.contains(w))
+    let words: Vec<&str> = t
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    ["stop", "cancel", "abort", "nevermind", "halt", "quit"]
+        .iter()
+        .any(|w| words.contains(w))
         || t.contains("never mind")
         || t.contains("hold on")
         || t.contains("forget it")
@@ -1341,9 +1608,17 @@ pub async fn think_only(core: &Arc<AgentCore>, job: &Job) -> (Outcome, Vec<Strin
         version: 0,
         revealed: true,
     }));
-    let thought = core.live().begin_thought(&core.id, "lab".to_owned(), String::new());
+    let thought = core
+        .live()
+        .begin_thought(&core.id, "lab".to_owned(), String::new());
     let outcome = think(core, job, &view, thought).await;
-    let steps = view.lock().expect("view poisoned").steps.iter().map(|s| format!("{} ×{}", s.label, s.count)).collect();
+    let steps = view
+        .lock()
+        .expect("view poisoned")
+        .steps
+        .iter()
+        .map(|s| format!("{} ×{}", s.label, s.count))
+        .collect();
     (outcome, steps)
 }
 
@@ -1430,14 +1705,67 @@ fn request_text(job: &Job) -> Option<String> {
 /// Does a message ask the agent to do something (vs. small talk)?
 pub fn looks_like_request(text: &str) -> bool {
     let text = text.to_lowercase();
-    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric() && c != '\'').collect();
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .collect();
     const VERBS: [&str; 57] = [
-        "send", "post", "message", "dm", "tell", "search", "google", "find", "check", "look",
-        "move", "mute", "unmute", "deafen", "kick", "ban", "timeout", "delete", "remove", "clear",
-        "purge", "join", "leave", "remind", "set", "change", "make", "create", "pin", "react",
-        "give", "add", "show", "read", "summarize", "list", "draw", "edit", "rename", "lock",
-        "open", "close", "start", "stop", "do", "fix", "redo", "retry", "try", "again", "bring", "go",
-        "switch", "put", "turn", "play", "get",
+        "send",
+        "post",
+        "message",
+        "dm",
+        "tell",
+        "search",
+        "google",
+        "find",
+        "check",
+        "look",
+        "move",
+        "mute",
+        "unmute",
+        "deafen",
+        "kick",
+        "ban",
+        "timeout",
+        "delete",
+        "remove",
+        "clear",
+        "purge",
+        "join",
+        "leave",
+        "remind",
+        "set",
+        "change",
+        "make",
+        "create",
+        "pin",
+        "react",
+        "give",
+        "add",
+        "show",
+        "read",
+        "summarize",
+        "list",
+        "draw",
+        "edit",
+        "rename",
+        "lock",
+        "open",
+        "close",
+        "start",
+        "stop",
+        "do",
+        "fix",
+        "redo",
+        "retry",
+        "try",
+        "again",
+        "bring",
+        "go",
+        "switch",
+        "put",
+        "turn",
+        "play",
+        "get",
     ];
     words.iter().any(|w| VERBS.contains(w))
         || text.contains("look up")
@@ -1450,16 +1778,75 @@ pub fn looks_like_request(text: &str) -> bool {
 pub fn claims_action(text: &str) -> bool {
     let text = text.to_lowercase();
     [
-        "sending", "i'll send", "i will send", "i've sent", "i sent", "sent it", "posting", "i'll post",
-        "i've posted", "posted it", "moving you", "i'll move", "moved you", "deleting", "i'll delete",
-        "i've deleted", "searching", "i'll search", "looking it up", "let me check", "checking now",
-        "i'm leaving", "leaving the", "leaving now", "i'm out", "heading out", "i'll leave", "i left",
-        "joining", "i'll join", "done —", "done!", "done.", "on it", "i'll remind", "reminder set",
-        "i've set", "changing", "i've changed", "i'll do that", "doing it now", "consider it done",
-        "i'll make sure", "from now on", "i've made", "i made", "i've updated", "updated it",
-        "won't chat", "won't talk", "won't post", "won't reply", "won't respond", "won't speak", "will not chat",
-        "will not talk", "will not post", "i'll stay out", "staying out", "keep my replies", "i'll stay quiet",
-        "i can chat", "i can talk", "unblocked", "going quiet", "i'll be quiet", "quiet time", "staying quiet", "i'll go quiet",
+        "sending",
+        "i'll send",
+        "i will send",
+        "i've sent",
+        "i sent",
+        "sent it",
+        "posting",
+        "i'll post",
+        "i've posted",
+        "posted it",
+        "moving you",
+        "i'll move",
+        "moved you",
+        "deleting",
+        "i'll delete",
+        "i've deleted",
+        "searching",
+        "i'll search",
+        "looking it up",
+        "let me check",
+        "checking now",
+        "i'm leaving",
+        "leaving the",
+        "leaving now",
+        "i'm out",
+        "heading out",
+        "i'll leave",
+        "i left",
+        "joining",
+        "i'll join",
+        "done —",
+        "done!",
+        "done.",
+        "on it",
+        "i'll remind",
+        "reminder set",
+        "i've set",
+        "changing",
+        "i've changed",
+        "i'll do that",
+        "doing it now",
+        "consider it done",
+        "i'll make sure",
+        "from now on",
+        "i've made",
+        "i made",
+        "i've updated",
+        "updated it",
+        "won't chat",
+        "won't talk",
+        "won't post",
+        "won't reply",
+        "won't respond",
+        "won't speak",
+        "will not chat",
+        "will not talk",
+        "will not post",
+        "i'll stay out",
+        "staying out",
+        "keep my replies",
+        "i'll stay quiet",
+        "i can chat",
+        "i can talk",
+        "unblocked",
+        "going quiet",
+        "i'll be quiet",
+        "quiet time",
+        "staying quiet",
+        "i'll go quiet",
     ]
     .iter()
     .any(|p| text.contains(p))
@@ -1486,7 +1873,10 @@ pub fn named_channels(core: &AgentCore, guild_id: u64, text: &str) -> Vec<String
             for c in g.channels.values() {
                 let Some(name) = c.name.clone() else { continue };
                 let n = norm(&name);
-                if n.is_empty() || !said.contains(&format!(" {n} ")) || (c.is_voice() && !wants_voice) {
+                if n.is_empty()
+                    || !said.contains(&format!(" {n} "))
+                    || (c.is_voice() && !wants_voice)
+                {
                     continue;
                 }
                 let category = c.r#type == axis::model::ChannelType::GuildCategory;
@@ -1510,20 +1900,54 @@ pub fn named_channels(core: &AgentCore, guild_id: u64, text: &str) -> Vec<String
 pub fn github_request(text: &str) -> Option<&'static str> {
     let t = text.to_lowercase();
     // "what are you watching?" / "list the repos you follow"
-    let listing = ["what", "which", "list", "show"].iter().any(|w| t.contains(w));
-    if listing && ["watching", "following", "keeping an eye", "watch list", "repos you"].iter().any(|w| t.contains(w)) {
+    let listing = ["what", "which", "list", "show"]
+        .iter()
+        .any(|w| t.contains(w));
+    if listing
+        && [
+            "watching",
+            "following",
+            "keeping an eye",
+            "watch list",
+            "repos you",
+        ]
+        .iter()
+        .any(|w| t.contains(w))
+    {
         return Some("list_tasks");
     }
     let about_repo = t.contains("github") || t.contains("repo");
     if !about_repo {
         return None;
     }
-    if ["stop watching", "unwatch", "stop following", "stop posting", "no more", "stop checking"].iter().any(|p| t.contains(p)) {
+    if [
+        "stop watching",
+        "unwatch",
+        "stop following",
+        "stop posting",
+        "no more",
+        "stop checking",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
+    {
         return Some("stop_watching_github");
     }
-    let watch = ["watch", "every release", "each release", "new release", "every commit", "new commit", "whenever", "keep an eye", "notify", "let me know", "follow"]
-        .iter()
-        .any(|p| t.contains(p));
+    let watch = [
+        "watch",
+        "every release",
+        "each release",
+        "new release",
+        "every commit",
+        "new commit",
+        "whenever",
+        "keep an eye",
+        "notify",
+        "let me know",
+        "follow",
+    ]
+    .iter()
+    .any(|p| t.contains(p));
     (watch && !t.trim_end().ends_with('?')).then_some("watch_github")
 }
 
@@ -1531,7 +1955,13 @@ pub fn github_request(text: &str) -> Option<&'static str> {
 /// (8192 tokens)", "n_ctx: 4096", "context length of 8192").
 pub fn available_context(message: &str) -> Option<u32> {
     let lower = message.to_lowercase();
-    for marker in ["available context size", "n_ctx", "context length of", "context_length", "maximum context length is"] {
+    for marker in [
+        "available context size",
+        "n_ctx",
+        "context length of",
+        "context_length",
+        "maximum context length is",
+    ] {
         if let Some(at) = lower.find(marker) {
             let digits: String = lower[at + marker.len()..]
                 .chars()
@@ -1552,9 +1982,23 @@ pub fn available_context(message: &str) -> Option<u32> {
 /// job needs the wait tool.
 pub fn timing_request(text: &str) -> bool {
     let t = text.to_lowercase();
-    let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
-    words.windows(2).any(|w| w[0].chars().all(|c| c.is_ascii_digit()) && (w[1].starts_with("sec") || w[1] == "s"))
-        || ["wait ", "pause", "delay", "one by one", "slowly", "a second between", "seconds apart"].iter().any(|p| t.contains(p))
+    let words: Vec<&str> = t
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.windows(2).any(|w| {
+        w[0].chars().all(|c| c.is_ascii_digit()) && (w[1].starts_with("sec") || w[1] == "s")
+    }) || [
+        "wait ",
+        "pause",
+        "delay",
+        "one by one",
+        "slowly",
+        "a second between",
+        "seconds apart",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
 }
 
 /// "every day at 9 post …", "every 2 hours check …", "tomorrow at 3 …"
@@ -1562,7 +2006,10 @@ pub fn timing_request(text: &str) -> bool {
 pub fn schedule_request(text: &str) -> Option<&'static str> {
     let t = text.to_lowercase();
     // A question about the past isn't a job to schedule.
-    let asking = t.trim_end().ends_with('?') && !["can you", "could you", "will you", "would you", "please"].iter().any(|p| t.contains(p));
+    let asking = t.trim_end().ends_with('?')
+        && !["can you", "could you", "will you", "would you", "please"]
+            .iter()
+            .any(|p| t.contains(p));
     if asking {
         return None;
     }
@@ -1570,19 +2017,61 @@ pub fn schedule_request(text: &str) -> Option<&'static str> {
         return Some("set_reminder");
     }
     let repeating = [
-        "every day", "everyday", "every morning", "every night", "every evening", "every week", "every hour", "every half hour",
-        "hourly", "daily", "weekly", "each day", "each morning", "every monday", "every tuesday", "every wednesday", "every thursday",
-        "every friday", "every saturday", "every sunday", "every weekday", "every weekend", "on weekdays", "on weekends",
+        "every day",
+        "everyday",
+        "every morning",
+        "every night",
+        "every evening",
+        "every week",
+        "every hour",
+        "every half hour",
+        "hourly",
+        "daily",
+        "weekly",
+        "each day",
+        "each morning",
+        "every monday",
+        "every tuesday",
+        "every wednesday",
+        "every thursday",
+        "every friday",
+        "every saturday",
+        "every sunday",
+        "every weekday",
+        "every weekend",
+        "on weekdays",
+        "on weekends",
     ]
     .iter()
     .any(|p| t.contains(p));
-    let every_n = t.split_whitespace().collect::<Vec<_>>().windows(3).any(|w| {
-        w[0] == "every" && w[1].chars().all(|c| c.is_ascii_digit()) && ["min", "hour", "hr", "day", "week"].iter().any(|u| w[2].starts_with(u))
-    });
-    let later = ["tomorrow at", "tonight at", "later today", "this evening at", "at noon"].iter().any(|p| t.contains(p))
-        || t.split_whitespace().collect::<Vec<_>>().windows(3).any(|w| {
-            w[0] == "in" && w[1].chars().all(|c| c.is_ascii_digit()) && ["min", "hour", "hr"].iter().any(|u| w[2].starts_with(u))
+    let every_n = t
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(3)
+        .any(|w| {
+            w[0] == "every"
+                && w[1].chars().all(|c| c.is_ascii_digit())
+                && ["min", "hour", "hr", "day", "week"]
+                    .iter()
+                    .any(|u| w[2].starts_with(u))
         });
+    let later = [
+        "tomorrow at",
+        "tonight at",
+        "later today",
+        "this evening at",
+        "at noon",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
+        || t.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(3)
+            .any(|w| {
+                w[0] == "in"
+                    && w[1].chars().all(|c| c.is_ascii_digit())
+                    && ["min", "hour", "hr"].iter().any(|u| w[2].starts_with(u))
+            });
     (repeating || every_n || later).then_some("create_task")
 }
 
@@ -1590,20 +2079,51 @@ pub fn schedule_request(text: &str) -> Option<&'static str> {
 /// again" → allow_chatting_in.
 pub fn channel_rule_request(text: &str) -> Option<&'static str> {
     let t = text.to_lowercase().replace('’', "'");
-    let verb = ["chat", "talk", "post", "speak", "reply", "respond", "message", "type"].iter().any(|v| t.contains(v));
-    let place = [" in ", " on ", "here", "channel", "category", "#"].iter().any(|p| t.contains(p));
+    let verb = [
+        "chat", "talk", "post", "speak", "reply", "respond", "message", "type",
+    ]
+    .iter()
+    .any(|v| t.contains(v));
+    let place = [" in ", " on ", "here", "channel", "category", "#"]
+        .iter()
+        .any(|p| t.contains(p));
     if !verb || !place {
         return None;
     }
-    let never = ["never", "don't", "dont", "do not", "can't", "cant ", "cannot", "no more", "not allowed", "stay out", "not to "]
-        .iter()
-        .any(|p| t.contains(p));
+    let never = [
+        "never",
+        "don't",
+        "dont",
+        "do not",
+        "can't",
+        "cant ",
+        "cannot",
+        "no more",
+        "not allowed",
+        "stay out",
+        "not to ",
+    ]
+    .iter()
+    .any(|p| t.contains(p));
     if never {
         return Some("stop_chatting_in");
     }
-    let lift = ["can chat", "can talk", "can post", "can speak", "can reply", "allowed to", "again", "unblock", "lift", "start chatting", "start talking", "you may"]
-        .iter()
-        .any(|p| t.contains(p));
+    let lift = [
+        "can chat",
+        "can talk",
+        "can post",
+        "can speak",
+        "can reply",
+        "allowed to",
+        "again",
+        "unblock",
+        "lift",
+        "start chatting",
+        "start talking",
+        "you may",
+    ]
+    .iter()
+    .any(|p| t.contains(p));
     lift.then_some("allow_chatting_in")
 }
 
@@ -1615,10 +2135,25 @@ pub fn asks_for_details(text: &str) -> bool {
         return false;
     }
     [
-        "could you clarify", "can you clarify", "could you specify", "can you specify", "did you mean",
-        "do you mean", "which one", "what kind of", "which kind", "what size", "which size", "what format",
-        "which channel", "what should", "what would you like", "any specific", "anything specific",
-        "more details", "more specific",
+        "could you clarify",
+        "can you clarify",
+        "could you specify",
+        "can you specify",
+        "did you mean",
+        "do you mean",
+        "which one",
+        "what kind of",
+        "which kind",
+        "what size",
+        "which size",
+        "what format",
+        "which channel",
+        "what should",
+        "what would you like",
+        "any specific",
+        "anything specific",
+        "more details",
+        "more specific",
     ]
     .iter()
     .any(|p| last.contains(p))
@@ -1908,7 +2443,9 @@ async fn deliver(
 
     // In the text chat of a call the agent is in, SAY: lines are spoken.
     let text = match (&job.outlet, job.guild_id) {
-        (Outlet::Channel, Some(guild_id)) if core.voice.channel(guild_id) == Some(job.channel_id) => {
+        (Outlet::Channel, Some(guild_id))
+            if core.voice.channel(guild_id) == Some(job.channel_id) =>
+        {
             text.and_then(|t| {
                 let (rest, said) = super::voice::split_say(&t);
                 if !said.is_empty() {
@@ -2003,11 +2540,21 @@ async fn deliver(
                     super::voice::reply(core, *guild_id, *speaker, text, &outcome.files).await
                 }
                 (None, None) if !outcome.files.is_empty() => {
-                    super::voice::reply(core, *guild_id, *speaker, "Here you go.", &outcome.files).await
+                    super::voice::reply(core, *guild_id, *speaker, "Here you go.", &outcome.files)
+                        .await
                 }
                 (None, Some(error)) => {
-                    core.feed(FeedKind::Error, format!("couldn't answer in voice: {error}"), Some(label));
-                    let _ = super::voice::say(core, *guild_id, "Sorry, I couldn't come up with an answer to that.").await;
+                    core.feed(
+                        FeedKind::Error,
+                        format!("couldn't answer in voice: {error}"),
+                        Some(label),
+                    );
+                    let _ = super::voice::say(
+                        core,
+                        *guild_id,
+                        "Sorry, I couldn't come up with an answer to that.",
+                    )
+                    .await;
                 }
                 (None, None) => {}
             }
@@ -2024,7 +2571,14 @@ async fn deliver(
             if let Some(id) = placeholder {
                 let _ = core.http.delete_message(channel, id).await;
             }
-            core.feed(FeedKind::System, format!("stayed silent: never chat in {label} (set by {})", rule.setter_name), None);
+            core.feed(
+                FeedKind::System,
+                format!(
+                    "stayed silent: never chat in {label} (set by {})",
+                    rule.setter_name
+                ),
+                None,
+            );
             return;
         }
     }
@@ -2060,32 +2614,22 @@ async fn deliver(
         return;
     };
 
+    // AAv2: the "thought for X seconds" footer is gone for good — the
+    // config toggle stays (ignored) so old configs keep loading.
+    let _ = (profile.behavior.show_footer, style, elapsed);
     let mut final_text = text.clone();
-    if profile.behavior.show_footer && style.uses_placeholder() {
-        let mut footer = format!(
-            "-# {} thought for {:.1}s",
-            profile.behavior.emojis.thought.trim(),
-            elapsed.as_secs_f32()
-        );
-        if outcome.tools_used > 0 {
-            footer.push_str(&format!(
-                " · {} tool{}",
-                outcome.tools_used,
-                if outcome.tools_used == 1 { "" } else { "s" }
-            ));
-        }
-        if let Some(task) = &job.task {
-            footer.push_str(&format!(" · task #{}", task.id));
-        }
-        final_text = format!("{final_text}\n{footer}");
-    }
     if let Some(guild_id) = job.guild_id {
         final_text = link_mentions(core, guild_id, &final_text);
     }
     // GitHub updates: heading, the release link with its preview, nothing
     // else embedded.
-    if let Some(task) = job.task.as_ref().filter(|t| matches!(t.trigger, crate::memory::TaskTrigger::GitHub { .. })) {
-        final_text = super::github::finish_post(&final_text, job.question.as_deref(), &task.instruction);
+    if let Some(task) = job
+        .task
+        .as_ref()
+        .filter(|t| matches!(t.trigger, crate::memory::TaskTrigger::GitHub { .. }))
+    {
+        final_text =
+            super::github::finish_post(&final_text, job.question.as_deref(), &task.instruction);
     }
     let chunks = split_message(&final_text);
     // Replies ping the person being answered (that's what makes it a
@@ -2107,8 +2651,13 @@ async fn deliver(
     // Long answers: pages with buttons — unless they asked for it all at
     // once, then several messages (each under Discord's limit). Files and
     // images go at the very end either way.
-    let all_at_once = request_text(job).is_some_and(|t| wants_everything(&t)) || !profile.behavior.paginate;
-    let pages = if chunks.len() > 1 && !all_at_once { paginate(&final_text) } else { Vec::new() };
+    let all_at_once =
+        request_text(job).is_some_and(|t| wants_everything(&t)) || !profile.behavior.paginate;
+    let pages = if chunks.len() > 1 && !all_at_once {
+        paginate(&final_text)
+    } else {
+        Vec::new()
+    };
     let mut first_id = None;
     if pages.len() > 1 {
         let mut request = core
@@ -2128,14 +2677,26 @@ async fn deliver(
         match request.await {
             Ok(message) => {
                 first_id = Some(message.id);
-                core.pages.lock().expect("pages poisoned").insert(message.id.get(), pages.clone());
+                core.pages
+                    .lock()
+                    .expect("pages poisoned")
+                    .insert(message.id.get(), pages.clone());
             }
             Err(error) => {
                 let permission = tools::is_permission_error(&error);
                 let why = tools::discord_error(error);
-                core.feed(FeedKind::Error, format!("could not send reply: {why}"), Some(label.clone()));
+                core.feed(
+                    FeedKind::Error,
+                    format!("could not send reply: {why}"),
+                    Some(label.clone()),
+                );
                 if permission {
-                    super::tasks::report_cant_post(core, job, "I'm missing permission to post there").await;
+                    super::tasks::report_cant_post(
+                        core,
+                        job,
+                        "I'm missing permission to post there",
+                    )
+                    .await;
                 }
                 return;
             }
@@ -2170,7 +2731,12 @@ async fn deliver(
             Err(error) => {
                 let permission = tools::is_permission_error(&error);
                 if permission {
-                    super::tasks::report_cant_post(core, job, "I'm missing permission to post there").await;
+                    super::tasks::report_cant_post(
+                        core,
+                        job,
+                        "I'm missing permission to post there",
+                    )
+                    .await;
                 }
                 core.feed(
                     FeedKind::Error,
@@ -2490,55 +3056,141 @@ mod tests {
             "My bad. Want me to check the sue-updates channel for the latest?"
         ));
         assert!(offers_instead_of_doing("Should I look into it?"));
-        assert!(claims_action("Got it — sending a random message to #scratchpad3."));
-        let steps = parse_steps("1. find an ocean image\n2) pick colors; - apply the design\n\n3. look at it");
+        assert!(claims_action(
+            "Got it — sending a random message to #scratchpad3."
+        ));
+        let steps = parse_steps(
+            "1. find an ocean image\n2) pick colors; - apply the design\n\n3. look at it",
+        );
         assert_eq!(steps.len(), 4);
         assert_eq!(steps[0].text, "find an ocean image");
         assert!(is_interrupt("magi stop"));
-        let long = (0..60).map(|i| format!("- item {i}: some text that makes the line longer than usual")).collect::<Vec<_>>().join("\n") + "\n-# 💭 thought for 2.0s";
+        let long = (0..60)
+            .map(|i| format!("- item {i}: some text that makes the line longer than usual"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n-# 💭 thought for 2.0s";
         let pages = paginate(&long);
         assert!(pages.len() >= 3, "{}", pages.len());
-        assert!(pages.iter().all(|p| p.len() <= 2000 && p.ends_with("thought for 2.0s")));
+        assert!(
+            pages
+                .iter()
+                .all(|p| p.len() <= 2000 && p.ends_with("thought for 2.0s"))
+        );
         assert!(wants_everything("send it all at once please"));
-        assert_eq!(join_continued("self-hosting is a serious", "investment."), "self-hosting is a serious investment.");
-        assert_eq!(join_continued("line one\n", "line two"), "line one\nline two");
-        assert_eq!(join_continued("it's a chunky boy. Full model wants", "Full model wants ~614GB"), "it's a chunky boy. Full model wants ~614GB");
+        assert_eq!(
+            join_continued("self-hosting is a serious", "investment."),
+            "self-hosting is a serious investment."
+        );
+        assert_eq!(
+            join_continued("line one\n", "line two"),
+            "line one\nline two"
+        );
+        assert_eq!(
+            join_continued(
+                "it's a chunky boy. Full model wants",
+                "Full model wants ~614GB"
+            ),
+            "it's a chunky boy. Full model wants ~614GB"
+        );
         assert!(is_interrupt("nevermind"));
-        assert!(!is_interrupt("how do i stop the music bot from leaving every time it ends a song"));
-        assert!(asks_for_details("I didn't find it. Could you clarify if you meant an actual zebra? Also, which size did you have in mind?"));
+        assert!(!is_interrupt(
+            "how do i stop the music bot from leaving every time it ends a song"
+        ));
+        assert!(asks_for_details(
+            "I didn't find it. Could you clarify if you meant an actual zebra? Also, which size did you have in mind?"
+        ));
         assert!(!asks_for_details("The latest is v0.0.6."));
         assert!(!claims_action("Not much! Just hanging out here."));
-        assert!(claims_action("Got it, uvx. Won't chat in scratchpad3 or c-md."));
-        assert_eq!(channel_rule_request("never chat in scratchpad3 or c-md"), Some("stop_chatting_in"));
-        assert_eq!(schedule_request("every 2 hours check the news and post anything big"), Some("create_task"));
-        assert_eq!(requested_count("magi duplicate this channel 10 times and every 5 seconds delete 1"), 10);
+        assert!(claims_action(
+            "Got it, uvx. Won't chat in scratchpad3 or c-md."
+        ));
+        assert_eq!(
+            channel_rule_request("never chat in scratchpad3 or c-md"),
+            Some("stop_chatting_in")
+        );
+        assert_eq!(
+            schedule_request("every 2 hours check the news and post anything big"),
+            Some("create_task")
+        );
+        assert_eq!(
+            requested_count("magi duplicate this channel 10 times and every 5 seconds delete 1"),
+            10
+        );
         assert_eq!(requested_count("make five roles"), 5);
         assert_eq!(requested_count("hi magi"), 0);
         assert!(timing_request("every 5 seconds delete one"));
         assert!(!timing_request("what's 5 + 5"));
         assert_eq!(
-            available_context(r#"request (15098 tokens) exceeds the available context size (8192 tokens), try increasing it"#),
+            available_context(
+                r#"request (15098 tokens) exceeds the available context size (8192 tokens), try increasing it"#
+            ),
             Some(8192)
         );
         assert_eq!(available_context("too long"), None);
-        assert_eq!(github_request("magi watch for this repo https://github.com/a/b and every release send the link here"), Some("watch_github"));
-        assert_eq!(github_request("stop watching the llama.cpp repo"), Some("stop_watching_github"));
-        assert_eq!(github_request("what repos are you watching?"), Some("list_tasks"));
-        assert_eq!(github_request("what are you watching right now?"), Some("list_tasks"));
-        assert_eq!(github_request("watch https://github.com/MagiGun/sue/releases and post every release here"), Some("watch_github"));
-        assert_eq!(schedule_request("every monday and friday at 6pm remind everyone"), Some("create_task"));
-        assert_eq!(schedule_request("tomorrow at 3pm post the link"), Some("create_task"));
-        assert_eq!(schedule_request("remind me in 10 minutes to stretch"), Some("set_reminder"));
-        assert_eq!(schedule_request("what did you do every day last week?"), None);
-        assert_eq!(schedule_request("can you post a quote every day at 9?"), Some("create_task"));
+        assert_eq!(
+            github_request(
+                "magi watch for this repo https://github.com/a/b and every release send the link here"
+            ),
+            Some("watch_github")
+        );
+        assert_eq!(
+            github_request("stop watching the llama.cpp repo"),
+            Some("stop_watching_github")
+        );
+        assert_eq!(
+            github_request("what repos are you watching?"),
+            Some("list_tasks")
+        );
+        assert_eq!(
+            github_request("what are you watching right now?"),
+            Some("list_tasks")
+        );
+        assert_eq!(
+            github_request(
+                "watch https://github.com/MagiGun/sue/releases and post every release here"
+            ),
+            Some("watch_github")
+        );
+        assert_eq!(
+            schedule_request("every monday and friday at 6pm remind everyone"),
+            Some("create_task")
+        );
+        assert_eq!(
+            schedule_request("tomorrow at 3pm post the link"),
+            Some("create_task")
+        );
+        assert_eq!(
+            schedule_request("remind me in 10 minutes to stretch"),
+            Some("set_reminder")
+        );
+        assert_eq!(
+            schedule_request("what did you do every day last week?"),
+            None
+        );
+        assert_eq!(
+            schedule_request("can you post a quote every day at 9?"),
+            Some("create_task")
+        );
         assert_eq!(schedule_request("what's the news today"), None);
-        assert_eq!(channel_rule_request("from now on dont post anything in general"), Some("stop_chatting_in"));
-        assert_eq!(channel_rule_request("don't ever talk in the ticket support category"), Some("stop_chatting_in"));
-        assert_eq!(channel_rule_request("ok you can chat in scratchpad3 again"), Some("allow_chatting_in"));
+        assert_eq!(
+            channel_rule_request("from now on dont post anything in general"),
+            Some("stop_chatting_in")
+        );
+        assert_eq!(
+            channel_rule_request("don't ever talk in the ticket support category"),
+            Some("stop_chatting_in")
+        );
+        assert_eq!(
+            channel_rule_request("ok you can chat in scratchpad3 again"),
+            Some("allow_chatting_in")
+        );
         assert_eq!(channel_rule_request("be quiet for 10 minutes"), None);
         assert_eq!(channel_rule_request("what's new in general?"), None);
         assert!(claims_action("Got it — I'll keep my replies in #general."));
-        assert!(looks_like_request("Send a message in CMD's channel, just whatever."));
+        assert!(looks_like_request(
+            "Send a message in CMD's channel, just whatever."
+        ));
         assert!(looks_like_request("can you look up the weather"));
         assert!(!looks_like_request("Yo, what's up?"));
         assert!(!offers_instead_of_doing("The latest is v0.0.6. It adds X."));

@@ -83,7 +83,10 @@ impl AgentCore {
     /// A "never chat here" rule covering this channel (directly, or via
     /// its category or a thread's parent) for this agent.
     pub fn barred(&self, guild_id: u64, channel_id: u64) -> Option<crate::memory::NoChatRule> {
-        let parent = self.world.channel(guild_id, channel_id).and_then(|c| c.parent_id.map(|p| p.get()));
+        let parent = self
+            .world
+            .channel(guild_id, channel_id)
+            .and_then(|c| c.parent_id.map(|p| p.get()));
         let grandparent = parent
             .and_then(|p| self.world.channel(guild_id, p))
             .and_then(|c| c.parent_id.map(|p| p.get()));
@@ -91,7 +94,10 @@ impl AgentCore {
         self.hive.knowledge.guild(guild_id, |k| {
             k.no_chat
                 .iter()
-                .find(|r| r.agent_id.as_deref().is_none_or(|a| a == self.id) && covers.contains(&Some(r.channel_id)))
+                .find(|r| {
+                    r.agent_id.as_deref().is_none_or(|a| a == self.id)
+                        && covers.contains(&Some(r.channel_id))
+                })
                 .cloned()
         })
     }
@@ -106,13 +112,21 @@ impl AgentCore {
                 let roles = g.members.get(&me)?.roles.clone();
                 let channel = g.channels.get(&channel_id)?;
                 let have = super::authority::channel_permissions(g, me, &roles, channel_id);
-                let send = if channel.is_thread() { Permissions::SEND_MESSAGES_IN_THREADS } else { Permissions::SEND_MESSAGES };
+                let send = if channel.is_thread() {
+                    Permissions::SEND_MESSAGES_IN_THREADS
+                } else {
+                    Permissions::SEND_MESSAGES
+                };
                 let mut missing = Vec::new();
                 if !have.contains(Permissions::VIEW_CHANNEL) {
                     missing.push("View Channel");
                 }
                 if !have.contains(send) {
-                    missing.push(if channel.is_thread() { "Send Messages in Threads" } else { "Send Messages" });
+                    missing.push(if channel.is_thread() {
+                        "Send Messages in Threads"
+                    } else {
+                        "Send Messages"
+                    });
                 }
                 (!missing.is_empty()).then(|| missing.join(" and "))
             })
@@ -490,7 +504,10 @@ pub fn classify(core: &Arc<AgentCore>, message: &Message) -> Option<Reason> {
         }
         if addressed {
             let core = Arc::clone(core);
-            let path = format!("/channels/{channel_id}/messages/{}/reactions/%F0%9F%94%87/@me", message.id);
+            let path = format!(
+                "/channels/{channel_id}/messages/{}/reactions/%F0%9F%94%87/@me",
+                message.id
+            );
             tokio::spawn(async move {
                 let _ = core.http.raw("PUT", &path, None, None).await;
             });
@@ -650,7 +667,9 @@ pub fn handle_message(core: &Arc<AgentCore>, message: Message) {
     }
 
     // An agent's live voice transcript: already in the voice history.
-    if core.hive.peer_by_user(author).is_some() && super::voice::is_transcript_line(&message.content) {
+    if core.hive.peer_by_user(author).is_some()
+        && super::voice::is_transcript_line(&message.content)
+    {
         return;
     }
 
@@ -705,8 +724,17 @@ pub fn handle_message(core: &Arc<AgentCore>, message: Message) {
         None => false,
     };
     let reason = classify(core, &message);
-    if matches!(reason, Some(Reason::Direct | Reason::Conversation)) && brain::is_interrupt(&message.content) {
-        let busy = core.running.lock().expect("running poisoned").get(&channel_id).copied().unwrap_or(0) > 0;
+    if matches!(reason, Some(Reason::Direct | Reason::Conversation))
+        && brain::is_interrupt(&message.content)
+    {
+        let busy = core
+            .running
+            .lock()
+            .expect("running poisoned")
+            .get(&channel_id)
+            .copied()
+            .unwrap_or(0)
+            > 0;
         if busy {
             core.interrupts
                 .lock()
@@ -718,11 +746,24 @@ pub fn handle_message(core: &Arc<AgentCore>, message: Message) {
     // The person the running job works for adds something ("no, do all
     // the clones first"): it goes into that job, which adjusts.
     if let Some(r @ (Reason::Direct | Reason::Conversation)) = reason {
-        let working_for = core.running_for.lock().expect("running poisoned").get(&channel_id).copied();
+        let working_for = core
+            .running_for
+            .lock()
+            .expect("running poisoned")
+            .get(&channel_id)
+            .copied();
         if working_for == Some(author) && !author_is_agent {
-            core.steering.lock().expect("steering poisoned").entry(channel_id).or_default().push((message.clone(), r));
+            core.steering
+                .lock()
+                .expect("steering poisoned")
+                .entry(channel_id)
+                .or_default()
+                .push((message.clone(), r));
             let core = Arc::clone(core);
-            let path = format!("/channels/{channel_id}/messages/{}/reactions/%F0%9F%91%80/@me", message.id);
+            let path = format!(
+                "/channels/{channel_id}/messages/{}/reactions/%F0%9F%91%80/@me",
+                message.id
+            );
             tokio::spawn(async move {
                 let _ = core.http.raw("PUT", &path, None, None).await;
             });
@@ -757,8 +798,22 @@ pub fn handle_message(core: &Arc<AgentCore>, message: Message) {
 pub fn asks_to_lift(text: &str) -> bool {
     let t = text.to_lowercase();
     [
-        "can chat", "can talk", "can post", "can speak", "can reply", "can respond", "allowed to", "chat here", "talk here",
-        "unblock", "lift", "start chatting", "start talking", "unmute", "come back", "you may",
+        "can chat",
+        "can talk",
+        "can post",
+        "can speak",
+        "can reply",
+        "can respond",
+        "allowed to",
+        "chat here",
+        "talk here",
+        "unblock",
+        "lift",
+        "start chatting",
+        "start talking",
+        "unmute",
+        "come back",
+        "you may",
     ]
     .iter()
     .any(|p| t.contains(p))
@@ -784,8 +839,15 @@ fn early_thinking(core: &Arc<AgentCore>, channel_id: u64) {
         early.insert(channel_id, Arc::clone(&slot));
     }
     let core = Arc::clone(core);
-    let size = if profile.behavior.small_thinking { "-# " } else { "" };
-    let text = format!("{size}{} thinking… · 0s", profile.behavior.emojis.thinking.trim());
+    let size = if profile.behavior.small_thinking {
+        "-# "
+    } else {
+        ""
+    };
+    let text = format!(
+        "{size}{} thinking… · 0s",
+        profile.behavior.emojis.thinking.trim()
+    );
     tokio::spawn(async move {
         let mut guard = guard;
         if let Ok(message) = core
@@ -810,7 +872,10 @@ fn early_thinking(core: &Arc<AgentCore>, channel_id: u64) {
         };
         if let Some(slot) = stale {
             if let Some(id) = *slot.lock().await {
-                let _ = core.http.delete_message(ChannelId::new(channel_id), id).await;
+                let _ = core
+                    .http
+                    .delete_message(ChannelId::new(channel_id), id)
+                    .await;
             }
         }
     });

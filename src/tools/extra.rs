@@ -11,7 +11,8 @@ use super::{
 };
 use crate::config::{AccessLevel, Autonomy};
 use crate::memory::{
-    Directive, DirectiveScope, Memory, MemoryKind, NoChatRule, QuietRule, StandingTask, TaskTrigger, now_ms,
+    Directive, DirectiveScope, Memory, MemoryKind, NoChatRule, QuietRule, StandingTask,
+    TaskTrigger, now_ms,
 };
 use crate::runtime::authority::PrincipalKind;
 use crate::runtime::live::FeedKind;
@@ -141,6 +142,10 @@ pub fn definitions() -> Vec<ToolDef> {
             "Hand a request to another agent (posted in HQ, or here if there is no HQ). Use when another agent's specialty fits better.",
             { "agent": ("string", "Agent name"), "request": ("string", "What you need from them, with context") }, required: ["agent", "request"]),
         // --- utilities -------------------------------------------------------
+        def!("agent_info", Utilities, Conversational, guild: false, core: true,
+            keywords: ["who are you", "what model", "your model", "what are you", "which model", "framework", "version", "how do you work"],
+            "Facts about yourself: your name, the exact model and provider you run on, the framework, version, and how many tools you have. Use it whenever someone asks what you are.",
+            {}, required: []),
         def!("get_time", Utilities, Conversational, guild: false, core: false,
             keywords: ["time", "date", "today", "day is it", "clock", "timezone"],
             "Current date and time (UTC, optionally at an offset).", { "utc_offset_hours": ("number", "e.g. -5 for EST") }, required: []),
@@ -215,6 +220,7 @@ pub async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<String,
         "post_to_hq" => post_to_hq(ctx, args).await,
         "ask_agent" => ask_agent(ctx, args).await,
         "get_time" => get_time(args),
+        "agent_info" => agent_info(ctx),
         "calculate" => calculate(&required(args, "expression")?).map(format_number),
         "roll_dice" => roll_dice(&required(args, "dice")?),
         "set_reminder" => set_reminder(ctx, args).await,
@@ -504,12 +510,28 @@ fn list_directives(ctx: &ToolCtx) -> Result<String, String> {
             })
             .collect::<Vec<_>>()
     });
-    let barred: Vec<String> = ctx.core.hive.knowledge.guild(guild_id, |k| {
-        k.no_chat.iter().filter(|r| r.agent_id.as_deref().is_none_or(|a| a == ctx.core.id)).map(|r| (r.channel_id, r.setter_name.clone())).collect::<Vec<_>>()
-    })
-    .into_iter()
-    .map(|(id, by)| format!("never chat in #{} [{by}]", ctx.core.world.with_guild(guild_id, |g| g.channel_name(id)).unwrap_or_default()))
-    .collect();
+    let barred: Vec<String> = ctx
+        .core
+        .hive
+        .knowledge
+        .guild(guild_id, |k| {
+            k.no_chat
+                .iter()
+                .filter(|r| r.agent_id.as_deref().is_none_or(|a| a == ctx.core.id))
+                .map(|r| (r.channel_id, r.setter_name.clone()))
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .map(|(id, by)| {
+            format!(
+                "never chat in #{} [{by}]",
+                ctx.core
+                    .world
+                    .with_guild(guild_id, |g| g.channel_name(id))
+                    .unwrap_or_default()
+            )
+        })
+        .collect();
     let lines: Vec<String> = lines.into_iter().chain(barred).collect();
     Ok(if lines.is_empty() {
         "no directives apply here".to_owned()
@@ -555,7 +577,13 @@ async fn wait(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     for _ in 0..seconds {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         // "stop" while waiting ends it now.
-        let stopped = ctx.core.interrupts.lock().expect("interrupts poisoned").get(&ctx.channel_id).is_some_and(|t| *t >= started);
+        let stopped = ctx
+            .core
+            .interrupts
+            .lock()
+            .expect("interrupts poisoned")
+            .get(&ctx.channel_id)
+            .is_some_and(|t| *t >= started);
         if stopped {
             return Ok("stopped waiting — they said stop".to_owned());
         }
@@ -572,34 +600,64 @@ async fn watch_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     let channel_id = super::discord::resolve_text_channel(ctx, arg(args, "channel"))?;
     if let Some(missing) = ctx.core.cant_post(guild_id, channel_id) {
-        let name = ctx.core.world.with_guild(guild_id, |g| g.channel_name(channel_id)).unwrap_or_default();
+        let name = ctx
+            .core
+            .world
+            .with_guild(guild_id, |g| g.channel_name(channel_id))
+            .unwrap_or_default();
         return Err(format!(
             "not set up: I can't post in #{name} — my role is missing {missing} there. Tell them that, so they can give my role that permission in the channel's settings (or pick another channel), then ask again."
         ));
     }
     let staff = ctx.requester.kind == PrincipalKind::Operator
         || ctx.requester.level >= AccessLevel::Moderator
-        || ctx.requester_permissions_in(channel_id).intersects(Permissions::MANAGE_CHANNELS | Permissions::MANAGE_MESSAGES);
+        || ctx
+            .requester_permissions_in(channel_id)
+            .intersects(Permissions::MANAGE_CHANNELS | Permissions::MANAGE_MESSAGES);
     if !staff {
-        return Err(format!("denied: watching repos is set up by moderators; {} isn't one", ctx.requester.name));
+        return Err(format!(
+            "denied: watching repos is set up by moderators; {} isn't one",
+            ctx.requester.name
+        ));
     }
     let wanted = required(args, "repo")?;
     let repo = crate::runtime::github::parse_repo(&wanted)
-        .or_else(|| crate::runtime::github::parse_repo(&request_text(ctx).split_whitespace().find(|w| w.contains("github.com/")).unwrap_or("")))
-        .ok_or_else(|| format!("\"{wanted}\" isn't a GitHub repo — give a github.com link or owner/name"))?;
+        .or_else(|| {
+            crate::runtime::github::parse_repo(
+                &request_text(ctx)
+                    .split_whitespace()
+                    .find(|w| w.contains("github.com/"))
+                    .unwrap_or(""),
+            )
+        })
+        .ok_or_else(|| {
+            format!("\"{wanted}\" isn't a GitHub repo — give a github.com link or owner/name")
+        })?;
     let kind = match arg(args, "watch").unwrap_or_default().to_lowercase() {
         w if w.contains("commit") || w.contains("push") => "commits",
         _ => "releases",
     };
     let token = ctx.core.hive.settings().github_token;
-    let now_repo = crate::runtime::github::look(&repo, arg(args, "branch").as_deref(), &token).await?;
+    let now_repo =
+        crate::runtime::github::look(&repo, arg(args, "branch").as_deref(), &token).await?;
     let repo = now_repo.full_name.clone();
     let branch = arg(args, "branch").unwrap_or_else(|| now_repo.default_branch.clone());
     // Only when they asked for the current one too (small models set this
     // on their own and then post it twice).
     let said = request_text(ctx).to_lowercase();
     let post_now = flag(args, "post_latest_now").unwrap_or(false)
-        && ["latest", "current", "right now", "post it now", "the newest", "most recent", "last release", "last one"].iter().any(|p| said.contains(p));
+        && [
+            "latest",
+            "current",
+            "right now",
+            "post it now",
+            "the newest",
+            "most recent",
+            "last release",
+            "last one",
+        ]
+        .iter()
+        .any(|p| said.contains(p));
     // Start from what's there now (or one step back, to handle the latest
     // right away).
     let last_seen = if kind == "commits" {
@@ -633,7 +691,9 @@ async fn watch_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             .map(|t| t.id)
     });
     if let Some(id) = duplicate {
-        return Ok(format!("already watching {repo} {kind} for that channel (task #{id})"));
+        return Ok(format!(
+            "already watching {repo} {kind} for that channel (task #{id})"
+        ));
     }
     let id = ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         k.next_task += 1;
@@ -665,36 +725,63 @@ async fn watch_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         });
         id
     });
-    let channel = ctx.core.world.with_guild(guild_id, |g| g.channel_name(channel_id)).unwrap_or_default();
+    let channel = ctx
+        .core
+        .world
+        .with_guild(guild_id, |g| g.channel_name(channel_id))
+        .unwrap_or_default();
     let current = if kind == "commits" {
         format!("on branch {branch}")
     } else {
         match &now_repo.latest_release {
-            Some((_, tag, name, url)) => format!("its latest release right now is {} ({url})", if name.is_empty() { tag } else { name }),
+            Some((_, tag, name, url)) => format!(
+                "its latest release right now is {} ({url})",
+                if name.is_empty() { tag } else { name }
+            ),
             None => "it has no releases yet".to_owned(),
         }
     };
     Ok(format!(
         "task #{id}: watching github.com/{repo} for new {kind} — {current}. Each time: \"{instruction}\" in #{channel}. Checked every 5 minutes{}. Stop with stop_watching_github; list_tasks shows everything being watched.\nNow just confirm this briefly — don't post or sum up any release yourself (the task does that with the real release notes{}).",
-        if post_now { "; the latest one goes out within a minute" } else { "" },
-        if post_now { ", starting with the latest within a minute" } else { " when the next one comes out" }
+        if post_now {
+            "; the latest one goes out within a minute"
+        } else {
+            ""
+        },
+        if post_now {
+            ", starting with the latest within a minute"
+        } else {
+            " when the next one comes out"
+        }
     ))
 }
 
 fn stop_watching_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
     let wanted = required(args, "repo")?;
-    let repo = crate::runtime::github::parse_repo(&wanted).unwrap_or_else(|| wanted.trim().to_lowercase());
-    let kind = arg(args, "watch").map(|w| if w.to_lowercase().contains("commit") { "commits" } else { "releases" });
+    let repo =
+        crate::runtime::github::parse_repo(&wanted).unwrap_or_else(|| wanted.trim().to_lowercase());
+    let kind = arg(args, "watch").map(|w| {
+        if w.to_lowercase().contains("commit") {
+            "commits"
+        } else {
+            "releases"
+        }
+    });
     let (removed, kept) = ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         let mut removed = Vec::new();
         let mut kept = Vec::new();
         k.tasks.retain(|t| {
-            let TaskTrigger::GitHub { repo: r, kind: kd, .. } = &t.trigger else {
+            let TaskTrigger::GitHub {
+                repo: r, kind: kd, ..
+            } = &t.trigger
+            else {
                 return true;
             };
             // "llama.cpp" matches "ggml-org/llama.cpp" too.
-            let same_repo = r.eq_ignore_ascii_case(&repo) || r.to_lowercase().ends_with(&format!("/{}", repo.to_lowercase()));
+            let same_repo = r.eq_ignore_ascii_case(&repo)
+                || r.to_lowercase()
+                    .ends_with(&format!("/{}", repo.to_lowercase()));
             if t.agent_id != ctx.core.id || !same_repo || kind.is_some_and(|w| w != kd) {
                 return true;
             }
@@ -709,14 +796,20 @@ fn stop_watching_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         (removed, kept)
     });
     if removed.is_empty() && kept.is_empty() {
-        return Err(format!("I'm not watching \"{wanted}\" here — list_tasks shows what I watch"));
+        return Err(format!(
+            "I'm not watching \"{wanted}\" here — list_tasks shows what I watch"
+        ));
     }
     let mut out = String::new();
     if !removed.is_empty() {
         out.push_str(&format!("stopped watching: {}", removed.join(", ")));
     }
     if !kept.is_empty() {
-        out.push_str(&format!("\ndenied for {}: set by someone ranked higher than {}", kept.join(", "), ctx.requester.name));
+        out.push_str(&format!(
+            "\ndenied for {}: set by someone ranked higher than {}",
+            kept.join(", "),
+            ctx.requester.name
+        ));
     }
     Ok(out.trim().to_owned())
 }
@@ -727,14 +820,22 @@ fn stop_watching_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
 /// person's own words still have them).
 fn request_text(ctx: &ToolCtx) -> String {
     ctx.message_id
-        .and_then(|id| ctx.core.hive.knowledge.channel(ctx.channel_id, |a| a.get_mut(id).map(|m| m.content.clone())))
+        .and_then(|id| {
+            ctx.core
+                .hive
+                .knowledge
+                .channel(ctx.channel_id, |a| a.get_mut(id).map(|m| m.content.clone()))
+        })
         .unwrap_or_default()
 }
 
 /// A time of day in free text: "at 9", "9am", "6:30 pm", "18:00", "noon".
 pub fn find_time(text: &str) -> Option<u32> {
     let t = text.to_lowercase();
-    let words: Vec<&str> = t.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> = t
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|w| !w.is_empty())
+        .collect();
     for (i, w) in words.iter().enumerate() {
         let w = w.trim_matches(|c: char| !c.is_alphanumeric() && c != ':');
         if matches!(w, "noon" | "midnight") {
@@ -743,9 +844,18 @@ pub fn find_time(text: &str) -> Option<u32> {
         if !w.starts_with(|c: char| c.is_ascii_digit()) {
             continue;
         }
-        let next = words.get(i + 1).map(|n| n.trim_matches(|c: char| !c.is_alphanumeric())).unwrap_or("");
-        let candidate = if matches!(next, "am" | "pm") { format!("{w}{next}") } else { w.to_owned() };
-        let clear = candidate.ends_with("am") || candidate.ends_with("pm") || candidate.contains(':')
+        let next = words
+            .get(i + 1)
+            .map(|n| n.trim_matches(|c: char| !c.is_alphanumeric()))
+            .unwrap_or("");
+        let candidate = if matches!(next, "am" | "pm") {
+            format!("{w}{next}")
+        } else {
+            w.to_owned()
+        };
+        let clear = candidate.ends_with("am")
+            || candidate.ends_with("pm")
+            || candidate.contains(':')
             || (i > 0 && words[i - 1] == "at");
         if clear {
             if let Some(minute) = crate::memory::parse_time_of_day(&candidate) {
@@ -802,20 +912,32 @@ fn may_manage_commands(ctx: &ToolCtx) -> Result<(), String> {
     }
     let ok = ctx.requester.kind == PrincipalKind::Operator
         || ctx.requester.level >= AccessLevel::Admin
-        || ctx.requester.permissions.intersects(Permissions::MANAGE_GUILD | Permissions::ADMINISTRATOR);
+        || ctx
+            .requester
+            .permissions
+            .intersects(Permissions::MANAGE_GUILD | Permissions::ADMINISTRATOR);
     if ok {
         Ok(())
     } else {
-        Err(format!("denied: changing slash commands needs Manage Server, which {} doesn't have", ctx.requester.name))
+        Err(format!(
+            "denied: changing slash commands needs Manage Server, which {} doesn't have",
+            ctx.requester.name
+        ))
     }
 }
 
 fn command_name(args: &Value) -> Result<String, String> {
-    let name = required(args, "name")?.trim().trim_start_matches('/').to_lowercase().replace(' ', "-");
+    let name = required(args, "name")?
+        .trim()
+        .trim_start_matches('/')
+        .to_lowercase()
+        .replace(' ', "-");
     if crate::config::CustomCommand::valid_name(&name) {
         Ok(name)
     } else {
-        Err(format!("\"{name}\" can't be a command name — 1–32 lowercase letters, numbers, - or _"))
+        Err(format!(
+            "\"{name}\" can't be a command name — 1–32 lowercase letters, numbers, - or _"
+        ))
     }
 }
 
@@ -823,23 +945,43 @@ fn create_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
     may_manage_commands(ctx)?;
     let name = command_name(args)?;
-    if crate::runtime::commands::BUILT_IN.iter().any(|(n, _)| *n == name) {
-        return Err(format!("/{name} is a built-in command — pick another name (toggle_command turns built-ins on/off)"));
+    if crate::runtime::commands::BUILT_IN
+        .iter()
+        .any(|(n, _)| *n == name)
+    {
+        return Err(format!(
+            "/{name} is a built-in command — pick another name (toggle_command turns built-ins on/off)"
+        ));
     }
     let profile = ctx.core.profile();
-    if profile.behavior.custom_commands.iter().any(|c| c.name == name && (c.servers.is_empty() || c.servers.contains(&guild_id))) {
-        return Err(format!("/{name} is set in the Axis Agents app — change it there, or pick another name"));
+    if profile
+        .behavior
+        .custom_commands
+        .iter()
+        .any(|c| c.name == name && (c.servers.is_empty() || c.servers.contains(&guild_id)))
+    {
+        return Err(format!(
+            "/{name} is set in the Axis Agents app — change it there, or pick another name"
+        ));
     }
     let text = crate::llm::truncate(&required(args, "text")?, 1500);
     let mode = match arg(args, "does").map(|d| d.to_lowercase()).as_deref() {
-        Some("run" | "do" | "agent" | "ai" | "instruction" | "execute" | "task") => crate::config::CommandMode::Agent,
+        Some("run" | "do" | "agent" | "ai" | "instruction" | "execute" | "task") => {
+            crate::config::CommandMode::Agent
+        }
         Some(_) => crate::config::CommandMode::Reply,
-        None if sounds_like_instruction(&text) || sounds_like_instruction(&request_text(ctx)) => crate::config::CommandMode::Agent,
+        None if sounds_like_instruction(&text) || sounds_like_instruction(&request_text(ctx)) => {
+            crate::config::CommandMode::Agent
+        }
         None => crate::config::CommandMode::Reply,
     };
     let command = crate::memory::ServerCommand {
         name: name.clone(),
-        description: arg(args, "description").unwrap_or_default().chars().take(100).collect(),
+        description: arg(args, "description")
+            .unwrap_or_default()
+            .chars()
+            .take(100)
+            .collect(),
         text,
         mode,
         private: flag(args, "private").unwrap_or(false),
@@ -852,7 +994,8 @@ fn create_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     };
     let replaced = ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         let before = k.commands.len();
-        k.commands.retain(|c| !(c.name == name && c.agent_id == ctx.core.id));
+        k.commands
+            .retain(|c| !(c.name == name && c.agent_id == ctx.core.id));
         let replaced = k.commands.len() < before;
         k.commands.push(command);
         replaced
@@ -870,14 +1013,55 @@ fn create_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
 pub fn sounds_like_instruction(text: &str) -> bool {
     let t = text.trim().to_lowercase();
     let starts = [
-        "look up", "search", "find", "summarize", "summarise", "check", "get ", "fetch", "tell ", "give ", "pick", "choose", "roll",
-        "write", "generate", "make ", "create", "translate", "list", "show", "read", "count", "ping", "analyze", "explain", "answer",
-        "recommend", "suggest", "describe", "compare", "research",
+        "look up",
+        "search",
+        "find",
+        "summarize",
+        "summarise",
+        "check",
+        "get ",
+        "fetch",
+        "tell ",
+        "give ",
+        "pick",
+        "choose",
+        "roll",
+        "write",
+        "generate",
+        "make ",
+        "create",
+        "translate",
+        "list",
+        "show",
+        "read",
+        "count",
+        "ping",
+        "analyze",
+        "explain",
+        "answer",
+        "recommend",
+        "suggest",
+        "describe",
+        "compare",
+        "research",
     ];
     starts.iter().any(|s| t.starts_with(s))
-        || ["makes you", "have you", "you look", "you search", "you find", "you check", "you summarize", "you post", "that looks up", "that searches", "that summarizes", "that checks"]
-            .iter()
-            .any(|p| t.contains(p))
+        || [
+            "makes you",
+            "have you",
+            "you look",
+            "you search",
+            "you find",
+            "you check",
+            "you summarize",
+            "you post",
+            "that looks up",
+            "that searches",
+            "that summarizes",
+            "that checks",
+        ]
+        .iter()
+        .any(|p| t.contains(p))
 }
 
 fn delete_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -886,20 +1070,37 @@ fn delete_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let name = command_name(args)?;
     let removed = ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         let before = k.commands.len();
-        k.commands.retain(|c| !(c.name == name && c.agent_id == ctx.core.id));
+        k.commands
+            .retain(|c| !(c.name == name && c.agent_id == ctx.core.id));
         k.commands.len() < before
     });
     if !removed {
-        if crate::runtime::commands::BUILT_IN.iter().any(|(n, _)| *n == name) {
-            return Err(format!("/{name} is built in — it can be turned off here with toggle_command instead"));
+        if crate::runtime::commands::BUILT_IN
+            .iter()
+            .any(|(n, _)| *n == name)
+        {
+            return Err(format!(
+                "/{name} is built in — it can be turned off here with toggle_command instead"
+            ));
         }
-        if ctx.core.profile().behavior.custom_commands.iter().any(|c| c.name == name) {
-            return Err(format!("/{name} is set in the Axis Agents app (Commands tab) — it has to be removed there"));
+        if ctx
+            .core
+            .profile()
+            .behavior
+            .custom_commands
+            .iter()
+            .any(|c| c.name == name)
+        {
+            return Err(format!(
+                "/{name} is set in the Axis Agents app (Commands tab) — it has to be removed there"
+            ));
         }
         return Err(format!("there's no /{name} made in this server"));
     }
     crate::runtime::commands::request_sync(&ctx.core);
-    Ok(format!("deleted /{name}; it disappears from Discord within about 20 seconds"))
+    Ok(format!(
+        "deleted /{name}; it disappears from Discord within about 20 seconds"
+    ))
 }
 
 fn toggle_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -907,7 +1108,10 @@ fn toggle_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     may_manage_commands(ctx)?;
     let name = command_name(args)?;
     let on = flag(args, "enabled").ok_or("say whether to turn it on (true) or off (false)")?;
-    if crate::runtime::commands::BUILT_IN.iter().any(|(n, _)| *n == name) {
+    if crate::runtime::commands::BUILT_IN
+        .iter()
+        .any(|(n, _)| *n == name)
+    {
         ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
             k.disabled_commands.retain(|d| *d != name);
             if !on {
@@ -917,7 +1121,11 @@ fn toggle_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         return Ok(format!(
             "/{name} is {} in this server{}",
             if on { "on" } else { "off" },
-            if on { "" } else { " (it still shows in the list, but answers that it's turned off here)" }
+            if on {
+                ""
+            } else {
+                " (it still shows in the list, but answers that it's turned off here)"
+            }
         ));
     }
     let found = ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
@@ -928,10 +1136,15 @@ fn toggle_command(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             .is_some()
     });
     if !found {
-        return Err(format!("there's no /{name} here — list_commands shows them"));
+        return Err(format!(
+            "there's no /{name} here — list_commands shows them"
+        ));
     }
     crate::runtime::commands::request_sync(&ctx.core);
-    Ok(format!("/{name} is {} (Discord updates within about 20 seconds)", if on { "on" } else { "off" }))
+    Ok(format!(
+        "/{name} is {} (Discord updates within about 20 seconds)",
+        if on { "on" } else { "off" }
+    ))
 }
 
 fn list_commands(ctx: &ToolCtx) -> Result<String, String> {
@@ -940,7 +1153,9 @@ fn list_commands(ctx: &ToolCtx) -> Result<String, String> {
     if !profile.behavior.slash_commands {
         return Ok("slash commands are turned off in the app".to_owned());
     }
-    let (off_here, made) = ctx.core.hive.knowledge.guild(guild_id, |k| (k.disabled_commands.clone(), k.commands.clone()));
+    let (off_here, made) = ctx.core.hive.knowledge.guild(guild_id, |k| {
+        (k.disabled_commands.clone(), k.commands.clone())
+    });
     let mut out = String::from("Built in:\n");
     for (name, help) in crate::runtime::commands::BUILT_IN {
         let state = if profile.behavior.disabled_commands.iter().any(|d| d == name) {
@@ -957,7 +1172,14 @@ fn list_commands(ctx: &ToolCtx) -> Result<String, String> {
         .custom_commands
         .iter()
         .filter(|c| c.servers.is_empty() || c.servers.contains(&guild_id))
-        .map(|c| format!("- /{} ({}): {}", c.name, c.mode.label(), crate::llm::truncate(&c.reply, 80)))
+        .map(|c| {
+            format!(
+                "- /{} ({}): {}",
+                c.name,
+                c.mode.label(),
+                crate::llm::truncate(&c.reply, 80)
+            )
+        })
         .collect();
     if !app.is_empty() {
         out.push_str(&format!("Set in the app:\n{}\n", app.join("\n")));
@@ -965,7 +1187,16 @@ fn list_commands(ctx: &ToolCtx) -> Result<String, String> {
     let here: Vec<String> = made
         .iter()
         .filter(|c| c.agent_id == ctx.core.id)
-        .map(|c| format!("- /{} ({}{}, made for {}): {}", c.name, c.mode.label(), if c.disabled { ", off" } else { "" }, c.author_name, crate::llm::truncate(&c.text, 80)))
+        .map(|c| {
+            format!(
+                "- /{} ({}{}, made for {}): {}",
+                c.name,
+                c.mode.label(),
+                if c.disabled { ", off" } else { "" },
+                c.author_name,
+                crate::llm::truncate(&c.text, 80)
+            )
+        })
         .collect();
     if !here.is_empty() {
         out.push_str(&format!("Made in this server:\n{}\n", here.join("\n")));
@@ -977,17 +1208,27 @@ fn list_commands(ctx: &ToolCtx) -> Result<String, String> {
 /// A bare "this" when the request itself named other channels means
 /// those (small models default to "this").
 fn channel_ids(ctx: &ToolCtx, text: &str) -> (Vec<u64>, Vec<String>) {
-    let only_here = text
-        .split([',', ';'])
-        .all(|p| matches!(p.trim().to_lowercase().as_str(), "this" | "here" | "current" | "this channel" | ""));
+    let only_here = text.split([',', ';']).all(|p| {
+        matches!(
+            p.trim().to_lowercase().as_str(),
+            "this" | "here" | "current" | "this channel" | ""
+        )
+    });
     let mut text = text.to_owned();
     if only_here {
         let request = ctx
             .message_id
-            .and_then(|id| ctx.core.hive.knowledge.channel(ctx.channel_id, |a| a.get_mut(id).map(|m| m.content.clone())))
+            .and_then(|id| {
+                ctx.core
+                    .hive
+                    .knowledge
+                    .channel(ctx.channel_id, |a| a.get_mut(id).map(|m| m.content.clone()))
+            })
             .unwrap_or_default();
         let lower = request.to_lowercase();
-        let means_here = [" here", "this channel", "this one", "in this"].iter().any(|w| lower.contains(w));
+        let means_here = [" here", "this channel", "this one", "in this"]
+            .iter()
+            .any(|w| lower.contains(w));
         if let Some(guild_id) = ctx.guild_id.filter(|_| !means_here) {
             let named = crate::runtime::brain::named_channels(&ctx.core, guild_id, &request);
             if !named.is_empty() {
@@ -1006,9 +1247,17 @@ fn channel_ids(ctx: &ToolCtx, text: &str) -> (Vec<u64>, Vec<String>) {
         // the General voice channel.
         let text_first = ctx
             .guild_id
-            .and_then(|g| ctx.core.world.with_guild(g, |g| g.find_channel_where(name, |c| !c.is_voice()).map(|c| c.id.get())))
+            .and_then(|g| {
+                ctx.core.world.with_guild(g, |g| {
+                    g.find_channel_where(name, |c| !c.is_voice())
+                        .map(|c| c.id.get())
+                })
+            })
             .flatten();
-        match text_first.ok_or(()).or_else(|_| super::discord::resolve_channel(ctx, Some(name.to_owned()))) {
+        match text_first
+            .ok_or(())
+            .or_else(|_| super::discord::resolve_channel(ctx, Some(name.to_owned())))
+        {
             Ok(id) if !found.contains(&id) => found.push(id),
             Ok(_) => {}
             Err(_) => missing.push(name.to_owned()),
@@ -1027,17 +1276,24 @@ fn stop_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let mut done = Vec::new();
     let mut denied = Vec::new();
     for id in channels {
-        let name = ctx.core.world.with_guild(guild_id, |g| g.channel_name(id)).unwrap_or_default();
+        let name = ctx
+            .core
+            .world
+            .with_guild(guild_id, |g| g.channel_name(id))
+            .unwrap_or_default();
         let staff = ctx.requester.kind == PrincipalKind::Operator
             || ctx.requester.level >= AccessLevel::Moderator
-            || ctx.requester_permissions_in(id).intersects(Permissions::MANAGE_MESSAGES | Permissions::MANAGE_CHANNELS);
+            || ctx
+                .requester_permissions_in(id)
+                .intersects(Permissions::MANAGE_MESSAGES | Permissions::MANAGE_CHANNELS);
         if !staff {
             denied.push(format!("#{name}"));
             continue;
         }
         let agent = if all { None } else { Some(ctx.core.id.clone()) };
         ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
-            k.no_chat.retain(|r| !(r.channel_id == id && r.agent_id == agent));
+            k.no_chat
+                .retain(|r| !(r.channel_id == id && r.agent_id == agent));
             k.no_chat.push(NoChatRule {
                 channel_id: id,
                 agent_id: agent.clone(),
@@ -1051,11 +1307,19 @@ fn stop_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     if done.is_empty() {
         return Err(match (denied.is_empty(), missing.is_empty()) {
-            (false, _) => format!("denied: only moderators can set where I never chat ({} can't for {})", ctx.requester.name, denied.join(", ")),
+            (false, _) => format!(
+                "denied: only moderators can set where I never chat ({} can't for {})",
+                ctx.requester.name,
+                denied.join(", ")
+            ),
             _ => format!("no channel called {}", missing.join(", ")),
         });
     }
-    ctx.core.feed(FeedKind::System, format!("never chatting in {}", done.join(", ")), None);
+    ctx.core.feed(
+        FeedKind::System,
+        format!("never chatting in {}", done.join(", ")),
+        None,
+    );
     let mut out = format!(
         "done: {} will never chat in {} (no replies or posts there) until someone ranked at least as high as {} lifts it with allow_chatting_in. Confirm briefly — after this reply you're silent there.",
         if all { "no agent" } else { "you" },
@@ -1063,7 +1327,10 @@ fn stop_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         ctx.requester.name
     );
     if !denied.is_empty() {
-        out.push_str(&format!("\nNot set (moderators only): {}", denied.join(", ")));
+        out.push_str(&format!(
+            "\nNot set (moderators only): {}",
+            denied.join(", ")
+        ));
     }
     if !missing.is_empty() {
         out.push_str(&format!("\nNo such channel: {}", missing.join(", ")));
@@ -1074,8 +1341,15 @@ fn stop_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
 fn allow_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
     let text = required(args, "channels")?;
-    let every = matches!(text.trim().to_lowercase().as_str(), "all" | "every" | "everywhere" | "all channels");
-    let (channels, missing) = if every { (Vec::new(), Vec::new()) } else { channel_ids(ctx, &text) };
+    let every = matches!(
+        text.trim().to_lowercase().as_str(),
+        "all" | "every" | "everywhere" | "all channels"
+    );
+    let (channels, missing) = if every {
+        (Vec::new(), Vec::new())
+    } else {
+        channel_ids(ctx, &text)
+    };
     let all = flag(args, "all_agents").unwrap_or(false);
     let (lifted, kept) = ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         let mut lifted = Vec::new();
@@ -1095,7 +1369,15 @@ fn allow_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         });
         (lifted, kept)
     });
-    let name = |id: u64| format!("#{}", ctx.core.world.with_guild(guild_id, |g| g.channel_name(id)).unwrap_or_default());
+    let name = |id: u64| {
+        format!(
+            "#{}",
+            ctx.core
+                .world
+                .with_guild(guild_id, |g| g.channel_name(id))
+                .unwrap_or_default()
+        )
+    };
     if lifted.is_empty() && kept.is_empty() {
         return Ok(if missing.is_empty() {
             "there was no \"never chat here\" rule for that — I can already chat there".to_owned()
@@ -1105,12 +1387,22 @@ fn allow_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     let mut out = String::new();
     if !lifted.is_empty() {
-        out.push_str(&format!("lifted: you can chat in {} again", lifted.iter().map(|id| name(*id)).collect::<Vec<_>>().join(", ")));
+        out.push_str(&format!(
+            "lifted: you can chat in {} again",
+            lifted
+                .iter()
+                .map(|id| name(*id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     if !kept.is_empty() {
         out.push_str(&format!(
             "\ndenied for {}: set by someone ranked higher than {}",
-            kept.iter().map(|(id, by)| format!("{} (by {by})", name(*id))).collect::<Vec<_>>().join(", "),
+            kept.iter()
+                .map(|(id, by)| format!("{} (by {by})", name(*id)))
+                .collect::<Vec<_>>()
+                .join(", "),
             ctx.requester.name
         ));
     }
@@ -1189,7 +1481,11 @@ fn create_task(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     let channel_id = super::discord::resolve_text_channel(ctx, arg(args, "channel"))?;
     if let Some(missing) = ctx.core.cant_post(guild_id, channel_id) {
-        let name = ctx.core.world.with_guild(guild_id, |g| g.channel_name(channel_id)).unwrap_or_default();
+        let name = ctx
+            .core
+            .world
+            .with_guild(guild_id, |g| g.channel_name(channel_id))
+            .unwrap_or_default();
         return Err(format!(
             "not set up: I can't post in #{name} — my role is missing {missing} there. Tell them that, so they can give my role that permission in the channel's settings (or pick another channel), then ask again."
         ));
@@ -1206,31 +1502,65 @@ fn create_task(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     let channel = ctx.core.world.channel(guild_id, channel_id);
     // What the model left out, from the request's own words.
-    let said = format!("{} {}", request_text(ctx), arg(args, "instruction").unwrap_or_default());
+    let said = format!(
+        "{} {}",
+        request_text(ctx),
+        arg(args, "instruction").unwrap_or_default()
+    );
     let mut args = args.clone();
     if let Some(map) = args.as_object_mut() {
-        let watch = map.get("watch").and_then(Value::as_str).unwrap_or("").to_lowercase();
-        let timed = matches!(watch.as_str(), "schedule" | "timer" | "every" | "daily" | "weekly" | "repeat" | "once" | "one_time" | "later" | "at");
+        let watch = map
+            .get("watch")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let timed = matches!(
+            watch.as_str(),
+            "schedule"
+                | "timer"
+                | "every"
+                | "daily"
+                | "weekly"
+                | "repeat"
+                | "once"
+                | "one_time"
+                | "later"
+                | "at"
+        );
         if timed && !map.contains_key("at") && !map.contains_key("in_minutes") {
             if let Some(minute) = find_time(&said) {
-                map.insert("at".to_owned(), Value::String(format!("{:02}:{:02}", minute / 60, minute % 60)));
-            } else if let (true, Some(minutes)) = (watch == "once" || watch == "later", find_in(&said)) {
+                map.insert(
+                    "at".to_owned(),
+                    Value::String(format!("{:02}:{:02}", minute / 60, minute % 60)),
+                );
+            } else if let (true, Some(minutes)) =
+                (watch == "once" || watch == "later", find_in(&said))
+            {
                 map.insert("in_minutes".to_owned(), Value::from(minutes));
             }
         }
         if timed && watch != "once" && !map.contains_key("days") {
             if let Some(days) = crate::memory::parse_days(&said).filter(|d| !d.is_empty()) {
-                let names: Vec<&str> = days.iter().map(|d| ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][*d as usize]).collect();
+                let names: Vec<&str> = days
+                    .iter()
+                    .map(|d| ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][*d as usize])
+                    .collect();
                 map.insert("days".to_owned(), Value::String(names.join(",")));
             }
         }
-        if timed && watch != "once" && !map.contains_key("every_minutes") && !map.contains_key("at") {
+        if timed && watch != "once" && !map.contains_key("every_minutes") && !map.contains_key("at")
+        {
             if let Some(minutes) = find_interval(&said) {
                 map.insert("every_minutes".to_owned(), Value::from(minutes));
             }
         }
         // "every day at 9" asked for as a one-time thing is still daily.
-        if watch == "once" && find_interval(&said).is_none() && ["every day", "every morning", "daily", "every week"].iter().any(|p| said.to_lowercase().contains(p)) {
+        if watch == "once"
+            && find_interval(&said).is_none()
+            && ["every day", "every morning", "daily", "every week"]
+                .iter()
+                .any(|p| said.to_lowercase().contains(p))
+        {
             map.insert("watch".to_owned(), Value::String("schedule".to_owned()));
         }
     }
@@ -1252,15 +1582,21 @@ fn create_task(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         "new_messages" | "messages" => TaskTrigger::NewMessage { channel_id },
         "schedule" | "timer" | "every" | "daily" | "weekly" | "repeat" => {
             let at_minute = match arg(args, "at") {
-                Some(at) => Some(crate::memory::parse_time_of_day(&at).ok_or_else(|| format!("couldn't read the time \"{at}\" — use e.g. 09:00 or 9pm"))?),
+                Some(at) => Some(crate::memory::parse_time_of_day(&at).ok_or_else(|| {
+                    format!("couldn't read the time \"{at}\" — use e.g. 09:00 or 9pm")
+                })?),
                 None => None,
             };
             let days = match arg(args, "days") {
-                Some(d) => crate::memory::parse_days(&d).ok_or_else(|| format!("couldn't read the days \"{d}\" — use e.g. mon,wed,fri or weekdays"))?,
+                Some(d) => crate::memory::parse_days(&d).ok_or_else(|| {
+                    format!("couldn't read the days \"{d}\" — use e.g. mon,wed,fri or weekdays")
+                })?,
                 None => Vec::new(),
             };
             if !days.is_empty() && at_minute.is_none() {
-                return Err("give a time too (at), e.g. 09:00, for tasks on certain days".to_owned());
+                return Err(
+                    "give a time too (at), e.g. 09:00, for tasks on certain days".to_owned(),
+                );
             }
             TaskTrigger::Schedule {
                 channel_id,
@@ -1276,11 +1612,17 @@ fn create_task(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             let at = match (number(args, "in_minutes"), arg(args, "at")) {
                 (Some(minutes), _) => now + minutes.clamp(1, 525_600) * 60_000,
                 (None, Some(at)) => {
-                    let minute = crate::memory::parse_time_of_day(&at).ok_or_else(|| format!("couldn't read the time \"{at}\" — use e.g. 18:00 or 6pm"))?;
+                    let minute = crate::memory::parse_time_of_day(&at).ok_or_else(|| {
+                        format!("couldn't read the time \"{at}\" — use e.g. 18:00 or 6pm")
+                    })?;
                     crate::memory::next_time_at(now, minute, arg(args, "date").as_deref())
                         .ok_or("couldn't read the date — use YYYY-MM-DD")?
                 }
-                (None, None) => return Err("say when: at (a time, optionally with date) or in_minutes".to_owned()),
+                (None, None) => {
+                    return Err(
+                        "say when: at (a time, optionally with date) or in_minutes".to_owned()
+                    );
+                }
             };
             if at <= now {
                 return Err("that time has already passed".to_owned());
@@ -1308,7 +1650,9 @@ fn create_task(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let duplicate = ctx.core.hive.knowledge.guild(guild_id, |k| {
         k.tasks
             .iter()
-            .find(|t| t.agent_id == agent_id && t.trigger == trigger && now_ms() - t.created < 180_000)
+            .find(|t| {
+                t.agent_id == agent_id && t.trigger == trigger && now_ms() - t.created < 180_000
+            })
             .map(|t| t.id)
     });
     if let Some(id) = duplicate {
@@ -1436,15 +1780,27 @@ fn update_task(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             *every_minutes = minutes.clamp(15, 43_200) as u32;
             changes.push("interval updated");
         }
-        if let (Some(at), TaskTrigger::Schedule { at_minute, .. }) = (arg(args, "at"), &mut task.trigger) {
-            *at_minute = Some(crate::memory::parse_time_of_day(&at).ok_or_else(|| format!("couldn't read the time \"{at}\""))?);
+        if let (Some(at), TaskTrigger::Schedule { at_minute, .. }) =
+            (arg(args, "at"), &mut task.trigger)
+        {
+            *at_minute = Some(
+                crate::memory::parse_time_of_day(&at)
+                    .ok_or_else(|| format!("couldn't read the time \"{at}\""))?,
+            );
             changes.push("time updated");
         }
-        if let (Some(d), TaskTrigger::Schedule { days, at_minute, .. }) = (arg(args, "days"), &mut task.trigger) {
+        if let (
+            Some(d),
+            TaskTrigger::Schedule {
+                days, at_minute, ..
+            },
+        ) = (arg(args, "days"), &mut task.trigger)
+        {
             if at_minute.is_none() {
                 return Err("give the task a time (at) before choosing days".to_owned());
             }
-            *days = crate::memory::parse_days(&d).ok_or_else(|| format!("couldn't read the days \"{d}\""))?;
+            *days = crate::memory::parse_days(&d)
+                .ok_or_else(|| format!("couldn't read the days \"{d}\""))?;
             changes.push("days updated");
         }
         if changes.is_empty() {
@@ -1994,6 +2350,29 @@ fn server_activity(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
 
 // --- utilities ----------------------------------------------------------------------
 
+/// Facts about this agent, so it can answer "what are you?" truthfully.
+fn agent_info(ctx: &ToolCtx) -> Result<String, String> {
+    let profile = ctx.core.profile();
+    let mode = crate::runtime::confirm::mode_of(&ctx.core, ctx.guild_id);
+    Ok(format!(
+        "name: {}
+model: {} (provider: {})
+framework: Axis Agents v{} on the Axis Rust library + axis-voice
+tools available: {}
+operation mode: {}
+reply style: {}, autonomy: {}
+You are the AI here — when asked what you are, answer with these facts plainly.",
+        profile.name,
+        profile.model.model,
+        profile.model.provider.label(),
+        env!("CARGO_PKG_VERSION"),
+        crate::tools::catalog().len(),
+        mode.label(),
+        profile.behavior.reply_length.label(),
+        profile.behavior.autonomy.label(),
+    ))
+}
+
 fn get_time(args: &Value) -> Result<String, String> {
     let offset = args
         .get("utc_offset_hours")
@@ -2217,17 +2596,29 @@ mod tests {
     #[test]
     fn schedules_from_plain_words() {
         assert_eq!(find_time("every day at 9am post a quote"), Some(540));
-        assert_eq!(find_time("every monday and friday at 6 pm remind everyone"), Some(18 * 60));
+        assert_eq!(
+            find_time("every monday and friday at 6 pm remind everyone"),
+            Some(18 * 60)
+        );
         assert_eq!(find_time("post it at 9"), Some(540));
         assert_eq!(find_time("every 2 hours check the news"), None);
-        assert_eq!(find_time("tomorrow at 15:30 post the link"), Some(15 * 60 + 30));
+        assert_eq!(
+            find_time("tomorrow at 15:30 post the link"),
+            Some(15 * 60 + 30)
+        );
         assert_eq!(find_interval("every 2 hours check the news"), Some(120));
         assert_eq!(find_interval("every 30 minutes"), Some(30));
         assert_eq!(find_interval("hourly updates"), Some(60));
         assert_eq!(find_in("in 45 minutes post it"), Some(45));
-        assert!(sounds_like_instruction("Look up today's top tech news and post a summary"));
-        assert!(sounds_like_instruction("a /news command that makes you look up the news"));
-        assert!(!sounds_like_instruction("**Server Rules**: be nice, no spam"));
+        assert!(sounds_like_instruction(
+            "Look up today's top tech news and post a summary"
+        ));
+        assert!(sounds_like_instruction(
+            "a /news command that makes you look up the news"
+        ));
+        assert!(!sounds_like_instruction(
+            "**Server Rules**: be nice, no spam"
+        ));
     }
 
     #[test]

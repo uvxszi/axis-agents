@@ -13,7 +13,10 @@ async fn respond(core: &AgentCore, interaction: &Interaction, kind: u8, data: se
         .http
         .raw(
             "POST",
-            &format!("/interactions/{}/{}/callback", interaction.id, interaction.token),
+            &format!(
+                "/interactions/{}/{}/callback",
+                interaction.id, interaction.token
+            ),
             Some(json!({ "type": kind, "data": data })),
             None,
         )
@@ -30,7 +33,12 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
     let Some(message) = &interaction.message else {
         return true;
     };
-    let pages = core.pages.lock().expect("pages poisoned").get(&message.id.get()).cloned();
+    let pages = core
+        .pages
+        .lock()
+        .expect("pages poisoned")
+        .get(&message.id.get())
+        .cloned();
     let Some(pages) = pages else {
         respond(core, interaction, 4, json!({ "content": "These pages expired (I was restarted) — ask me again.", "flags": 64 })).await;
         return true;

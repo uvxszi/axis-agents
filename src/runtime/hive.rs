@@ -50,6 +50,7 @@ pub enum ClaimKind {
 
 pub struct Hive {
     pub knowledge: Knowledge,
+    pub confirmations: crate::runtime::confirm::Confirmations,
     pub live: Arc<Live>,
     pub settings: RwLock<GlobalSettings>,
     pub mcp: Arc<McpManager>,
@@ -65,6 +66,7 @@ impl Hive {
     pub fn new(live: Arc<Live>, settings: GlobalSettings) -> Arc<Self> {
         Arc::new(Self {
             knowledge: Knowledge::default(),
+            confirmations: Default::default(),
             live,
             mcp: Arc::new(McpManager::default()),
             settings: RwLock::new(settings),

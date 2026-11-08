@@ -590,7 +590,12 @@ impl TaskTrigger {
         match self {
             TaskTrigger::NewPost { .. } => format!("every new post in #{channel_name}"),
             TaskTrigger::NewMessage { .. } => format!("every new message in #{channel_name}"),
-            TaskTrigger::Schedule { every_minutes, at_minute: Some(minute), days, .. } => {
+            TaskTrigger::Schedule {
+                every_minutes,
+                at_minute: Some(minute),
+                days,
+                ..
+            } => {
                 let when = if !days.is_empty() {
                     format!("every {}", day_names(days))
                 } else if *every_minutes >= 2880 {
@@ -598,10 +603,18 @@ impl TaskTrigger {
                 } else {
                     "every day".to_owned()
                 };
-                format!("{when} at {:02}:{:02} in #{channel_name}", minute / 60, minute % 60)
+                format!(
+                    "{when} at {:02}:{:02} in #{channel_name}",
+                    minute / 60,
+                    minute % 60
+                )
             }
-            TaskTrigger::Once { at, .. } => format!("once, at <t:{}:f> in #{channel_name}", at / 1000),
-            TaskTrigger::GitHub { repo, kind, branch, .. } => {
+            TaskTrigger::Once { at, .. } => {
+                format!("once, at <t:{}:f> in #{channel_name}", at / 1000)
+            }
+            TaskTrigger::GitHub {
+                repo, kind, branch, ..
+            } => {
                 if kind == "commits" {
                     format!("every new commit to github.com/{repo} ({branch}), in #{channel_name}")
                 } else {
@@ -641,7 +654,12 @@ pub fn day_names(days: &[u8]) -> String {
     match sorted.as_slice() {
         [0, 1, 2, 3, 4] => "weekday".to_owned(),
         [5, 6] => "weekend day".to_owned(),
-        _ => sorted.iter().filter_map(|d| DAY_NAMES.get(*d as usize)).copied().collect::<Vec<_>>().join(", "),
+        _ => sorted
+            .iter()
+            .filter_map(|d| DAY_NAMES.get(*d as usize))
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -691,7 +709,10 @@ pub fn parse_days(text: &str) -> Option<Vec<u8>> {
         .split(|c: char| !c.is_alphabetic())
         .filter_map(|w| {
             let w: String = w.chars().take(3).collect();
-            DAY_NAMES.iter().position(|d| d.to_lowercase() == w).map(|i| i as u8)
+            DAY_NAMES
+                .iter()
+                .position(|d| d.to_lowercase() == w)
+                .map(|i| i as u8)
         })
         .collect();
     days.sort_unstable();
@@ -768,6 +789,26 @@ pub struct StandingTask {
     pub origin_channel: u64,
 }
 
+/// How much the agents may do without a human clicking a confirmation
+/// button. Set per server with /mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationMode {
+    /// Big or irreversible actions post Approve/Cancel buttons first.
+    #[default]
+    Standard,
+    /// Actions run immediately; only mass operations still confirm.
+    Autonomous,
+}
+
+impl OperationMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            OperationMode::Standard => "standard",
+            OperationMode::Autonomous => "autonomous",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GuildKnowledge {
@@ -796,6 +837,8 @@ pub struct GuildKnowledge {
     pub giveaways: Vec<Giveaway>,
     /// Who may change the agents' server settings (set by the owner).
     pub settings_access: SettingsAccess,
+    /// Whether big/irreversible actions need a confirmation button.
+    pub operation_mode: OperationMode,
     pub leveling: Leveling,
     pub stats: ServerStats,
     /// Conversations being translated.
@@ -821,7 +864,12 @@ pub struct Privacy {
 
 impl Default for Privacy {
     fn default() -> Self {
-        Self { member_search: true, outside_messages: true, audit_search: true, dms: true }
+        Self {
+            member_search: true,
+            outside_messages: true,
+            audit_search: true,
+            dms: true,
+        }
     }
 }
 
@@ -862,6 +910,15 @@ pub struct Leveling {
     pub stack_rewards: bool,
     pub ignored_channels: Vec<u64>,
     pub card: RankCard,
+    /// Personal rank cards (fall back to `card`), keyed by user id.
+    #[serde(default)]
+    pub card_overrides: HashMap<u64, RankCard>,
+    /// Personal level-up messages ({user}, {name}, {level}), keyed by user id.
+    #[serde(default)]
+    pub message_overrides: HashMap<u64, String>,
+    /// Personal announce targets (same, channel, dm, off), keyed by user id.
+    #[serde(default)]
+    pub announce_overrides: HashMap<u64, String>,
     pub members: BTreeMap<u64, LevelEntry>,
 }
 
@@ -881,6 +938,9 @@ impl Default for Leveling {
             stack_rewards: true,
             ignored_channels: Vec::new(),
             card: RankCard::default(),
+            card_overrides: HashMap::new(),
+            message_overrides: HashMap::new(),
+            announce_overrides: HashMap::new(),
             members: BTreeMap::new(),
         }
     }
@@ -908,6 +968,30 @@ impl Leveling {
     pub fn rank_of(&self, user_id: u64) -> Option<usize> {
         let mine = self.members.get(&user_id)?.xp;
         Some(self.members.values().filter(|e| e.xp > mine).count() + 1)
+    }
+
+    /// This person's rank card: their own if they designed one, else the
+    /// server's.
+    pub fn card_for(&self, user_id: u64) -> &RankCard {
+        self.card_overrides.get(&user_id).unwrap_or(&self.card)
+    }
+
+    /// This person's level-up message: their own if they set one, else the
+    /// server's.
+    pub fn message_for(&self, user_id: u64) -> &str {
+        self.message_overrides
+            .get(&user_id)
+            .map(String::as_str)
+            .unwrap_or(&self.message)
+    }
+
+    /// Where this person's level-up goes (same, channel, dm, off): their
+    /// own choice if they made one, else the server's.
+    pub fn announce_for(&self, user_id: u64) -> &str {
+        self.announce_overrides
+            .get(&user_id)
+            .map(String::as_str)
+            .unwrap_or(&self.announce)
     }
 }
 
@@ -1205,7 +1289,10 @@ impl TicketSystem {
     }
 
     pub fn ticket_in(&self, channel_id: u64) -> Option<&Ticket> {
-        self.tickets.iter().rev().find(|t| t.channel_id == channel_id)
+        self.tickets
+            .iter()
+            .rev()
+            .find(|t| t.channel_id == channel_id)
     }
 
     pub fn by_number(&self, number: u32) -> Option<&Ticket> {
@@ -1501,17 +1588,38 @@ mod tests {
         assert_eq!(day_names(&[0, 4]), "Mon, Fri");
 
         // Monday 2026-11-02, local time.
-        let at = |h: u32, m: u32| Local.with_ymd_and_hms(2026, 11, 2, h, m, 0).earliest().unwrap().timestamp_millis();
+        let at = |h: u32, m: u32| {
+            Local
+                .with_ymd_and_hms(2026, 11, 2, h, m, 0)
+                .earliest()
+                .unwrap()
+                .timestamp_millis()
+        };
         let nine = 9 * 60;
         assert!(!schedule_due(at(8, 59), 0, nine, &[], 1440), "not yet");
         assert!(schedule_due(at(9, 0), at(7, 0), nine, &[], 1440), "on time");
-        assert!(!schedule_due(at(9, 5), at(9, 0), nine, &[], 1440), "once a day");
-        assert!(!schedule_due(at(16, 0), at(7, 0), nine, &[], 1440), "too late (app was off)");
-        assert!(schedule_due(at(9, 1), at(7, 0), nine, &[0], 1440), "Mondays");
-        assert!(!schedule_due(at(9, 1), at(7, 0), nine, &[1, 2], 1440), "not Monday");
+        assert!(
+            !schedule_due(at(9, 5), at(9, 0), nine, &[], 1440),
+            "once a day"
+        );
+        assert!(
+            !schedule_due(at(16, 0), at(7, 0), nine, &[], 1440),
+            "too late (app was off)"
+        );
+        assert!(
+            schedule_due(at(9, 1), at(7, 0), nine, &[0], 1440),
+            "Mondays"
+        );
+        assert!(
+            !schedule_due(at(9, 1), at(7, 0), nine, &[1, 2], 1440),
+            "not Monday"
+        );
         // Once: later today, or tomorrow when the time passed.
         assert_eq!(next_time_at(at(8, 0), nine, None), Some(at(9, 0)));
-        assert_eq!(next_time_at(at(10, 0), nine, None), Some(at(9, 0) + 86_400_000));
+        assert_eq!(
+            next_time_at(at(10, 0), nine, None),
+            Some(at(9, 0) + 86_400_000)
+        );
         assert!(next_time_at(at(10, 0), nine, Some("2026-11-05")).is_some());
     }
 
@@ -1629,5 +1737,75 @@ mod tests {
             applicable.iter().map(|d| d.id).collect::<Vec<_>>(),
             vec![2, 1, 4]
         );
+    }
+
+    #[test]
+    fn leveling_overrides_load_empty_from_old_json() {
+        // Guild knowledge saved before personal overrides existed.
+        let k: GuildKnowledge = serde_json::from_str(
+            r#"{"guild_id": 1, "leveling": {
+                "enabled": true, "xp_min": 10, "xp_max": 30, "cooldown_secs": 60,
+                "voice_xp_per_minute": 3, "announce": "dm", "announce_channel": 0,
+                "message": "gg {user}", "rewards": [], "stack_rewards": true,
+                "ignored_channels": [], "card": {"style": "glass"},
+                "members": {"123": {"xp": 500, "messages": 40, "voice_minutes": 2, "last_xp": 0, "name": "ann"}}
+            }}"#,
+        )
+        .unwrap();
+        let l = &k.leveling;
+        assert_eq!(l.announce, "dm");
+        assert_eq!(l.message, "gg {user}");
+        assert_eq!(l.card.style, "glass");
+        assert_eq!(l.members.get(&123).unwrap().xp, 500);
+        assert!(l.card_overrides.is_empty());
+        assert!(l.message_overrides.is_empty());
+        assert!(l.announce_overrides.is_empty());
+    }
+
+    #[test]
+    fn personal_leveling_helpers_fall_back_then_override() {
+        let mut l = Leveling::default();
+        l.message = "server {user}".to_owned();
+        l.announce = "same".to_owned();
+        l.card.style = "classic".to_owned();
+        // Without an override: the server's everything.
+        assert_eq!(l.message_for(7), "server {user}");
+        assert_eq!(l.announce_for(7), "same");
+        assert_eq!(l.card_for(7).style, "classic");
+        // With one: only that person sees their own.
+        l.message_overrides.insert(7, "mine {level}".to_owned());
+        l.announce_overrides.insert(7, "off".to_owned());
+        l.card_overrides.insert(
+            7,
+            RankCard {
+                style: "glass".to_owned(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(l.message_for(7), "mine {level}");
+        assert_eq!(l.announce_for(7), "off");
+        assert_eq!(l.card_for(7).style, "glass");
+        // Everyone else still gets the server defaults.
+        assert_eq!(l.message_for(8), "server {user}");
+        assert_eq!(l.announce_for(8), "same");
+        assert_eq!(l.card_for(8).style, "classic");
+    }
+
+    #[test]
+    fn leveling_overrides_round_trip_through_json() {
+        let mut l = Leveling::default();
+        l.message_overrides.insert(42, "hi {name}".to_owned());
+        l.announce_overrides.insert(42, "dm".to_owned());
+        l.card_overrides.insert(
+            42,
+            RankCard {
+                accent: "#ff0000".to_owned(),
+                ..Default::default()
+            },
+        );
+        let back: Leveling = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back.message_for(42), "hi {name}");
+        assert_eq!(back.announce_for(42), "dm");
+        assert_eq!(back.card_for(42).accent, "#ff0000");
     }
 }

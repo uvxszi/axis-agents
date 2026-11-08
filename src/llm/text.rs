@@ -108,7 +108,10 @@ pub fn strip_stray_close(content: &str) -> Option<(String, String)> {
     if OPEN_TAGS.iter().any(|open| before.contains(open)) {
         return None;
     }
-    Some((content[at + tag.len()..].trim().to_owned(), before.trim().to_owned()))
+    Some((
+        content[at + tag.len()..].trim().to_owned(),
+        before.trim().to_owned(),
+    ))
 }
 
 /// Split a complete text into `(answer, reasoning)`.

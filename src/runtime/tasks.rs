@@ -57,8 +57,15 @@ pub async fn report_cant_post(core: &Arc<AgentCore>, job: &Job, why: &str) {
     let channel_id = job.channel_id;
     let (who, origin, about) = match &job.task {
         Some(task) => {
-            let channel = core.world.with_guild(guild_id, |g| g.channel_name(task.trigger.channel_id())).unwrap_or_default();
-            (task.author_id, task.origin_channel, format!("task #{} ({})", task.id, task.trigger.describe(&channel)))
+            let channel = core
+                .world
+                .with_guild(guild_id, |g| g.channel_name(task.trigger.channel_id()))
+                .unwrap_or_default();
+            (
+                task.author_id,
+                task.origin_channel,
+                format!("task #{} ({})", task.id, task.trigger.describe(&channel)),
+            )
         }
         None => (job.requester.user_id, 0, "your message".to_owned()),
     };
@@ -67,7 +74,10 @@ pub async fn report_cant_post(core: &Arc<AgentCore>, job: &Job, why: &str) {
     }
     {
         let key = (channel_id, job.task.as_ref().map(|t| t.id).unwrap_or(0));
-        let mut last = LAST.get_or_init(Default::default).lock().expect("notice poisoned");
+        let mut last = LAST
+            .get_or_init(Default::default)
+            .lock()
+            .expect("notice poisoned");
         let now = now_ms();
         if last.get(&key).is_some_and(|t| now - t < 6 * 3_600_000) {
             return;
@@ -84,7 +94,11 @@ pub async fn report_cant_post(core: &Arc<AgentCore>, job: &Job, why: &str) {
     let text = format!(
         "<@{who}> I couldn't post in <#{channel_id}> for {about} — {why}. Give my role **View Channel** and **Send Messages** there (channel settings → Permissions), or tell me another channel, and I'll carry on."
     );
-    core.feed(crate::runtime::live::FeedKind::Error, format!("couldn't post in a channel for {about}: {why} — telling the assigner"), None);
+    core.feed(
+        crate::runtime::live::FeedKind::Error,
+        format!("couldn't post in a channel for {about}: {why} — telling the assigner"),
+        None,
+    );
     // Where it was set up, if the agent can talk there…
     if origin != 0 && origin != channel_id && core.cant_post(guild_id, origin).is_none() {
         let sent = core
@@ -99,11 +113,17 @@ pub async fn report_cant_post(core: &Arc<AgentCore>, job: &Job, why: &str) {
     }
     // …otherwise by DM…
     if let Ok(dm) = core.http.create_dm(axis::prelude::UserId::new(who)).await {
-        let server = core.world.with_guild(guild_id, |g| g.name.clone()).unwrap_or_default();
+        let server = core
+            .world
+            .with_guild(guild_id, |g| g.name.clone())
+            .unwrap_or_default();
         let sent = core
             .http
             .create_message(dm.id)
-            .content(format!("{} (in **{server}**)", text.replacen(&format!("<@{who}> "), "", 1)))
+            .content(format!(
+                "{} (in **{server}**)",
+                text.replacen(&format!("<@{who}> "), "", 1)
+            ))
             .await;
         if sent.is_ok() {
             return;
@@ -128,11 +148,20 @@ pub async fn report_cant_post(core: &Arc<AgentCore>, job: &Job, why: &str) {
 /// Channels to reach someone in when their DMs are closed: HQ, the
 /// system channel, then the rest by position — only where they can read
 /// it and the agent can post.
-pub(crate) fn fallback_channels(core: &AgentCore, guild_id: u64, who: u64, failed: u64) -> Vec<u64> {
+pub(crate) fn fallback_channels(
+    core: &AgentCore,
+    guild_id: u64,
+    who: u64,
+    failed: u64,
+) -> Vec<u64> {
     let hq = core.hive.knowledge.guild(guild_id, |k| k.hq.channel_id);
     core.world
         .with_guild(guild_id, |g| {
-            let roles = g.members.get(&who).map(|m| m.roles.clone()).unwrap_or_default();
+            let roles = g
+                .members
+                .get(&who)
+                .map(|m| m.roles.clone())
+                .unwrap_or_default();
             let mut list: Vec<u64> = hq.into_iter().collect();
             list.extend(g.system_channel);
             list.extend(
@@ -149,7 +178,8 @@ pub(crate) fn fallback_channels(core: &AgentCore, guild_id: u64, who: u64, faile
             });
             list.into_iter()
                 .filter(|c| {
-                    super::authority::channel_permissions(g, who, &roles, *c).contains(axis::prelude::Permissions::VIEW_CHANNEL)
+                    super::authority::channel_permissions(g, who, &roles, *c)
+                        .contains(axis::prelude::Permissions::VIEW_CHANNEL)
                 })
                 .take(3)
                 .collect::<Vec<_>>()
@@ -207,7 +237,14 @@ pub(crate) async fn run_task_now(
 pub fn on_new_ticket(core: &Arc<AgentCore>, guild_id: u64, channel_id: u64, opener: &str) {
     for task in my_tasks(core, guild_id) {
         if matches!(task.trigger, TaskTrigger::NewTicket { .. }) {
-            spawn_task(core, guild_id, channel_id, task, None, Some(opener.to_owned()));
+            spawn_task(
+                core,
+                guild_id,
+                channel_id,
+                task,
+                None,
+                Some(opener.to_owned()),
+            );
         }
     }
 }
@@ -374,10 +411,21 @@ pub async fn scheduler(core: Arc<AgentCore>) {
                     .filter(|t| t.agent_id == core.id && t.active)
                 {
                     let is_due = match &task.trigger {
-                        TaskTrigger::Schedule { at_minute: Some(minute), days, every_minutes, .. } => {
-                            crate::memory::schedule_due(now, task.last_run, *minute, days, *every_minutes)
+                        TaskTrigger::Schedule {
+                            at_minute: Some(minute),
+                            days,
+                            every_minutes,
+                            ..
+                        } => crate::memory::schedule_due(
+                            now,
+                            task.last_run,
+                            *minute,
+                            days,
+                            *every_minutes,
+                        ),
+                        TaskTrigger::Schedule { every_minutes, .. } => {
+                            now - task.last_run >= *every_minutes as i64 * 60_000
                         }
-                        TaskTrigger::Schedule { every_minutes, .. } => now - task.last_run >= *every_minutes as i64 * 60_000,
                         TaskTrigger::Once { at, .. } => *at <= now,
                         _ => false,
                     };
@@ -388,7 +436,11 @@ pub async fn scheduler(core: Arc<AgentCore>) {
                     }
                 }
                 // One-time tasks are done once they run.
-                let once: Vec<u64> = due.iter().filter(|t| matches!(t.trigger, TaskTrigger::Once { .. })).map(|t| t.id).collect();
+                let once: Vec<u64> = due
+                    .iter()
+                    .filter(|t| matches!(t.trigger, TaskTrigger::Once { .. }))
+                    .map(|t| t.id)
+                    .collect();
                 k.tasks.retain(|t| !once.contains(&t.id));
                 due
             });
@@ -416,7 +468,11 @@ pub async fn scheduler(core: Arc<AgentCore>) {
                 {
                     // A channel it never chats in: remind them by DM instead.
                     let channel_id = if core.barred_anywhere(channel_id).is_some() {
-                        match core.http.create_dm(axis::prelude::UserId::new(user_id)).await {
+                        match core
+                            .http
+                            .create_dm(axis::prelude::UserId::new(user_id))
+                            .await
+                        {
                             Ok(dm) => dm.id.get(),
                             Err(_) => continue,
                         }

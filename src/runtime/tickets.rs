@@ -47,7 +47,10 @@ fn api_error(error: AxisError) -> String {
 }
 
 fn id_of(value: &Value) -> Option<u64> {
-    value.get("id").and_then(Value::as_str).and_then(|s| s.parse().ok())
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse().ok())
 }
 
 pub fn system(core: &AgentCore, guild_id: u64) -> TicketSystem {
@@ -55,7 +58,9 @@ pub fn system(core: &AgentCore, guild_id: u64) -> TicketSystem {
 }
 
 fn save(core: &AgentCore, guild_id: u64, edit: impl FnOnce(&mut TicketSystem)) {
-    core.hive.knowledge.guild_mut(guild_id, |k| edit(&mut k.tickets));
+    core.hive
+        .knowledge
+        .guild_mut(guild_id, |k| edit(&mut k.tickets));
 }
 
 /// Should the agent answer this author here because it's their ticket?
@@ -63,7 +68,9 @@ pub fn answers_in(core: &AgentCore, guild_id: u64, channel_id: u64, author: u64)
     core.hive.knowledge.guild(guild_id, |k| {
         k.tickets.agent_id == core.id
             && k.tickets.auto_reply
-            && k.tickets.open_ticket_in(channel_id).is_some_and(|t| t.user_id == author)
+            && k.tickets
+                .open_ticket_in(channel_id)
+                .is_some_and(|t| t.user_id == author)
     })
 }
 
@@ -72,7 +79,10 @@ pub fn find(system: &TicketSystem, query: Option<&str>, current_channel: u64) ->
     match query.map(str::trim).filter(|q| !q.is_empty()) {
         None => system.ticket_in(current_channel).cloned(),
         Some(q) => {
-            let digits = q.trim_start_matches(['#', ' ']).trim_start_matches("ticket").trim_start_matches(['-', ' ', '#']);
+            let digits = q
+                .trim_start_matches(['#', ' '])
+                .trim_start_matches("ticket")
+                .trim_start_matches(['-', ' ', '#']);
             if let Ok(number) = digits.parse::<u32>() {
                 if let Some(t) = system.by_number(number) {
                     return Some(t.clone());
@@ -150,20 +160,41 @@ pub async fn render_panel(core: &AgentCore, guild_id: u64, channel_id: u64) -> R
     let system = system(core, guild_id);
     let body = panel_body(&system);
     if system.panel_channel_id == channel_id && system.panel_message_id != 0 {
-        let path = format!("/channels/{channel_id}/messages/{}", system.panel_message_id);
-        if core.http.raw("PATCH", &path, Some(body.clone()), None).await.is_ok() {
+        let path = format!(
+            "/channels/{channel_id}/messages/{}",
+            system.panel_message_id
+        );
+        if core
+            .http
+            .raw("PATCH", &path, Some(body.clone()), None)
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
     }
     let posted = core
         .http
-        .raw("POST", &format!("/channels/{channel_id}/messages"), Some(body), None)
+        .raw(
+            "POST",
+            &format!("/channels/{channel_id}/messages"),
+            Some(body),
+            None,
+        )
         .await
         .map_err(api_error)?;
     if system.panel_message_id != 0 && (system.panel_channel_id != channel_id) {
         let _ = core
             .http
-            .raw("DELETE", &format!("/channels/{}/messages/{}", system.panel_channel_id, system.panel_message_id), None, None)
+            .raw(
+                "DELETE",
+                &format!(
+                    "/channels/{}/messages/{}",
+                    system.panel_channel_id, system.panel_message_id
+                ),
+                None,
+                None,
+            )
             .await;
     }
     let message_id = id_of(&posted).unwrap_or(0);
@@ -187,12 +218,20 @@ pub async fn setup(
 ) -> Result<String, String> {
     let existing = system(core, guild_id);
     let me = core.world.my_id();
-    let category_alive = existing.category_id != 0 && core.world.channel(guild_id, existing.category_id).is_some();
+    let category_alive =
+        existing.category_id != 0 && core.world.channel(guild_id, existing.category_id).is_some();
     let category_id = if category_alive {
         existing.category_id
     } else {
-        let mut overwrites = vec![overwrite(guild_id, false, 0, VIEW), overwrite(me, true, BOT, 0)];
-        let roles = if staff_roles.is_empty() { existing.staff_roles.clone() } else { staff_roles.clone() };
+        let mut overwrites = vec![
+            overwrite(guild_id, false, 0, VIEW),
+            overwrite(me, true, BOT, 0),
+        ];
+        let roles = if staff_roles.is_empty() {
+            existing.staff_roles.clone()
+        } else {
+            staff_roles.clone()
+        };
         overwrites.extend(roles.iter().map(|r| overwrite(*r, false, STAFF, 0)));
         let created = core
             .http
@@ -229,26 +268,50 @@ pub async fn setup(
     let open = system.tickets.iter().filter(|t| t.closed.is_none()).count();
     core.feed(
         FeedKind::System,
-        if category_alive { "reconnected to the ticket system" } else { "set up a ticket system" },
+        if category_alive {
+            "reconnected to the ticket system"
+        } else {
+            "set up a ticket system"
+        },
         Some(core.channel_label(Some(guild_id), panel_channel)),
     );
     Ok(format!(
         "{} — panel in <#{panel_channel}>, tickets in the category <#{category_id}>, staff: {}. {open} ticket(s) open.",
-        if category_alive { "Ticket system updated (reconnected to the existing one)" } else { "Ticket system created" },
+        if category_alive {
+            "Ticket system updated (reconnected to the existing one)"
+        } else {
+            "Ticket system created"
+        },
         if system.staff_roles.is_empty() {
             "none yet".to_owned()
         } else {
-            system.staff_roles.iter().map(|r| format!("<@&{r}>")).collect::<Vec<_>>().join(", ")
+            system
+                .staff_roles
+                .iter()
+                .map(|r| format!("<@&{r}>"))
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     ))
 }
 
 /// Add/remove staff roles: they see every ticket (the category and each
 /// open ticket are updated).
-pub async fn set_staff(core: &AgentCore, guild_id: u64, add: &[u64], remove: &[u64]) -> Result<(), String> {
+pub async fn set_staff(
+    core: &AgentCore,
+    guild_id: u64,
+    add: &[u64],
+    remove: &[u64],
+) -> Result<(), String> {
     let system = system(core, guild_id);
     let mut channels = vec![system.category_id];
-    channels.extend(system.tickets.iter().filter(|t| t.closed.is_none()).map(|t| t.channel_id));
+    channels.extend(
+        system
+            .tickets
+            .iter()
+            .filter(|t| t.closed.is_none())
+            .map(|t| t.channel_id),
+    );
     for channel in channels.into_iter().filter(|c| *c != 0) {
         for role in add {
             core.http
@@ -264,7 +327,12 @@ pub async fn set_staff(core: &AgentCore, guild_id: u64, add: &[u64], remove: &[u
         for role in remove {
             let _ = core
                 .http
-                .raw("DELETE", &format!("/channels/{channel}/permissions/{role}"), None, Some("ticket staff".to_owned()))
+                .raw(
+                    "DELETE",
+                    &format!("/channels/{channel}/permissions/{role}"),
+                    None,
+                    Some("ticket staff".to_owned()),
+                )
                 .await;
         }
     }
@@ -285,9 +353,16 @@ fn is_staff(core: &AgentCore, guild_id: u64, user_id: u64) -> bool {
     let roles = system(core, guild_id).staff_roles;
     core.world
         .with_guild(guild_id, |g| {
-            let Some(member) = g.members.get(&user_id) else { return false };
-            let principal = super::authority::Principal::for_member(g, member, super::authority::PrincipalKind::Human);
-            principal.level >= crate::config::AccessLevel::Moderator || member.roles.iter().any(|r| roles.contains(r))
+            let Some(member) = g.members.get(&user_id) else {
+                return false;
+            };
+            let principal = super::authority::Principal::for_member(
+                g,
+                member,
+                super::authority::PrincipalKind::Human,
+            );
+            principal.level >= crate::config::AccessLevel::Moderator
+                || member.roles.iter().any(|r| roles.contains(r))
         })
         .unwrap_or(false)
 }
@@ -302,7 +377,11 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
     }
     let (Some(guild_id), Some(user)) = (
         interaction.guild_id.map(|g| g.get()),
-        interaction.member.as_ref().and_then(|m| m.user.clone()).or_else(|| interaction.user.clone()),
+        interaction
+            .member
+            .as_ref()
+            .and_then(|m| m.user.clone())
+            .or_else(|| interaction.user.clone()),
     ) else {
         return true;
     };
@@ -314,24 +393,49 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
         .await;
     let channel_id = interaction.channel_id.map(|c| c.get()).unwrap_or(0);
     let user_id = user.id.get();
-    let name = user.global_name.clone().unwrap_or_else(|| user.username.clone());
+    let name = user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| user.username.clone());
     let staff = is_staff(core, guild_id, user_id);
     let result = match data.custom_id.as_str() {
         OPEN => open_ticket(core, guild_id, user_id, &name, None)
             .await
             .map(|channel| format!("🎫 Your ticket is open: <#{channel}>")),
         SELECT => {
-            let index: usize = data.values.as_ref().and_then(|v| v.first()).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let index: usize = data
+                .values
+                .as_ref()
+                .and_then(|v| v.first())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
             let option = system(core, guild_id).panel.options.get(index).cloned();
             open_ticket(core, guild_id, user_id, &name, option.as_ref())
                 .await
                 .map(|channel| format!("🎫 Your ticket is open: <#{channel}>"))
         }
-        CLOSE => close_ticket(core, guild_id, channel_id, user_id, &name, staff, "closed with the button", false).await,
+        CLOSE => {
+            close_ticket(
+                core,
+                guild_id,
+                channel_id,
+                user_id,
+                &name,
+                staff,
+                "closed with the button",
+                false,
+            )
+            .await
+        }
         CLAIM if staff => claim(core, guild_id, channel_id, user_id, &name).await,
         CLAIM => Err("only staff can claim tickets".to_owned()),
         REOPEN => reopen_ticket(core, guild_id, channel_id, user_id, &name, staff).await,
-        DELETE if staff => close_ticket(core, guild_id, channel_id, user_id, &name, true, "deleted", true).await,
+        DELETE if staff => {
+            close_ticket(
+                core, guild_id, channel_id, user_id, &name, true, "deleted", true,
+            )
+            .await
+        }
         DELETE => Err("only staff can delete tickets".to_owned()),
         _ => Err("unknown button".to_owned()),
     };
@@ -367,7 +471,12 @@ fn ticket_buttons(closed: bool) -> Value {
 
 async fn post(core: &AgentCore, channel_id: u64, body: Value) -> Result<Value, String> {
     core.http
-        .raw("POST", &format!("/channels/{channel_id}/messages"), Some(body), None)
+        .raw(
+            "POST",
+            &format!("/channels/{channel_id}/messages"),
+            Some(body),
+            None,
+        )
         .await
         .map_err(api_error)
 }
@@ -386,19 +495,36 @@ pub async fn open_ticket(
     if !system.is_set_up() {
         return Err("there's no ticket system here yet".to_owned());
     }
-    let open: Vec<&Ticket> = system.tickets.iter().filter(|t| t.user_id == user_id && t.closed.is_none()).collect();
+    let open: Vec<&Ticket> = system
+        .tickets
+        .iter()
+        .filter(|t| t.user_id == user_id && t.closed.is_none())
+        .collect();
     if open.len() as u32 >= system.max_open.max(1) {
-        return Err(format!("you already have an open ticket: <#{}>", open[0].channel_id));
+        return Err(format!(
+            "you already have an open ticket: <#{}>",
+            open[0].channel_id
+        ));
     }
     let number = system.next + 1;
     let me = core.world.my_id();
-    let slug: String = user_name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).take(20).collect();
+    let slug: String = user_name
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(20)
+        .collect();
     let mut overwrites = vec![
         overwrite(guild_id, false, 0, VIEW),
         overwrite(user_id, true, MEMBER, 0),
         overwrite(me, true, BOT, 0),
     ];
-    overwrites.extend(system.staff_roles.iter().map(|r| overwrite(*r, false, STAFF, 0)));
+    overwrites.extend(
+        system
+            .staff_roles
+            .iter()
+            .map(|r| overwrite(*r, false, STAFF, 0)),
+    );
     let kind_label = kind.map(|k| k.label.clone()).unwrap_or_default();
     let created = core
         .http
@@ -437,7 +563,14 @@ pub async fn open_ticket(
         .welcome
         .replace("{user}", &format!("<@{user_id}>"))
         .replace("{number}", &number.to_string())
-        .replace("{type}", &if kind_label.is_empty() { String::new() } else { format!(" · {kind_label}") });
+        .replace(
+            "{type}",
+            &if kind_label.is_empty() {
+                String::new()
+            } else {
+                format!(" · {kind_label}")
+            },
+        );
     let _ = post(
         core,
         channel_id,
@@ -461,7 +594,9 @@ pub async fn open_ticket(
 }
 
 fn transcript_dir(guild_id: u64) -> PathBuf {
-    crate::paths::data_dir().join("tickets").join(guild_id.to_string())
+    crate::paths::data_dir()
+        .join("tickets")
+        .join(guild_id.to_string())
 }
 
 /// Read a transcript file saved for a ticket.
@@ -470,17 +605,32 @@ pub fn read_transcript(guild_id: u64, file: &str) -> Option<String> {
 }
 
 /// Everything said in a ticket, oldest first, as plain text.
-async fn build_transcript(core: &AgentCore, guild_id: u64, ticket: &Ticket, closer: &str, reason: &str) -> String {
+async fn build_transcript(
+    core: &AgentCore,
+    guild_id: u64,
+    ticket: &Ticket,
+    closer: &str,
+    reason: &str,
+) -> String {
     let mut messages: Vec<Value> = Vec::new();
     let mut before: Option<String> = None;
     for _ in 0..20 {
         let path = match &before {
-            Some(b) => format!("/channels/{}/messages?limit=100&before={b}", ticket.channel_id),
+            Some(b) => format!(
+                "/channels/{}/messages?limit=100&before={b}",
+                ticket.channel_id
+            ),
             None => format!("/channels/{}/messages?limit=100", ticket.channel_id),
         };
-        let Ok(Value::Array(page)) = core.http.raw("GET", &path, None, None).await else { break };
+        let Ok(Value::Array(page)) = core.http.raw("GET", &path, None, None).await else {
+            break;
+        };
         let len = page.len();
-        before = page.last().and_then(|m| m.get("id")).and_then(Value::as_str).map(str::to_owned);
+        before = page
+            .last()
+            .and_then(|m| m.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         messages.extend(page);
         if len < 100 {
             break;
@@ -489,33 +639,68 @@ async fn build_transcript(core: &AgentCore, guild_id: u64, ticket: &Ticket, clos
     messages.reverse();
     let fmt = |ms: i64| {
         Timestamp::from_unix_millis(ms)
-            .map(|t| t.to_string().chars().take(16).collect::<String>().replace('T', " "))
+            .map(|t| {
+                t.to_string()
+                    .chars()
+                    .take(16)
+                    .collect::<String>()
+                    .replace('T', " ")
+            })
             .unwrap_or_default()
     };
     let mut out = format!(
         "Ticket #{} — {}\nOpened by {} ({}) at {}\nClosed by {closer} at {}: {reason}\nServer: {}\n\n",
         ticket.number,
-        if ticket.kind.is_empty() { "support" } else { &ticket.kind },
+        if ticket.kind.is_empty() {
+            "support"
+        } else {
+            &ticket.kind
+        },
         ticket.user_name,
         ticket.user_id,
         fmt(ticket.opened),
         fmt(now_ms()),
-        core.world.with_guild(guild_id, |g| g.name.clone()).unwrap_or_default(),
+        core.world
+            .with_guild(guild_id, |g| g.name.clone())
+            .unwrap_or_default(),
     );
     for m in &messages {
-        let author = m.pointer("/author/global_name").and_then(Value::as_str)
+        let author = m
+            .pointer("/author/global_name")
+            .and_then(Value::as_str)
             .or_else(|| m.pointer("/author/username").and_then(Value::as_str))
             .unwrap_or("?");
-        let time = m.get("timestamp").and_then(Value::as_str).unwrap_or("").chars().take(16).collect::<String>().replace('T', " ");
-        let mut line = m.get("content").and_then(Value::as_str).unwrap_or("").to_owned();
-        for embed in m.get("embeds").and_then(Value::as_array).into_iter().flatten() {
+        let time = m
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(16)
+            .collect::<String>()
+            .replace('T', " ");
+        let mut line = m
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        for embed in m
+            .get("embeds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             for key in ["title", "description"] {
                 if let Some(text) = embed.get(key).and_then(Value::as_str) {
                     line.push_str(&format!(" [{text}]"));
                 }
             }
         }
-        for file in m.get("attachments").and_then(Value::as_array).into_iter().flatten() {
+        for file in m
+            .get("attachments")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if let Some(url) = file.get("url").and_then(Value::as_str) {
                 line.push_str(&format!(" [file: {url}]"));
             }
@@ -530,7 +715,15 @@ async fn build_transcript(core: &AgentCore, guild_id: u64, ticket: &Ticket, clos
 
 async fn summarize(core: &AgentCore, transcript: &str) -> String {
     let system = "Summarize a support ticket in two or three sentences: what the person needed, what was done, and how it ended. Plain text.";
-    match super::brain::quick_completion(core, system, &crate::llm::truncate(transcript, 12_000), 300, false).await {
+    match super::brain::quick_completion(
+        core,
+        system,
+        &crate::llm::truncate(transcript, 12_000),
+        300,
+        false,
+    )
+    .await
+    {
         Ok(text) => crate::llm::text::split_think(&text).0.trim().to_owned(),
         Err(_) => String::new(),
     }
@@ -563,16 +756,28 @@ pub async fn close_ticket(
 
     let transcript = build_transcript(core, guild_id, &ticket, by_name, reason).await;
     let summary = summarize(core, &transcript).await;
-    let file = format!("ticket-{:04}-{}.txt", ticket.number, ticket.transcripts.len() + 1);
+    let file = format!(
+        "ticket-{:04}-{}.txt",
+        ticket.number,
+        ticket.transcripts.len() + 1
+    );
     let dir = transcript_dir(guild_id);
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join(&file), &transcript);
     let header = format!(
         "📄 **Ticket #{}** ({}) — opened by <@{}>, closed by {by_name}: {reason}{}",
         ticket.number,
-        if ticket.kind.is_empty() { "support" } else { &ticket.kind },
+        if ticket.kind.is_empty() {
+            "support"
+        } else {
+            &ticket.kind
+        },
         ticket.user_id,
-        if summary.is_empty() { String::new() } else { format!("\n> {summary}") }
+        if summary.is_empty() {
+            String::new()
+        } else {
+            format!("\n> {summary}")
+        }
     );
     if system.log_channel_id != 0 {
         let _ = core
@@ -588,7 +793,10 @@ pub async fn close_ticket(
             let _ = core
                 .http
                 .create_message(dm.id)
-                .content(format!("Your ticket #{} was closed: {reason}. Here's the transcript.", ticket.number))
+                .content(format!(
+                    "Your ticket #{} was closed: {reason}. Here's the transcript.",
+                    ticket.number
+                ))
                 .file(file.clone(), transcript.into_bytes())
                 .await;
         }
@@ -607,7 +815,12 @@ pub async fn close_ticket(
 
     if delete {
         core.http
-            .raw("DELETE", &format!("/channels/{channel_id}"), None, Some(format!("ticket #{} deleted", ticket.number)))
+            .raw(
+                "DELETE",
+                &format!("/channels/{channel_id}"),
+                None,
+                Some(format!("ticket #{} deleted", ticket.number)),
+            )
             .await
             .map_err(api_error)?;
     } else if ticket.closed.is_none() {
@@ -622,7 +835,12 @@ pub async fn close_ticket(
             .map_err(api_error)?;
         let _ = core
             .http
-            .raw("PATCH", &format!("/channels/{channel_id}"), Some(json!({ "name": format!("closed-{:04}", ticket.number) })), None)
+            .raw(
+                "PATCH",
+                &format!("/channels/{channel_id}"),
+                Some(json!({ "name": format!("closed-{:04}", ticket.number) })),
+                None,
+            )
             .await;
         let _ = post(
             core,
@@ -635,12 +853,20 @@ pub async fn close_ticket(
         )
         .await;
     }
-    core.feed(FeedKind::System, format!("closed ticket #{} ({reason})", ticket.number), None);
+    core.feed(
+        FeedKind::System,
+        format!("closed ticket #{} ({reason})", ticket.number),
+        None,
+    );
     Ok(format!(
         "closed ticket #{} ({}){}{}",
         ticket.number,
         ticket.user_name,
-        if system.log_channel_id != 0 { format!("; transcript posted in <#{}>", system.log_channel_id) } else { "; transcript saved".to_owned() },
+        if system.log_channel_id != 0 {
+            format!("; transcript posted in <#{}>", system.log_channel_id)
+        } else {
+            "; transcript saved".to_owned()
+        },
         if delete { "; channel deleted" } else { "" }
     ))
 }
@@ -654,7 +880,10 @@ pub async fn reopen_ticket(
     by_staff: bool,
 ) -> Result<String, String> {
     let system = system(core, guild_id);
-    let ticket = system.ticket_in(channel_id).cloned().ok_or("this isn't a ticket")?;
+    let ticket = system
+        .ticket_in(channel_id)
+        .cloned()
+        .ok_or("this isn't a ticket")?;
     if ticket.closed.is_none() {
         return Err(format!("ticket #{} is already open", ticket.number));
     }
@@ -662,7 +891,10 @@ pub async fn reopen_ticket(
         return Err("only the ticket's opener or staff can reopen it".to_owned());
     }
     if core.world.channel(guild_id, channel_id).is_none() {
-        return Err(format!("ticket #{}'s channel was deleted — open a new one (its transcript is still saved)", ticket.number));
+        return Err(format!(
+            "ticket #{}'s channel was deleted — open a new one (its transcript is still saved)",
+            ticket.number
+        ));
     }
     core.http
         .raw(
@@ -673,10 +905,21 @@ pub async fn reopen_ticket(
         )
         .await
         .map_err(api_error)?;
-    let slug: String = ticket.user_name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).take(20).collect();
+    let slug: String = ticket
+        .user_name
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(20)
+        .collect();
     let _ = core
         .http
-        .raw("PATCH", &format!("/channels/{channel_id}"), Some(json!({ "name": format!("ticket-{:04}-{slug}", ticket.number) })), None)
+        .raw(
+            "PATCH",
+            &format!("/channels/{channel_id}"),
+            Some(json!({ "name": format!("ticket-{:04}-{slug}", ticket.number) })),
+            None,
+        )
         .await;
     save(core, guild_id, |t| {
         if let Some(stored) = t.tickets.iter_mut().find(|x| x.channel_id == channel_id) {
@@ -696,9 +939,18 @@ pub async fn reopen_ticket(
     Ok(format!("reopened ticket #{}", ticket.number))
 }
 
-pub async fn claim(core: &AgentCore, guild_id: u64, channel_id: u64, staff_id: u64, staff_name: &str) -> Result<String, String> {
+pub async fn claim(
+    core: &AgentCore,
+    guild_id: u64,
+    channel_id: u64,
+    staff_id: u64,
+    staff_name: &str,
+) -> Result<String, String> {
     let system = system(core, guild_id);
-    let ticket = system.open_ticket_in(channel_id).cloned().ok_or("this isn't an open ticket")?;
+    let ticket = system
+        .open_ticket_in(channel_id)
+        .cloned()
+        .ok_or("this isn't an open ticket")?;
     if let Some(other) = ticket.claimed_by.filter(|o| *o != staff_id) {
         return Err(format!("already claimed by <@{other}>"));
     }
@@ -718,21 +970,39 @@ pub async fn claim(core: &AgentCore, guild_id: u64, channel_id: u64, staff_id: u
 
 pub async fn rename(core: &AgentCore, channel_id: u64, name: &str) -> Result<(), String> {
     core.http
-        .raw("PATCH", &format!("/channels/{channel_id}"), Some(json!({ "name": name })), Some("ticket renamed".to_owned()))
+        .raw(
+            "PATCH",
+            &format!("/channels/{channel_id}"),
+            Some(json!({ "name": name })),
+            Some("ticket renamed".to_owned()),
+        )
         .await
         .map(|_| ())
         .map_err(api_error)
 }
 
 /// Give (or take away) a role's or member's access to one ticket.
-pub async fn set_access(core: &AgentCore, channel_id: u64, id: u64, member: bool, grant: bool) -> Result<(), String> {
+pub async fn set_access(
+    core: &AgentCore,
+    channel_id: u64,
+    id: u64,
+    member: bool,
+    grant: bool,
+) -> Result<(), String> {
     let path = format!("/channels/{channel_id}/permissions/{id}");
     let result = if grant {
         core.http
-            .raw("PUT", &path, Some(json!({ "type": u8::from(member), "allow": MEMBER.to_string(), "deny": "0" })), Some("ticket access".to_owned()))
+            .raw(
+                "PUT",
+                &path,
+                Some(json!({ "type": u8::from(member), "allow": MEMBER.to_string(), "deny": "0" })),
+                Some("ticket access".to_owned()),
+            )
             .await
     } else {
-        core.http.raw("DELETE", &path, None, Some("ticket access".to_owned())).await
+        core.http
+            .raw("DELETE", &path, None, Some("ticket access".to_owned()))
+            .await
     };
     result.map(|_| ()).map_err(api_error)
 }
@@ -751,16 +1021,30 @@ pub fn ticket_text(core: &AgentCore, guild_id: u64, ticket: &Ticket) -> String {
     }
     if ticket.closed.is_none() {
         let lines: Vec<String> = core.hive.knowledge.channel(ticket.channel_id, |a| {
-            a.messages.iter().filter(|m| !m.deleted).map(|m| format!("{}: {}", m.author, m.content)).collect()
+            a.messages
+                .iter()
+                .filter(|m| !m.deleted)
+                .map(|m| format!("{}: {}", m.author, m.content))
+                .collect()
         });
-        text.push_str(&format!("Ticket #{} (open) — {}\n{}", ticket.number, ticket.user_name, lines.join("\n")));
+        text.push_str(&format!(
+            "Ticket #{} (open) — {}\n{}",
+            ticket.number,
+            ticket.user_name,
+            lines.join("\n")
+        ));
     }
     text
 }
 
 /// Tickets mentioning all the query's words (or by that person), with a
 /// snippet around the first match.
-pub fn search(core: &AgentCore, guild_id: u64, query: &str, user: Option<u64>) -> Vec<(Ticket, String)> {
+pub fn search(
+    core: &AgentCore,
+    guild_id: u64,
+    query: &str,
+    user: Option<u64>,
+) -> Vec<(Ticket, String)> {
     let system = system(core, guild_id);
     let words: Vec<String> = query
         .to_lowercase()
@@ -773,15 +1057,26 @@ pub fn search(core: &AgentCore, guild_id: u64, query: &str, user: Option<u64>) -
         if user.is_some_and(|u| ticket.user_id != u) {
             continue;
         }
-        let text = format!("{}\n{}", ticket.summary, ticket_text(core, guild_id, ticket));
+        let text = format!(
+            "{}\n{}",
+            ticket.summary,
+            ticket_text(core, guild_id, ticket)
+        );
         let lower = text.to_lowercase();
         if !words.iter().all(|w| lower.contains(w.as_str())) {
             continue;
         }
-        let at = words.first().and_then(|w| lower.find(w.as_str())).unwrap_or(0);
-        let start = (at.saturating_sub(120)..=at).find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+        let at = words
+            .first()
+            .and_then(|w| lower.find(w.as_str()))
+            .unwrap_or(0);
+        let start = (at.saturating_sub(120)..=at)
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(0);
         let end = (at + 200).min(text.len());
-        let end = (end..=text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+        let end = (end..=text.len())
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(text.len());
         hits.push((ticket.clone(), text[start..end].replace('\n', " ")));
     }
     hits
@@ -796,7 +1091,11 @@ mod tests {
         let mut system = TicketSystem::default();
         let body = panel_body(&system);
         assert_eq!(body["components"][0]["components"][0]["type"], 2);
-        system.panel.options.push(TicketOption { label: "Bug report".into(), emoji: "🐛".into(), ..Default::default() });
+        system.panel.options.push(TicketOption {
+            label: "Bug report".into(),
+            emoji: "🐛".into(),
+            ..Default::default()
+        });
         let body = panel_body(&system);
         let menu = &body["components"][0]["components"][0];
         assert_eq!(menu["type"], 3);
@@ -807,7 +1106,11 @@ mod tests {
     #[test]
     fn finds_tickets_by_number_or_channel() {
         let mut system = TicketSystem::default();
-        system.tickets.push(Ticket { number: 7, channel_id: 555, ..Default::default() });
+        system.tickets.push(Ticket {
+            number: 7,
+            channel_id: 555,
+            ..Default::default()
+        });
         assert_eq!(find(&system, Some("#7"), 0).unwrap().channel_id, 555);
         assert_eq!(find(&system, Some("ticket 7"), 0).unwrap().channel_id, 555);
         assert_eq!(find(&system, None, 555).unwrap().number, 7);

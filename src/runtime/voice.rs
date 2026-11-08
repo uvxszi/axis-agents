@@ -7,7 +7,7 @@
 //! audio into utterances, transcribes them, and — when they're talking to
 //! the agent — runs the brain and speaks the answer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -24,16 +24,14 @@ use super::speech;
 use crate::config::VoiceReply;
 use crate::memory::StoredMessage;
 
-/// Loudness (RMS) above which a frame counts as speech.
-const SPEECH_RMS: f64 = 450.0;
 /// Longest single utterance.
 const MAX_UTTERANCE: Duration = Duration::from_secs(25);
 /// Shortest speech worth transcribing (20 ms frames).
 const MIN_VOICED_FRAMES: usize = 12;
-/// Talking over the agent this long stops it.
-const BARGE_IN_FRAMES: usize = 25;
 /// An answer within this long keeps the conversation going.
 const CONVERSATION_WINDOW: Duration = Duration::from_secs(60);
+/// How many of its own lines the agent remembers saying (echo guard).
+const OWN_WORDS_KEPT: usize = 16;
 
 /// One agent's voice connections, one per guild.
 #[derive(Default)]
@@ -64,6 +62,9 @@ pub struct Session {
     conn: VoiceConnection,
     /// user → when the agent last answered them here.
     answered: Mutex<HashMap<u64, Instant>>,
+    /// What the agent itself said lately, so its own voice coming back
+    /// through open mics can be told from someone actually talking.
+    own_words: Mutex<VecDeque<(Instant, String)>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Keeps lines in order when several are being prepared at once.
     speaking: tokio::sync::Mutex<()>,
@@ -89,7 +90,12 @@ impl VoiceHub {
     }
 
     fn session(&self, guild_id: u64) -> Option<Arc<Session>> {
-        self.state.lock().expect("voice poisoned").sessions.get(&guild_id).cloned()
+        self.state
+            .lock()
+            .expect("voice poisoned")
+            .sessions
+            .get(&guild_id)
+            .cloned()
     }
 
     fn fail_waiters(state: &mut HubState, guild_id: u64, error: &str) {
@@ -122,7 +128,8 @@ fn publish(core: &AgentCore) {
         .map(|s| core.channel_label(Some(s.guild_id), s.channel_id))
         .collect();
     drop(state);
-    core.live().agent(&core.id, |l| l.voice_channels = channels.clone());
+    core.live()
+        .agent(&core.id, |l| l.voice_channels = channels.clone());
 }
 
 // --- gateway events ----------------------------------------------------------------
@@ -140,7 +147,10 @@ pub fn on_state(core: &Arc<AgentCore>, voice: &axis::model::VoiceState) {
         match voice.channel_id.map(|c| c.get()) {
             Some(channel_id) => {
                 let changed = state.session_ids.get(&guild_id) != Some(&voice.session_id)
-                    || state.sessions.get(&guild_id).is_some_and(|s| s.channel_id != channel_id);
+                    || state
+                        .sessions
+                        .get(&guild_id)
+                        .is_some_and(|s| s.channel_id != channel_id);
                 state.session_ids.insert(guild_id, voice.session_id.clone());
                 state.channels.insert(guild_id, channel_id);
                 if changed {
@@ -171,7 +181,9 @@ pub fn on_server(core: &Arc<AgentCore>, update: &axis::model::VoiceServerUpdate)
     };
     {
         let mut state = core.voice.state.lock().expect("voice poisoned");
-        state.servers.insert(guild_id, (update.token.clone(), endpoint));
+        state
+            .servers
+            .insert(guild_id, (update.token.clone(), endpoint));
         // A new server means a new connection.
         state.sessions.remove(&guild_id);
     }
@@ -218,10 +230,12 @@ fn try_connect(core: &Arc<AgentCore>, guild_id: u64) {
                     origin: state.origins.get(&guild_id).copied(),
                     conn,
                     answered: Mutex::new(HashMap::new()),
+                    own_words: Mutex::new(VecDeque::new()),
                     tasks: Mutex::new(Vec::new()),
                     speaking: tokio::sync::Mutex::new(()),
                 });
-                let listener = tokio::spawn(listen(Arc::clone(&core), Arc::downgrade(&session), events));
+                let listener =
+                    tokio::spawn(listen(Arc::clone(&core), Arc::downgrade(&session), events));
                 session.tasks.lock().expect("voice poisoned").push(listener);
                 state.sessions.insert(guild_id, session);
                 for waiter in state.waiters.remove(&guild_id).unwrap_or_default() {
@@ -250,9 +264,19 @@ fn try_connect(core: &Arc<AgentCore>, guild_id: u64) {
 
 /// Join a voice channel (or move there). Resolves once connected;
 /// retries with a fresh voice session when Discord's voice gateway hiccups.
-pub async fn join(core: &Arc<AgentCore>, guild_id: u64, channel_id: u64, origin: Option<u64>) -> Result<(), String> {
+pub async fn join(
+    core: &Arc<AgentCore>,
+    guild_id: u64,
+    channel_id: u64,
+    origin: Option<u64>,
+) -> Result<(), String> {
     if let Some(origin) = origin {
-        core.voice.state.lock().expect("voice poisoned").origins.insert(guild_id, origin);
+        core.voice
+            .state
+            .lock()
+            .expect("voice poisoned")
+            .origins
+            .insert(guild_id, origin);
     }
     if core.voice.channel(guild_id) == Some(channel_id) {
         return Ok(());
@@ -279,7 +303,11 @@ pub async fn join(core: &Arc<AgentCore>, guild_id: u64, channel_id: u64, origin:
             }
         }
     }
-    core.feed(FeedKind::Error, format!("couldn't join voice: {last_error}"), None);
+    core.feed(
+        FeedKind::Error,
+        format!("couldn't join voice: {last_error}"),
+        None,
+    );
     Err(format!("{last_error} (tried 3 times)"))
 }
 
@@ -296,12 +324,19 @@ async fn join_once(core: &Arc<AgentCore>, guild_id: u64, channel_id: u64) -> Res
         }
     }
     messenger
-        .update_voice_state(GuildId::new(guild_id), Some(ChannelId::new(channel_id)), false, false)
+        .update_voice_state(
+            GuildId::new(guild_id),
+            Some(ChannelId::new(channel_id)),
+            false,
+            false,
+        )
         .map_err(|e| e.to_string())?;
     match tokio::time::timeout(Duration::from_secs(15), rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err("voice join was cancelled".to_owned()),
-        Err(_) => Err("Discord didn't let me into the voice channel (no response in 15s)".to_owned()),
+        Err(_) => {
+            Err("Discord didn't let me into the voice channel (no response in 15s)".to_owned())
+        }
     }
 }
 
@@ -341,7 +376,9 @@ pub fn progress_line(tool: &str) -> Option<&'static str> {
         "web_search" | "news_search" => "One sec, checking the web.",
         "fetch_url" | "read_url" => "Give me a sec, I'm reading that page.",
         "image_search" => "Looking for an image.",
-        "read_messages" | "search_messages" | "list_forum_posts" | "read_forum_post" => "Let me look through the chat.",
+        "read_messages" | "search_messages" | "list_forum_posts" | "read_forum_post" => {
+            "Let me look through the chat."
+        }
         "recall" => "Let me think back.",
         "describe_image" | "look_at_image" => "Let me take a look.",
         "purge_messages" => "On it, cleaning up.",
@@ -351,14 +388,27 @@ pub fn progress_line(tool: &str) -> Option<&'static str> {
 }
 
 async fn speak(core: &Arc<AgentCore>, guild_id: u64, text: &str, keep: bool) -> Result<(), String> {
-    let session = core.voice.session(guild_id).ok_or("I'm not in a voice channel")?;
+    let session = core
+        .voice
+        .session(guild_id)
+        .ok_or("I'm not in a voice channel")?;
     let spoken = spoken_text(core, guild_id, text);
     if spoken.is_empty() {
         return Ok(());
     }
+    // What the agent says can come straight back through open mics; the
+    // echo guard will drop transcripts that repeat it.
+    spoke(&session, &spoken);
     let profile = core.profile();
     if keep {
-        archive(core, session.channel_id, core.world.my_id(), &profile.name, true, &spoken);
+        archive(
+            core,
+            session.channel_id,
+            core.world.my_id(),
+            &profile.name,
+            true,
+            &spoken,
+        );
         if profile.voice.live_transcript {
             transcript_line(core, session.channel_id, "🔊", &profile.name, &spoken);
         }
@@ -393,7 +443,8 @@ fn sentence_chunks(text: &str) -> Vec<String> {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         current.push(c);
-        let end = matches!(c, '.' | '!' | '?' | ';' | '\n') && chars.peek().is_none_or(|n| n.is_whitespace());
+        let end = matches!(c, '.' | '!' | '?' | ';' | '\n')
+            && chars.peek().is_none_or(|n| n.is_whitespace());
         if end && current.trim().len() >= 40 {
             chunks.push(current.trim().to_owned());
             current.clear();
@@ -407,7 +458,13 @@ fn sentence_chunks(text: &str) -> Vec<String> {
 
 /// The brain's answer to someone in voice: spoken, and whatever it marked
 /// for the call's text chat posted there.
-pub async fn reply(core: &Arc<AgentCore>, guild_id: u64, speaker: u64, text: &str, files: &[(String, Vec<u8>)]) {
+pub async fn reply(
+    core: &Arc<AgentCore>,
+    guild_id: u64,
+    speaker: u64,
+    text: &str,
+    files: &[(String, Vec<u8>)],
+) {
     let Some(session) = core.voice.session(guild_id) else {
         return;
     };
@@ -430,14 +487,20 @@ pub async fn reply(core: &Arc<AgentCore>, guild_id: u64, speaker: u64, text: &st
     // Never answer someone in a call only in writing.
     if spoken.trim().is_empty() {
         if let Some(written) = chat.take() {
-            let plain = !written.contains("http") && !written.contains("```") && written.len() <= 300;
+            let plain =
+                !written.contains("http") && !written.contains("```") && written.len() <= 300;
             if plain {
                 // Short and speakable: just say it.
                 spoken = written;
             } else {
                 let first_line = written
                     .lines()
-                    .map(|l| l.trim().trim_start_matches(['-', '*', '•', '#', ' ']).trim_end_matches(':').trim())
+                    .map(|l| {
+                        l.trim()
+                            .trim_start_matches(['-', '*', '•', '#', ' '])
+                            .trim_end_matches(':')
+                            .trim()
+                    })
                     .find(|l| !l.is_empty())
                     .map(speech::speakable)
                     .unwrap_or_default();
@@ -451,7 +514,9 @@ pub async fn reply(core: &Arc<AgentCore>, guild_id: u64, speaker: u64, text: &st
         }
     }
     let posted = match (&chat, profile.voice.post_transcript) {
-        (Some(chat), true) if !spoken.trim().is_empty() => Some(format!("🔊 {}\n{chat}", spoken.trim())),
+        (Some(chat), true) if !spoken.trim().is_empty() => {
+            Some(format!("🔊 {}\n{chat}", spoken.trim()))
+        }
         (Some(chat), _) => Some(chat.clone()),
         // The live transcript already shows what it says.
         (None, true) if !spoken.trim().is_empty() && !profile.voice.live_transcript => {
@@ -462,7 +527,9 @@ pub async fn reply(core: &Arc<AgentCore>, guild_id: u64, speaker: u64, text: &st
     // The voice channel's chat may be off limits; speaking still works.
     let chat_ok = core.barred(guild_id, session.channel_id).is_none();
     if chat_ok && (posted.is_some() || !files.is_empty()) {
-        let posted = posted.map(|p| super::brain::link_mentions(core, guild_id, &p)).unwrap_or_default();
+        let posted = posted
+            .map(|p| super::brain::link_mentions(core, guild_id, &p))
+            .unwrap_or_default();
         let mut request = core
             .http
             .create_message(ChannelId::new(session.channel_id))
@@ -472,16 +539,28 @@ pub async fn reply(core: &Arc<AgentCore>, guild_id: u64, speaker: u64, text: &st
             request = request.file(name.clone(), bytes.clone());
         }
         if let Err(error) = request.await {
-            core.feed(FeedKind::Error, format!("couldn't post in the call's chat: {error}"), None);
+            core.feed(
+                FeedKind::Error,
+                format!("couldn't post in the call's chat: {error}"),
+                None,
+            );
         }
     }
     if spoken.trim().is_empty() {
-        session.answered.lock().expect("voice poisoned").insert(speaker, Instant::now());
+        session
+            .answered
+            .lock()
+            .expect("voice poisoned")
+            .insert(speaker, Instant::now());
         return;
     }
     match say(core, guild_id, &spoken).await {
         Ok(()) => {
-            session.answered.lock().expect("voice poisoned").insert(speaker, Instant::now());
+            session
+                .answered
+                .lock()
+                .expect("voice poisoned")
+                .insert(speaker, Instant::now());
             core.live().stat(&core.id, |s| s.replies += 1);
             core.feed(
                 FeedKind::Reply,
@@ -495,24 +574,62 @@ pub async fn reply(core: &Arc<AgentCore>, guild_id: u64, speaker: u64, text: &st
 
 /// Do two texts say mostly the same words?
 fn mostly_same(a: &str, b: &str) -> bool {
-    let words = |t: &str| -> std::collections::HashSet<String> {
-        t.split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() > 2)
-            .map(str::to_lowercase)
-            .collect()
-    };
-    let (a, b) = (words(a), words(b));
+    let (a, b) = (words_of(a), words_of(b));
     if a.is_empty() {
         return true;
     }
     a.intersection(&b).count() * 10 >= a.len() * 6
 }
 
+/// The words worth comparing: lowercase, punctuation dropped, tiny ones
+/// skipped.
+fn words_of(t: &str) -> HashSet<String> {
+    t.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Is this transcript just an echo of a line the agent itself said —
+/// its own voice picked back up by someone's open mic? Like
+/// `mostly_same`, but stricter: nearly all the words (85%) must match,
+/// and every word of the transcript has to be in the spoken line, so
+/// real replies that merely pick up a few words survive.
+fn echo_of(text: &str, spoken: &str) -> bool {
+    let (text, spoken) = (words_of(text), words_of(spoken));
+    if text.is_empty() {
+        return false;
+    }
+    text.intersection(&spoken).count() * 20 >= text.len() * 17
+}
+
+/// Remember a line the agent spoke, for the echo guard.
+fn spoke(session: &Session, text: &str) {
+    let mut own = session.own_words.lock().expect("voice poisoned");
+    own.push_back((Instant::now(), text.to_owned()));
+    while own.len() > OWN_WORDS_KEPT {
+        own.pop_front();
+    }
+}
+
+/// The agent's own lines from the last `guard`, oldest first. A
+/// transcript this close to one of them is an echo, not speech.
+fn own_lines(session: &Session, guard: Duration) -> Vec<String> {
+    let mut own = session.own_words.lock().expect("voice poisoned");
+    while own.front().is_some_and(|(at, _)| at.elapsed() > guard) {
+        own.pop_front();
+    }
+    own.iter().map(|(_, text)| text.clone()).collect()
+}
+
 fn marker_line<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     let trimmed = line.trim_start().trim_start_matches(['*', '_']);
     let head = trimmed.get(..marker.len())?;
-    head.eq_ignore_ascii_case(marker)
-        .then(|| trimmed[marker.len()..].trim_start_matches(['*', '_']).trim_start())
+    head.eq_ignore_ascii_case(marker).then(|| {
+        trimmed[marker.len()..]
+            .trim_start_matches(['*', '_'])
+            .trim_start()
+    })
 }
 
 /// A voice reply: the part to say, and (after a `CHAT:` line) the part to
@@ -560,7 +677,9 @@ pub fn people_names(core: &AgentCore, guild_id: u64, channel_id: u64) -> Vec<Str
         .into_iter()
         .filter_map(|u| {
             core.world
-                .with_guild(guild_id, |g| g.members.get(&u).map(|m| m.display_name().to_owned()))
+                .with_guild(guild_id, |g| {
+                    g.members.get(&u).map(|m| m.display_name().to_owned())
+                })
                 .flatten()
         })
         .collect()
@@ -579,7 +698,10 @@ fn spoken_text(core: &AgentCore, guild_id: u64, text: &str) -> String {
             break;
         };
         let inner = &tail[1..end];
-        let id = inner.trim_start_matches(['@', '!', '#', '&']).parse::<u64>().ok();
+        let id = inner
+            .trim_start_matches(['@', '!', '#', '&'])
+            .parse::<u64>()
+            .ok();
         let name = id.and_then(|id| {
             core.world
                 .with_guild(guild_id, |g| {
@@ -669,6 +791,9 @@ struct Utterance {
     voiced: usize,
     started: Instant,
     last_voice: Instant,
+    /// When the recent loud frames happened (for the rolling barge-in
+    /// window): (at, loud). Old entries are trimmed each frame.
+    loud_at: Vec<(Instant, bool)>,
 }
 
 fn rms(pcm: &[i16]) -> f64 {
@@ -700,10 +825,17 @@ fn people_in(core: &AgentCore, guild_id: u64, channel_id: u64) -> Vec<u64> {
                 .collect()
         })
         .unwrap_or_default();
-    users.into_iter().filter(|u| is_person(core, guild_id, *u)).collect()
+    users
+        .into_iter()
+        .filter(|u| is_person(core, guild_id, *u))
+        .collect()
 }
 
-async fn listen(core: Arc<AgentCore>, session: Weak<Session>, mut events: mpsc::UnboundedReceiver<VoiceEvent>) {
+async fn listen(
+    core: Arc<AgentCore>,
+    session: Weak<Session>,
+    mut events: mpsc::UnboundedReceiver<VoiceEvent>,
+) {
     let (heard_tx, heard_rx) = mpsc::unbounded_channel::<(u64, Vec<i16>)>();
     let responder = tokio::spawn(respond(Arc::clone(&core), session.clone(), heard_rx));
     let mut speech: HashMap<u32, Utterance> = HashMap::new();
@@ -729,13 +861,14 @@ async fn listen(core: Arc<AgentCore>, session: Weak<Session>, mut events: mpsc::
                             continue;
                         }
                         let now = Instant::now();
-                        let loud = rms(&pcm) > SPEECH_RMS;
+                        let loud = rms(&pcm) > f64::from(profile.voice.speech_rms);
                         let entry = speech.entry(ssrc).or_insert_with(|| Utterance {
                             user_id,
                             audio: Vec::new(),
                             voiced: 0,
                             started: now,
                             last_voice: now,
+                            loud_at: Vec::new(),
                         });
                         entry.user_id = entry.user_id.or(user_id);
                         if loud {
@@ -748,11 +881,37 @@ async fn listen(core: Arc<AgentCore>, session: Weak<Session>, mut events: mpsc::
                         if entry.voiced > 0 {
                             entry.audio.extend(axis_voice::to_mono(&pcm, 16_000));
                         }
-                        if profile.voice.interruptible
-                            && entry.voiced >= BARGE_IN_FRAMES
-                            && session.conn.is_playing()
-                        {
-                            session.conn.stop();
+                        // Barge-in: sustained loud frames within a rolling
+                        // window (so scattered noise never accumulates into
+                        // an interrupt), above a (higher) interrupt
+                        // threshold while the agent is speaking.
+                        if session.conn.is_playing() {
+                            let window = Duration::from_millis(profile.voice.interrupt_window_ms.max(200));
+                            let floor = f64::from(if profile.voice.interrupt_rms > 0 {
+                                profile.voice.interrupt_rms
+                            } else {
+                                profile.voice.speech_rms
+                            });
+                            let interrupting = rms(&pcm) > floor;
+                            entry.loud_at.push((now, interrupting));
+                            let cutoff = now.checked_sub(window).unwrap_or(now);
+                            while entry.loud_at.first().is_some_and(|(at, _)| *at < cutoff) {
+                                entry.loud_at.remove(0);
+                            }
+                            // 60% coverage of the window = a person talking,
+                            // not a cough or a fan.
+                            let covered = entry
+                                .loud_at
+                                .iter()
+                                .filter(|(_, loud)| *loud)
+                                .count();
+                            if profile.voice.interruptible
+                                && covered * 10 >= entry.loud_at.len() * 6
+                                && entry.loud_at.len() >= 5
+                            {
+                                session.conn.stop();
+                                entry.loud_at.clear();
+                            }
                         }
                     }
                     VoiceEvent::Closed { reason, code } => {
@@ -830,13 +989,19 @@ fn recent_speech(core: &AgentCore, channel_id: u64) -> String {
             .rev()
             .filter(|m| !m.deleted)
             .take(4)
-            .map(|m| m.content.trim_start_matches("🎙 (said in voice) ").to_owned())
+            .map(|m| {
+                m.content
+                    .trim_start_matches("🎙 (said in voice) ")
+                    .to_owned()
+            })
             .collect()
     });
     let mut text: String = lines.into_iter().rev().collect::<Vec<_>>().join(" ");
     if text.len() > 400 {
         let cut = text.len() - 400;
-        let cut = (cut..text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+        let cut = (cut..text.len())
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(text.len());
         text = text[cut..].to_owned();
     }
     text
@@ -844,14 +1009,20 @@ fn recent_speech(core: &AgentCore, channel_id: u64) -> String {
 
 /// Transcribe what people said and answer. Everything said while the
 /// agent was busy becomes one turn — no backlog of stale answers.
-async fn respond(core: Arc<AgentCore>, session: Weak<Session>, mut heard: mpsc::UnboundedReceiver<(u64, Vec<i16>)>) {
+async fn respond(
+    core: Arc<AgentCore>,
+    session: Weak<Session>,
+    mut heard: mpsc::UnboundedReceiver<(u64, Vec<i16>)>,
+) {
     let mut reported_error = false;
     while let Some(first) = heard.recv().await {
         let mut batch = vec![first];
         while let Ok(more) = heard.try_recv() {
             batch.push(more);
         }
-        let Some(current) = session.upgrade() else { return };
+        let Some(current) = session.upgrade() else {
+            return;
+        };
         let (guild_id, channel_id) = (current.guild_id, current.channel_id);
         drop(current);
         let profile = core.profile();
@@ -869,7 +1040,11 @@ async fn respond(core: Arc<AgentCore>, session: Weak<Session>, mut heard: mpsc::
                 }
                 Err(error) => {
                     if !reported_error {
-                        core.feed(FeedKind::Error, format!("couldn't transcribe voice: {error}"), None);
+                        core.feed(
+                            FeedKind::Error,
+                            format!("couldn't transcribe voice: {error}"),
+                            None,
+                        );
                         reported_error = true;
                     }
                     continue;
@@ -878,9 +1053,27 @@ async fn respond(core: Arc<AgentCore>, session: Weak<Session>, mut heard: mpsc::
             if text.is_empty() {
                 continue;
             }
+            // Echo guard: the agent's own voice picked back up through an
+            // open mic reads back as (nearly) exactly what it just said.
+            // Drop it before it ever reaches the reply gate or history.
+            {
+                let Some(current) = session.upgrade() else {
+                    return;
+                };
+                let guard = Duration::from_secs(profile.voice.echo_guard_secs.max(1));
+                if own_lines(&current, guard)
+                    .iter()
+                    .any(|spoken| echo_of(&text, spoken))
+                {
+                    tracing::debug!(text = %text, "echo guard dropped");
+                    continue;
+                }
+            }
             let name = core
                 .world
-                .with_guild(guild_id, |g| g.members.get(&user_id).map(|m| m.display_name().to_owned()))
+                .with_guild(guild_id, |g| {
+                    g.members.get(&user_id).map(|m| m.display_name().to_owned())
+                })
                 .flatten()
                 .unwrap_or_else(|| "someone".to_owned());
             archive(&core, channel_id, user_id, &name, false, &text);
@@ -898,7 +1091,9 @@ async fn respond(core: Arc<AgentCore>, session: Weak<Session>, mut heard: mpsc::
         core.live().repaint();
         // Answer the latest speaker, taking everything they said together
         // (a sentence split by a pause, or "no, I meant…" said while busy).
-        let Some((user_id, name, _)) = said.last().cloned() else { continue };
+        let Some((user_id, name, _)) = said.last().cloned() else {
+            continue;
+        };
         let text = said
             .iter()
             .filter(|(u, _, _)| *u == user_id)
@@ -908,7 +1103,9 @@ async fn respond(core: Arc<AgentCore>, session: Weak<Session>, mut heard: mpsc::
 
         // Talking to the agent?
         let named = heard_name(&text, &names);
-        let Some(current) = session.upgrade() else { return };
+        let Some(current) = session.upgrade() else {
+            return;
+        };
         let recent = current
             .answered
             .lock()
@@ -925,7 +1122,13 @@ async fn respond(core: Arc<AgentCore>, session: Weak<Session>, mut heard: mpsc::
         };
         // Asked to do something: say so right away instead of going quiet.
         if brain::looks_like_request(&text) {
-            const ACKS: [&str; 5] = ["On it.", "Sure, one sec.", "Okay, give me a moment.", "Got it, working on it.", "Alright, on it."];
+            const ACKS: [&str; 5] = [
+                "On it.",
+                "Sure, one sec.",
+                "Okay, give me a moment.",
+                "Got it, working on it.",
+                "Alright, on it.",
+            ];
             let ack = ACKS[fastrand::usize(..ACKS.len())];
             let core = Arc::clone(&core);
             tokio::spawn(async move {
@@ -946,7 +1149,10 @@ async fn respond(core: Arc<AgentCore>, session: Weak<Session>, mut heard: mpsc::
             reason,
             requester,
             task: None,
-            outlet: Outlet::Voice { guild_id, speaker: user_id },
+            outlet: Outlet::Voice {
+                guild_id,
+                speaker: user_id,
+            },
             question: Some(text),
         };
         brain::run(&core, job).await;
@@ -1023,7 +1229,9 @@ mod tests {
 
     #[test]
     fn chunks_speech_by_sentence() {
-        let chunks = sentence_chunks("Hi. Sure thing, I moved you to the gaming channel. Anything else you need from me today?");
+        let chunks = sentence_chunks(
+            "Hi. Sure thing, I moved you to the gaming channel. Anything else you need from me today?",
+        );
         assert_eq!(chunks.len(), 2, "{chunks:?}");
         assert!(chunks[0].starts_with("Hi. Sure thing"));
         assert_eq!(sentence_chunks("ok"), vec!["ok".to_owned()]);
@@ -1031,7 +1239,8 @@ mod tests {
 
     #[test]
     fn splits_spoken_and_chat_parts() {
-        let (spoken, chat) = split_chat("Sure, here's the link.\nCHAT: https://example.com\n- item");
+        let (spoken, chat) =
+            split_chat("Sure, here's the link.\nCHAT: https://example.com\n- item");
         assert_eq!(spoken, "Sure, here's the link.");
         assert_eq!(chat.as_deref(), Some("https://example.com\n- item"));
         let (spoken, chat) = split_chat("Just talking.");

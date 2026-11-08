@@ -9,13 +9,16 @@ pub mod authority;
 pub mod brain;
 pub mod commands;
 pub mod community;
+pub mod confirm;
 pub mod context;
+pub mod github;
 pub mod hive;
 pub mod hq;
+#[cfg(test)]
+mod lab;
 pub mod levels;
 pub mod live;
 pub mod moderation;
-pub mod github;
 pub mod pages;
 pub mod reflect;
 pub mod setup;
@@ -26,8 +29,6 @@ pub mod translate;
 pub mod vision;
 pub mod voice;
 pub mod world;
-#[cfg(test)]
-mod lab;
 
 use std::{
     collections::HashMap,
@@ -120,15 +121,26 @@ impl Supervisor {
         let Some(core) = self.core(agent_id) else {
             return false;
         };
-        self.runtime.spawn(async move { commands::request_sync(&core) });
+        self.runtime
+            .spawn(async move { commands::request_sync(&core) });
         true
     }
 
     /// (settings at the last sync, what it did) for the app.
     pub fn commands_state(&self, agent_id: &str) -> Option<(Option<String>, String)> {
         let core = self.core(agent_id)?;
-        let applied = core.command_sync.applied.lock().expect("sync poisoned").clone();
-        let status = core.command_sync.status.lock().expect("status poisoned").clone();
+        let applied = core
+            .command_sync
+            .applied
+            .lock()
+            .expect("sync poisoned")
+            .clone();
+        let status = core
+            .command_sync
+            .status
+            .lock()
+            .expect("status poisoned")
+            .clone();
         Some((applied, status))
     }
 
@@ -151,13 +163,19 @@ impl Supervisor {
                     .raw(
                         "PATCH",
                         "/applications/@me",
-                        Some(serde_json::json!({ "description": crate::llm::truncate(&text, 400) })),
+                        Some(
+                            serde_json::json!({ "description": crate::llm::truncate(&text, 400) }),
+                        ),
                         None,
                     )
                     .await;
                 match result {
                     Ok(_) => core.feed(live::FeedKind::System, "profile About Me updated", None),
-                    Err(error) => core.feed(live::FeedKind::Error, format!("couldn't update the About Me: {error}"), None),
+                    Err(error) => core.feed(
+                        live::FeedKind::Error,
+                        format!("couldn't update the About Me: {error}"),
+                        None,
+                    ),
                 }
             });
         }
@@ -300,7 +318,8 @@ impl Supervisor {
                 } else {
                     // Back to what was last applied (not unapplied edits).
                     let shown = core.shown_status.lock().expect("status poisoned").clone();
-                    axis::prelude::Presence::online().with_activity(axis::prelude::Activity::custom(shown))
+                    axis::prelude::Presence::online()
+                        .with_activity(axis::prelude::Activity::custom(shown))
                 };
                 let _ = messenger.update_presence(presence);
             }
@@ -374,9 +393,19 @@ impl Supervisor {
 
     /// Reload a model in LM Studio with a given context and parallel
     /// count (through LM Studio's `lms` command line tool).
-    pub fn reload_lmstudio(&self, agent_id: &str, model: &ModelConfig, context: u32, parallel: u32) {
+    pub fn reload_lmstudio(
+        &self,
+        agent_id: &str,
+        model: &ModelConfig,
+        context: u32,
+        parallel: u32,
+    ) {
         let key = format!("{agent_id}#reload");
-        self.live.probes.lock().expect("live poisoned").insert(key.clone(), Probe::Pending);
+        self.live
+            .probes
+            .lock()
+            .expect("live poisoned")
+            .insert(key.clone(), Probe::Pending);
         let live = Arc::clone(&self.live);
         let name = model.model.clone();
         let endpoint = Endpoint::from_config(model);
@@ -384,7 +413,12 @@ impl Supervisor {
         self.runtime.spawn(async move {
             let lms = std::env::var_os("USERPROFILE")
                 .or_else(|| std::env::var_os("HOME"))
-                .map(|home| std::path::PathBuf::from(home).join(".lmstudio").join("bin").join(if cfg!(windows) { "lms.exe" } else { "lms" }))
+                .map(|home| {
+                    std::path::PathBuf::from(home)
+                        .join(".lmstudio")
+                        .join("bin")
+                        .join(if cfg!(windows) { "lms.exe" } else { "lms" })
+                })
                 .filter(|path| path.exists())
                 .unwrap_or_else(|| std::path::PathBuf::from("lms"));
             let run = |args: Vec<String>| {
@@ -417,11 +451,17 @@ impl Supervisor {
                 }
                 Ok(out) => Probe::Failed(format!(
                     "lms load failed: {}",
-                    crate::llm::truncate(&String::from_utf8_lossy(&out.stderr).trim().to_string(), 300)
+                    crate::llm::truncate(
+                        &String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                        300
+                    )
                 )),
                 Err(error) => Probe::Failed(format!("couldn't run LM Studio's lms tool: {error}")),
             };
-            live.probes.lock().expect("live poisoned").insert(key, probe);
+            live.probes
+                .lock()
+                .expect("live poisoned")
+                .insert(key, probe);
             live.repaint();
         });
     }
@@ -432,25 +472,39 @@ impl Supervisor {
     where
         F: std::future::Future<Output = Result<String, String>> + Send + 'static,
     {
-        self.live.probes.lock().expect("live poisoned").insert(key.clone(), Probe::Pending);
+        self.live
+            .probes
+            .lock()
+            .expect("live poisoned")
+            .insert(key.clone(), Probe::Pending);
         let live = Arc::clone(&self.live);
         self.runtime.spawn(async move {
             let probe = match task.await {
                 Ok(text) => Probe::Text(text),
                 Err(error) => Probe::Failed(error),
             };
-            live.probes.lock().expect("live poisoned").insert(key, probe);
+            live.probes
+                .lock()
+                .expect("live poisoned")
+                .insert(key, probe);
             live.repaint();
         });
     }
 
     /// List the Windows voices into `live.probes[key]`.
     pub fn load_windows_voices(&self, key: String) {
-        self.live.probes.lock().expect("live poisoned").insert(key.clone(), Probe::Pending);
+        self.live
+            .probes
+            .lock()
+            .expect("live poisoned")
+            .insert(key.clone(), Probe::Pending);
         let live = Arc::clone(&self.live);
         self.runtime.spawn(async move {
             let voices = crate::runtime::speech::windows_voices().await;
-            live.probes.lock().expect("live poisoned").insert(key, Probe::Models(voices));
+            live.probes
+                .lock()
+                .expect("live poisoned")
+                .insert(key, Probe::Models(voices));
             live.repaint();
         });
     }

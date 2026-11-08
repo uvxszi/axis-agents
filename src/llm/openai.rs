@@ -101,7 +101,11 @@ pub fn build_body(endpoint: &Endpoint, request: &ChatRequest<'_>, quirks: Quirks
     // LM Studio caps thinking exactly — the only reliable "off" for models
     // that always think.
     if endpoint.kind == ProviderKind::LmStudio && !quirks.no_thinking_budget {
-        let budget = if request.reasoning == Some("none") { Some(0) } else { request.thinking_budget };
+        let budget = if request.reasoning == Some("none") {
+            Some(0)
+        } else {
+            request.thinking_budget
+        };
         if let Some(budget) = budget {
             body["thinking_budget_tokens"] = json!(budget);
         }
@@ -491,7 +495,9 @@ pub async fn model_info(endpoint: &Endpoint, model: &str) -> ModelInfo {
                     .get("models")
                     .and_then(Value::as_array)
                     .and_then(|models| {
-                        models.iter().find(|m| m.get("key").and_then(Value::as_str) == Some(model))
+                        models
+                            .iter()
+                            .find(|m| m.get("key").and_then(Value::as_str) == Some(model))
                     });
                 if let Some(entry) = entry {
                     let instance = entry.pointer("/loaded_instances/0/config");
@@ -504,10 +510,15 @@ pub async fn model_info(endpoint: &Endpoint, model: &str) -> ModelInfo {
                         .and_then(Value::as_u64)
                         .map(|n| n.max(1) as u32);
                     return ModelInfo {
-                        context_window: loaded
-                            .map(|n| n / parallel.unwrap_or(1))
-                            .or_else(|| entry.get("max_context_length").and_then(Value::as_u64).map(|n| n as u32)),
-                        vision: entry.pointer("/capabilities/vision").and_then(Value::as_bool),
+                        context_window: loaded.map(|n| n / parallel.unwrap_or(1)).or_else(|| {
+                            entry
+                                .get("max_context_length")
+                                .and_then(Value::as_u64)
+                                .map(|n| n as u32)
+                        }),
+                        vision: entry
+                            .pointer("/capabilities/vision")
+                            .and_then(Value::as_bool),
                         tools: entry
                             .pointer("/capabilities/trained_for_tool_use")
                             .and_then(Value::as_bool),
@@ -739,10 +750,19 @@ mod tests {
             "usage": { "prompt_tokens": 10, "completion_tokens": 3 } });
         let output = parse_response(&body, &mut |_| {}).unwrap();
         assert_eq!(output.content, "Hi!");
-        assert_eq!(super::super::text::split_think("plan the post</think>
+        assert_eq!(
+            super::super::text::split_think(
+                "plan the post</think>
 
-Yo, new release!").0, "Yo, new release!");
-        assert_eq!(super::super::text::split_think("just an answer").0, "just an answer");
+Yo, new release!"
+            )
+            .0,
+            "Yo, new release!"
+        );
+        assert_eq!(
+            super::super::text::split_think("just an answer").0,
+            "just an answer"
+        );
         assert_eq!(output.reasoning, "firsthmm");
         assert_eq!(output.usage.unwrap().prompt_tokens, 10);
     }
@@ -786,7 +806,8 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn live_vision_without_thinking() {
-        let model = std::env::var("AXIS_LIVE_MODEL").unwrap_or_else(|_| "qwen/qwen3.5-9b".to_owned());
+        let model =
+            std::env::var("AXIS_LIVE_MODEL").unwrap_or_else(|_| "qwen/qwen3.5-9b".to_owned());
         let endpoint = Endpoint::new(ProviderKind::LmStudio, "http://localhost:1234/v1", "", 120);
         let messages = [Msg::user_parts(vec![
             Part::Text("What color is this square? One word.".to_owned()),
@@ -806,7 +827,11 @@ mod live {
             };
             let started = std::time::Instant::now();
             let output = endpoint.chat(&request, &mut |_| {}).await.unwrap();
-            println!("stream={stream} {:.1}s content={:?}", started.elapsed().as_secs_f32(), output.content);
+            println!(
+                "stream={stream} {:.1}s content={:?}",
+                started.elapsed().as_secs_f32(),
+                output.content
+            );
             assert!(output.content.to_lowercase().contains("red"), "{output:?}");
         }
     }

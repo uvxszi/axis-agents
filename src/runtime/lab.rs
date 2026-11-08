@@ -29,7 +29,14 @@ const MAGI: u64 = 900;
 fn parse<T: serde::de::DeserializeOwned>(mut value: serde_json::Value) -> T {
     // Fill whatever required fields the model types want, trying a few
     // shapes per field.
-    let fillers = [json!(0), json!([]), json!(false), json!(""), json!({}), json!(null)];
+    let fillers = [
+        json!(0),
+        json!([]),
+        json!(false),
+        json!(""),
+        json!({}),
+        json!(null),
+    ];
     let mut last_field = String::new();
     let mut attempt = 0;
     for _ in 0..200 {
@@ -51,7 +58,10 @@ fn parse<T: serde::de::DeserializeOwned>(mut value: serde_json::Value) -> T {
                     attempt = 0;
                     last_field = field.clone();
                 }
-                let filler = fillers.get(attempt).cloned().unwrap_or_else(|| panic!("{field}: {msg}"));
+                let filler = fillers
+                    .get(attempt)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{field}: {msg}"));
                 value[&field] = filler;
             }
         }
@@ -59,7 +69,10 @@ fn parse<T: serde::de::DeserializeOwned>(mut value: serde_json::Value) -> T {
     panic!("couldn't build value");
 }
 
-fn fix<T: serde::de::DeserializeOwned>(value: serde_json::Value, fixes: &[(&str, serde_json::Value)]) -> T {
+fn fix<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+    fixes: &[(&str, serde_json::Value)],
+) -> T {
     let mut value = value;
     for (k, v) in fixes {
         value[*k] = v.clone();
@@ -77,17 +90,30 @@ fn core() -> Arc<AgentCore> {
         .expect("magi");
     let live = Arc::new(Live::default());
     let hive = Hive::new(live, config.settings.clone());
-    let memory = Arc::new(MemoryStore::load(std::env::temp_dir().join("axis-lab-memory.json")));
-    let http = Arc::new(Http::builder(Token::new("offline".to_owned())).build().expect("http"));
+    let memory = Arc::new(MemoryStore::load(
+        std::env::temp_dir().join("axis-lab-memory.json"),
+    ));
+    let http = Arc::new(
+        Http::builder(Token::new("offline".to_owned()))
+            .build()
+            .expect("http"),
+    );
     let core = AgentCore::new(profile, hive, memory, http, true);
     *core.model_info.write().unwrap() = ModelInfo {
         context_window: Some(16_384),
         ..Default::default()
     };
-    core.world.set_me(fix(json!({"id": MAGI.to_string(), "username": "Magi", "bot": true}), &[("discriminator", json!("0"))]));
+    core.world.set_me(fix(
+        json!({"id": MAGI.to_string(), "username": "Magi", "bot": true}),
+        &[("discriminator", json!("0"))],
+    ));
     let guild: Guild = fix(
         json!({"id": "1", "name": "Sue", "owner_id": UVX.to_string(), "roles": [{"id": "1", "name": "@everyone", "permissions": "3263553", "position": 0, "color": 0, "hoist": false, "managed": false, "mentionable": false, "flags": 0, "colors": {"primary_color": 0}}, {"id": "40", "name": "Moderator", "permissions": "0", "position": 3, "color": 0, "hoist": false, "managed": false, "mentionable": false, "flags": 0, "colors": {"primary_color": 0}}, {"id": "41", "name": "Gamer", "permissions": "0", "position": 1, "color": 0, "hoist": false, "managed": false, "mentionable": false, "flags": 0, "colors": {"primary_color": 0}}, {"id": "42", "name": "Artist", "permissions": "0", "position": 1, "color": 0, "hoist": false, "managed": false, "mentionable": false, "flags": 0, "colors": {"primary_color": 0}}], "emojis": []}),
-        &[("premium_progress_bar_enabled", json!(false)), ("preferred_locale", json!("en-US")), ("features", json!([]))],
+        &[
+            ("premium_progress_bar_enabled", json!(false)),
+            ("preferred_locale", json!("en-US")),
+            ("features", json!([])),
+        ],
     );
     core.world.insert_guild(&guild, |g| {
         for (id, name, kind) in [
@@ -102,7 +128,10 @@ fn core() -> Arc<AgentCore> {
             (33, "ticket-0001-uvx", 0),
             (34, "🎫ticket-support", 0),
         ] {
-            let channel = fix(json!({"id": id.to_string(), "type": kind, "name": name, "guild_id": "1"}), &[]);
+            let channel = fix(
+                json!({"id": id.to_string(), "type": kind, "name": name, "guild_id": "1"}),
+                &[],
+            );
             g.channels.insert(id, channel);
         }
         for (id, name, bot) in [(UVX, "uvx", false), (MAGI, "Magi", true)] {
@@ -149,9 +178,17 @@ fn history(core: &AgentCore, channel: u64, voice: bool) {
     let p = if voice { "🎙 (said in voice) " } else { "" };
     let lines = [
         (UVX, "uvx", "Yo, what's up?"),
-        (MAGI, "Magi", "Not much! Just hanging out here. What's on your mind?"),
+        (
+            MAGI,
+            "Magi",
+            "Not much! Just hanging out here. What's on your mind?",
+        ),
         (UVX, "uvx", "Hello."),
-        (MAGI, "Magi", "Not much! Just here and ready to help with whatever you need."),
+        (
+            MAGI,
+            "Magi",
+            "Not much! Just here and ready to help with whatever you need.",
+        ),
     ];
     core.hive.knowledge.channel_mut(channel, |archive| {
         for (i, (author, name, text)) in lines.iter().enumerate() {
@@ -162,7 +199,9 @@ fn history(core: &AgentCore, channel: u64, voice: bool) {
 
 fn requester(core: &AgentCore) -> Principal {
     core.world
-        .with_guild(GUILD, |g| Principal::for_member(g, g.members.get(&UVX).unwrap(), PrincipalKind::Human))
+        .with_guild(GUILD, |g| {
+            Principal::for_member(g, g.members.get(&UVX).unwrap(), PrincipalKind::Human)
+        })
         .unwrap()
 }
 
@@ -174,16 +213,27 @@ fn voice_job(core: &AgentCore, text: &str) -> Job {
         reason: Reason::Direct,
         requester: requester(core),
         task: None,
-        outlet: Outlet::Voice { guild_id: GUILD, speaker: UVX },
+        outlet: Outlet::Voice {
+            guild_id: GUILD,
+            speaker: UVX,
+        },
         question: Some(text.to_owned()),
     }
 }
 
 fn text_job(core: &AgentCore, text: &str) -> Job {
-    let author: User = fix(json!({"id": UVX.to_string(), "username": "uvx"}), &[("discriminator", json!("0"))]);
+    let author: User = fix(
+        json!({"id": UVX.to_string(), "username": "uvx"}),
+        &[("discriminator", json!("0"))],
+    );
     let message: Message = fix(
         json!({"id": "5000", "channel_id": GENERAL.to_string(), "guild_id": "1", "author": author, "content": text, "timestamp": "2026-11-01T08:00:00Z", "type": 0}),
-        &[("edited_timestamp", json!(null)), ("tts", json!(false)), ("mention_everyone", json!(false)), ("pinned", json!(false))],
+        &[
+            ("edited_timestamp", json!(null)),
+            ("tts", json!(false)),
+            ("mention_everyone", json!(false)),
+            ("pinned", json!(false)),
+        ],
     );
     core.hive.knowledge.channel_mut(GENERAL, |archive| {
         archive.messages.retain(|m| m.id != 5000);
@@ -205,10 +255,18 @@ async fn trial(core: &Arc<AgentCore>, label: &str, job: &Job, runs: usize) -> us
     let prompt = super::context::build(core, job, 1.0, &[], &[], &[]);
     let tools: Vec<&str> = prompt.tools.iter().map(|t| t.name.as_str()).collect();
     let system = prompt.messages[0].text().len();
-    println!("\n=== {label}: {} tools {tools:?}, system {system} chars", tools.len());
+    println!(
+        "\n=== {label}: {} tools {tools:?}, system {system} chars",
+        tools.len()
+    );
     let profile = core.profile();
     let reasoning = match job.outlet {
-        Outlet::Voice { .. } if job.question.as_deref().is_some_and(super::brain::looks_like_request) => {
+        Outlet::Voice { .. }
+            if job
+                .question
+                .as_deref()
+                .is_some_and(super::brain::looks_like_request) =>
+        {
             profile.model.thinking.replies.effort()
         }
         Outlet::Voice { .. } => profile.model.thinking.voice.effort(),
@@ -231,12 +289,23 @@ async fn trial(core: &Arc<AgentCore>, label: &str, job: &Job, runs: usize) -> us
         };
         match endpoint.chat(&request, &mut |_| {}).await {
             Ok(out) => {
-                let calls: Vec<String> = out.tool_calls.iter().map(|c| format!("{} {}", c.name, c.arguments)).collect();
+                let calls: Vec<String> = out
+                    .tool_calls
+                    .iter()
+                    .map(|c| format!("{} {}", c.name, c.arguments))
+                    .collect();
                 called += usize::from(!calls.is_empty());
                 println!(
                     "  {:.1}s {}",
                     started.elapsed().as_secs_f32(),
-                    if calls.is_empty() { format!("TEXT: {}", crate::llm::truncate(&out.content.replace('\n', " "), 140)) } else { format!("TOOLS: {calls:?}") }
+                    if calls.is_empty() {
+                        format!(
+                            "TEXT: {}",
+                            crate::llm::truncate(&out.content.replace('\n', " "), 140)
+                        )
+                    } else {
+                        format!("TOOLS: {calls:?}")
+                    }
                 );
             }
             Err(e) => println!("  error: {e}"),
@@ -252,7 +321,14 @@ async fn lab_voice_vs_text() {
     history(&core, GAMING_VC, true);
     history(&core, GENERAL, false);
     if std::env::var("LAB_DUMP").is_ok() {
-        let prompt = super::context::build(&core, &voice_job(&core, "Send a message in scratchpad 3 saying hi."), 1.0, &[], &[], &[]);
+        let prompt = super::context::build(
+            &core,
+            &voice_job(&core, "Send a message in scratchpad 3 saying hi."),
+            1.0,
+            &[],
+            &[],
+            &[],
+        );
         for m in &prompt.messages {
             println!("----- {:?}\n{}", m.role, m.text());
         }
@@ -264,8 +340,20 @@ async fn lab_voice_vs_text() {
     ];
     let mut score = (0, 0);
     for request in requests {
-        score.0 += trial(&core, &format!("VOICE  {request}"), &voice_job(&core, request), 3).await;
-        score.1 += trial(&core, &format!("TEXT   {request}"), &text_job(&core, request), 3).await;
+        score.0 += trial(
+            &core,
+            &format!("VOICE  {request}"),
+            &voice_job(&core, request),
+            3,
+        )
+        .await;
+        score.1 += trial(
+            &core,
+            &format!("TEXT   {request}"),
+            &text_job(&core, request),
+            3,
+        )
+        .await;
     }
     println!("\ntool calls — voice {}/9, text {}/9", score.0, score.1);
 }
@@ -298,20 +386,49 @@ fn fake_tool(name: &str, args: &str) -> String {
 fn messy_history(core: &AgentCore) {
     let lines = [
         (UVX, "uvx", "Yo, what's up?"),
-        (MAGI, "Magi", "Not much! Just hanging out here. What's on your mind?"),
+        (
+            MAGI,
+            "Magi",
+            "Not much! Just hanging out here. What's on your mind?",
+        ),
         (UVX, "uvx", "Yo, what is up?"),
-        (MAGI, "Magi", "Not much! Just hanging out here. What's on your mind?"),
-        (UVX, "uvx", "Send a message in CMD's channel, just whatever."),
-        (MAGI, "Magi", "Sending a random message to cmd's channel now!"),
+        (
+            MAGI,
+            "Magi",
+            "Not much! Just hanging out here. What's on your mind?",
+        ),
+        (
+            UVX,
+            "uvx",
+            "Send a message in CMD's channel, just whatever.",
+        ),
+        (
+            MAGI,
+            "Magi",
+            "Sending a random message to cmd's channel now!",
+        ),
         (UVX, "uvx", "No, you didn't. Fix it."),
-        (MAGI, "Magi", "Not much! Just here and ready to help with whatever you need."),
+        (
+            MAGI,
+            "Magi",
+            "Not much! Just here and ready to help with whatever you need.",
+        ),
         (UVX, "uvx", "Okay, dinner."),
-        (MAGI, "Magi", "Got it! Dinner time. I'll be here if you need anything else after."),
+        (
+            MAGI,
+            "Magi",
+            "Got it! Dinner time. I'll be here if you need anything else after.",
+        ),
     ];
     core.hive.knowledge.channel_mut(GAMING_VC, |archive| {
         archive.messages.clear();
         for (i, (author, name, text)) in lines.iter().enumerate() {
-            archive.push(line(2_000 + i as u64, *author, name, &format!("🎙 (said in voice) {text}")));
+            archive.push(line(
+                2_000 + i as u64,
+                *author,
+                name,
+                &format!("🎙 (said in voice) {text}"),
+            ));
         }
     });
 }
@@ -319,7 +436,9 @@ fn messy_history(core: &AgentCore) {
 /// One whole voice turn: rounds of tool calls with fake results, the same
 /// follow-through checks as the brain, then what would be spoken.
 async fn full_turn(core: &Arc<AgentCore>, heard: &str) -> (Vec<String>, String, Option<String>) {
-    use super::brain::{asks_for_details, claims_action, looks_like_request, offers_instead_of_doing};
+    use super::brain::{
+        asks_for_details, claims_action, looks_like_request, offers_instead_of_doing,
+    };
     use crate::llm::Msg;
     let job = voice_job(core, heard);
     let prompt = super::context::build(core, &job, 1.0, &[], &[], &[]);
@@ -354,7 +473,10 @@ async fn full_turn(core: &Arc<AgentCore>, heard: &str) -> (Vec<String>, String, 
         };
         if out.tool_calls.is_empty() {
             let content = out.content.clone();
-            if !summarized && used.iter().any(|u| u != "<nudged>") && content.trim().trim_start_matches("CHAT:").trim().is_empty() {
+            if !summarized
+                && used.iter().any(|u| u != "<nudged>")
+                && content.trim().trim_start_matches("CHAT:").trim().is_empty()
+            {
                 summarized = true;
                 used.push("<summary>".to_owned());
                 convo.push(Msg::assistant(content));
@@ -380,10 +502,16 @@ async fn full_turn(core: &Arc<AgentCore>, heard: &str) -> (Vec<String>, String, 
             let (spoken, chat) = super::voice::split_chat(&content);
             return (used, crate::runtime::speech::speakable(&spoken), chat);
         }
-        convo.push(Msg::assistant_with_tools(out.content.clone(), out.tool_calls.clone()));
+        convo.push(Msg::assistant_with_tools(
+            out.content.clone(),
+            out.tool_calls.clone(),
+        ));
         for call in &out.tool_calls {
             used.push(format!("{} {}", call.name, call.arguments));
-            convo.push(Msg::tool_result(call.id.clone(), fake_tool(&call.name, &call.arguments.to_string())));
+            convo.push(Msg::tool_result(
+                call.id.clone(),
+                fake_tool(&call.name, &call.arguments.to_string()),
+            ));
         }
     }
     (used, "(ran out of rounds)".to_owned(), None)
@@ -410,7 +538,8 @@ async fn lab_messy_voice() {
             println!(
                 "\n[{heard}] run {run} — {:.1}s\n  tools: {tools:?}\n  says: {spoken}\n  chat: {}",
                 started.elapsed().as_secs_f32(),
-                chat.map(|c| crate::llm::truncate(&c.replace('\n', " | "), 160)).unwrap_or_default()
+                chat.map(|c| crate::llm::truncate(&c.replace('\n', " | "), 160))
+                    .unwrap_or_default()
             );
         }
     }
@@ -433,7 +562,13 @@ async fn lab_new_powers() {
         "move scratchpad3 to the top",
     ];
     for request in requests {
-        trial(&core, &format!("TEXT   {request}"), &text_job(&core, request), 2).await;
+        trial(
+            &core,
+            &format!("TEXT   {request}"),
+            &text_job(&core, request),
+            2,
+        )
+        .await;
     }
 }
 
@@ -476,10 +611,14 @@ async fn lab_tickets() {
     ] {
         trial(&core, &format!("TICKET {request}"), &in_ticket(request), 2).await;
     }
-    for request in [
-        "make a role menu for Gamer and Artist",
-    ] {
-        trial(&core, &format!("TEXT   {request}"), &text_job(&core, request), 2).await;
+    for request in ["make a role menu for Gamer and Artist"] {
+        trial(
+            &core,
+            &format!("TEXT   {request}"),
+            &text_job(&core, request),
+            2,
+        )
+        .await;
     }
 }
 
@@ -488,7 +627,10 @@ async fn lab_tickets() {
 async fn lab_rank_card_preview() {
     let out = std::path::PathBuf::from(std::env::var("LAB_OUT").unwrap_or_else(|_| ".".into()));
     for style in ["classic", "minimal", "bold"] {
-        let card = crate::memory::RankCard { style: style.into(), ..Default::default() };
+        let card = crate::memory::RankCard {
+            style: style.into(),
+            ..Default::default()
+        };
         let data = crate::tools::rankcard::RankCardData {
             name: "uvx".into(),
             avatar_url: Some("https://cdn.discordapp.com/embed/avatars/0.png".into()),
@@ -518,7 +660,13 @@ async fn lab_levels_and_settings() {
         "show me your leveling settings",
         "give people the Gamer role at level 10",
     ] {
-        trial(&core, &format!("TEXT   {request}"), &text_job(&core, request), 2).await;
+        trial(
+            &core,
+            &format!("TEXT   {request}"),
+            &text_job(&core, request),
+            2,
+        )
+        .await;
     }
 }
 
@@ -527,35 +675,76 @@ async fn lab_levels_and_settings() {
 async fn lab_translation() {
     let core = core();
     for (text, targets) in [
-        ("hola, ¿alguien sabe cómo arreglar el error de la versión 0.0.6?", vec!["English".to_owned()]),
-        ("yeah just reinstall it lol, worked for me", vec!["Spanish".to_owned()]),
-        ("c'est vraiment nul ce bug 😭", vec!["English".to_owned(), "Spanish".to_owned()]),
+        (
+            "hola, ¿alguien sabe cómo arreglar el error de la versión 0.0.6?",
+            vec!["English".to_owned()],
+        ),
+        (
+            "yeah just reinstall it lol, worked for me",
+            vec!["Spanish".to_owned()],
+        ),
+        (
+            "c'est vraiment nul ce bug 😭",
+            vec!["English".to_owned(), "Spanish".to_owned()],
+        ),
         ("thanks!", vec!["English".to_owned()]),
     ] {
         let started = std::time::Instant::now();
         let result = super::translate::translate_text(&core, text, &targets).await;
-        println!("[{:.1}s] {text}
-  → {result:?}", started.elapsed().as_secs_f32());
+        println!(
+            "[{:.1}s] {text}
+  → {result:?}",
+            started.elapsed().as_secs_f32()
+        );
     }
     // The agent deciding to translate, and being stopped.
     let pablo: u64 = 501;
     core.world.insert_guild(
-        &fix(json!({"id": "2", "name": "x", "owner_id": "1", "roles": [], "emojis": []}), &[("premium_progress_bar_enabled", json!(false)), ("preferred_locale", json!("en-US")), ("features", json!([]))]),
+        &fix(
+            json!({"id": "2", "name": "x", "owner_id": "1", "roles": [], "emojis": []}),
+            &[
+                ("premium_progress_bar_enabled", json!(false)),
+                ("preferred_locale", json!("en-US")),
+                ("features", json!([])),
+            ],
+        ),
         |_| {},
     );
     core.world.with_guild(GUILD, |_| ());
     core.hive.knowledge.channel_mut(GENERAL, |a| {
         a.messages.clear();
-        a.push(line(6_000, UVX, "uvx", "anyone know how to fix the crash on startup?"));
-        a.push(line(6_001, pablo, "Pablo", "no entiendo, ¿qué dices? yo también tengo un problema con el juego"));
+        a.push(line(
+            6_000,
+            UVX,
+            "uvx",
+            "anyone know how to fix the crash on startup?",
+        ));
+        a.push(line(
+            6_001,
+            pablo,
+            "Pablo",
+            "no entiendo, ¿qué dices? yo también tengo un problema con el juego",
+        ));
         a.push(line(6_002, UVX, "uvx", "what? i don't understand"));
     });
     let mut job = text_job(&core, "what? i don't understand");
     job.reason = Reason::Ambient;
     job.question = Some("uvx is writing in English and Pablo in Spanish — they may not understand each other. If translating would help them, call start_translating for both (users: \"uvx, Pablo\", no fixed language) and tell them in one short line in both languages that you'll translate (and that they can ask you to stop). If they clearly understand each other, reply exactly NO_REPLY.".into());
     trial(&core, "AMBIENT mixed languages", &job, 2).await;
-    trial(&core, "TEXT   translate what Pablo says into english", &text_job(&core, "magi can you translate what pablo says into english"), 2).await;
-    trial(&core, "TEXT   stop translating", &text_job(&core, "ok you can stop translating now"), 2).await;
+    trial(
+        &core,
+        "TEXT   translate what Pablo says into english",
+        &text_job(&core, "magi can you translate what pablo says into english"),
+        2,
+    )
+    .await;
+    trial(
+        &core,
+        "TEXT   stop translating",
+        &text_job(&core, "ok you can stop translating now"),
+        2,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -572,23 +761,55 @@ async fn lab_rank_card_designs() {
         total_xp: 132,
     };
     let designs = [
-        ("bw-centered", crate::memory::RankCard {
-            layout: "centered".into(), style: "minimal".into(), background: "#000000".into(), accent: "#ffffff".into(),
-            text: "#ffffff".into(), muted: "#9a9a9a".into(), font: "poppins".into(), font_weight: "bold".into(),
-            total_position: "above_bar".into(), corner_radius: 28, ..Default::default()
-        }),
-        ("glass-gradient", crate::memory::RankCard {
-            style: "glass".into(), background: "#3b0764".into(), background2: "#0f172a".into(), gradient: "diagonal".into(),
-            accent: "#c084fc".into(), font: "montserrat".into(), avatar_shape: "rounded".into(), total_position: "with_xp".into(),
-            corner_radius: 20, ..Default::default()
-        }),
-        ("compact-mono", crate::memory::RankCard {
-            layout: "compact".into(), style: "bold".into(), accent: "#22c55e".into(), font: "press start 2p".into(),
-            text_scale: 0.7, bar_shape: "square".into(), avatar_shape: "square".into(), ..Default::default()
-        }),
+        (
+            "bw-centered",
+            crate::memory::RankCard {
+                layout: "centered".into(),
+                style: "minimal".into(),
+                background: "#000000".into(),
+                accent: "#ffffff".into(),
+                text: "#ffffff".into(),
+                muted: "#9a9a9a".into(),
+                font: "poppins".into(),
+                font_weight: "bold".into(),
+                total_position: "above_bar".into(),
+                corner_radius: 28,
+                ..Default::default()
+            },
+        ),
+        (
+            "glass-gradient",
+            crate::memory::RankCard {
+                style: "glass".into(),
+                background: "#3b0764".into(),
+                background2: "#0f172a".into(),
+                gradient: "diagonal".into(),
+                accent: "#c084fc".into(),
+                font: "montserrat".into(),
+                avatar_shape: "rounded".into(),
+                total_position: "with_xp".into(),
+                corner_radius: 20,
+                ..Default::default()
+            },
+        ),
+        (
+            "compact-mono",
+            crate::memory::RankCard {
+                layout: "compact".into(),
+                style: "bold".into(),
+                accent: "#22c55e".into(),
+                font: "press start 2p".into(),
+                text_scale: 0.7,
+                bar_shape: "square".into(),
+                avatar_shape: "square".into(),
+                ..Default::default()
+            },
+        ),
     ];
     for (name, card) in designs {
-        let png = crate::tools::rankcard::render(&card, &data()).await.unwrap();
+        let png = crate::tools::rankcard::render(&card, &data())
+            .await
+            .unwrap();
         std::fs::write(out.join(format!("card-{name}.png")), png).unwrap();
     }
 }
@@ -598,10 +819,14 @@ async fn lab_rank_card_designs() {
 async fn lab_card_requests() {
     let core = core();
     history(&core, GENERAL, false);
-    for request in [
-        "can you put the xp total higher and make it brighter",
-    ] {
-        trial(&core, &format!("TEXT   {request}"), &text_job(&core, request), 2).await;
+    for request in ["can you put the xp total higher and make it brighter"] {
+        trial(
+            &core,
+            &format!("TEXT   {request}"),
+            &text_job(&core, request),
+            2,
+        )
+        .await;
     }
 }
 
@@ -609,21 +834,40 @@ async fn lab_card_requests() {
 #[ignore]
 async fn lab_agentic() {
     let core = core();
-    for request in std::env::var("LAB_REQUESTS").unwrap_or_default().split("||").filter(|r| !r.trim().is_empty()) {
+    for request in std::env::var("LAB_REQUESTS")
+        .unwrap_or_default()
+        .split("||")
+        .filter(|r| !r.trim().is_empty())
+    {
         history(&core, GENERAL, false);
         let started = std::time::Instant::now();
-        let (outcome, steps) = super::brain::think_only(&core, &text_job(&core, request.trim())).await;
-        println!("\n=== {request} ({:.0}s, {} tools)", started.elapsed().as_secs_f32(), outcome.tools_used);
+        let (outcome, steps) =
+            super::brain::think_only(&core, &text_job(&core, request.trim())).await;
+        println!(
+            "\n=== {request} ({:.0}s, {} tools)",
+            started.elapsed().as_secs_f32(),
+            outcome.tools_used
+        );
         for step in steps {
             println!("  · {step}");
         }
-        println!("  files: {:?}", outcome.files.iter().map(|(n, b)| format!("{n} ({} bytes)", b.len())).collect::<Vec<_>>());
+        println!(
+            "  files: {:?}",
+            outcome
+                .files
+                .iter()
+                .map(|(n, b)| format!("{n} ({} bytes)", b.len()))
+                .collect::<Vec<_>>()
+        );
         if let Ok(dir) = std::env::var("LAB_OUT") {
             for (name, bytes) in &outcome.files {
                 let _ = std::fs::write(std::path::Path::new(&dir).join(name), bytes);
             }
         }
-        println!("  reply: {}", crate::llm::truncate(&outcome.text.unwrap_or_default().replace('\n', " / "), 500));
+        println!(
+            "  reply: {}",
+            crate::llm::truncate(&outcome.text.unwrap_or_default().replace('\n', " / "), 500)
+        );
     }
 }
 
@@ -668,7 +912,13 @@ async fn lab_people_and_logs() {
         "who deleted messages in general?",
         "write me 40 fun facts about space, all at once",
     ] {
-        trial(&core, &format!("TEXT   {request}"), &text_job(&core, request), 2).await;
+        trial(
+            &core,
+            &format!("TEXT   {request}"),
+            &text_job(&core, request),
+            2,
+        )
+        .await;
     }
 }
 
@@ -676,18 +926,43 @@ async fn lab_people_and_logs() {
 #[ignore]
 fn lab_avatar_sheet() {
     use image::{DynamicImage, Rgba, RgbaImage};
-    let colors = [[200, 60, 60], [60, 160, 90], [70, 90, 220], [220, 180, 40], [150, 70, 200]];
+    let colors = [
+        [200, 60, 60],
+        [60, 160, 90],
+        [70, 90, 220],
+        [220, 180, 40],
+        [150, 70, 200],
+    ];
     let pictures: Vec<Option<DynamicImage>> = (0..7)
-        .map(|i| (i != 3).then(|| { let c = colors[i % 5]; DynamicImage::ImageRgba8(RgbaImage::from_pixel(256, 256, Rgba([c[0], c[1], c[2], 255]))) }))
+        .map(|i| {
+            (i != 3).then(|| {
+                let c = colors[i % 5];
+                DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+                    256,
+                    256,
+                    Rgba([c[0], c[1], c[2], 255]),
+                ))
+            })
+        })
         .collect();
-    let entries: Vec<(String, String)> = ["Fn", "Susie the Great", "Magi", "a really long display name here", "Bob", "Zed", "Q"]
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.to_string(), format!("@user_{i}")))
-        .collect();
+    let entries: Vec<(String, String)> = [
+        "Fn",
+        "Susie the Great",
+        "Magi",
+        "a really long display name here",
+        "Bob",
+        "Zed",
+        "Q",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, n)| (n.to_string(), format!("@user_{i}")))
+    .collect();
     let sheet = crate::tools::images::avatar_sheet(&pictures, &entries);
     let out = std::env::var("LAB_OUT").unwrap_or_else(|_| ".".into());
-    sheet.save(std::path::Path::new(&out).join("avatar_sheet.png")).unwrap();
+    sheet
+        .save(std::path::Path::new(&out).join("avatar_sheet.png"))
+        .unwrap();
 }
 
 #[tokio::test]
@@ -697,24 +972,43 @@ async fn lab_no_chat_rule() {
     core.hive.knowledge.guild_mut(GUILD, |k| k.no_chat.clear());
     // A ticket channel inside the "Ticket Support" category.
     core.world.upsert_channel(&fix(json!({"id": "33", "type": 0, "name": "ticket-0001-uvx", "guild_id": "1", "parent_id": "31"}), &[]));
-    let rule = |channel_id: u64, agent: Option<String>| crate::memory::NoChatRule { channel_id, agent_id: agent, setter_name: "uvx".into(), setter_rank: 100, ..Default::default() };
+    let rule = |channel_id: u64, agent: Option<String>| crate::memory::NoChatRule {
+        channel_id,
+        agent_id: agent,
+        setter_name: "uvx".into(),
+        setter_rank: 100,
+        ..Default::default()
+    };
     core.hive.knowledge.guild_mut(GUILD, |k| {
         k.no_chat.push(rule(SCRATCHPAD, Some(core.id.clone())));
         k.no_chat.push(rule(31, None));
         k.no_chat.push(rule(CMD, Some("someone-else".into())));
     });
     assert!(core.barred(GUILD, SCRATCHPAD).is_some());
-    assert!(core.barred(GUILD, 33).is_some(), "a category covers its channels");
+    assert!(
+        core.barred(GUILD, 33).is_some(),
+        "a category covers its channels"
+    );
     assert!(core.barred(GUILD, GENERAL).is_none());
     assert!(core.barred(GUILD, CMD).is_none(), "another agent's rule");
     assert!(core.barred_anywhere(SCRATCHPAD).is_some());
     assert!(core.barred(GUILD, GENERAL_VC).is_none());
     assert!(super::agent::asks_to_lift("magi you can chat here again"));
-    assert_eq!(super::brain::named_channels(&core, GUILD, "don't ever talk in the ticket support category"), vec!["Ticket Support".to_owned()]);
+    assert_eq!(
+        super::brain::named_channels(
+            &core,
+            GUILD,
+            "don't ever talk in the ticket support category"
+        ),
+        vec!["Ticket Support".to_owned()]
+    );
     let mut both = super::brain::named_channels(&core, GUILD, "never chat in scratchpad3 or c-md");
     both.sort();
     assert_eq!(both, vec!["c-md".to_owned(), "scratchpad3".to_owned()]);
-    assert_eq!(super::brain::named_channels(&core, GUILD, "dont post in general"), vec!["general".to_owned()]);
+    assert_eq!(
+        super::brain::named_channels(&core, GUILD, "dont post in general"),
+        vec!["general".to_owned()]
+    );
     assert!(!super::agent::asks_to_lift("magi what's the weather"));
     core.hive.knowledge.guild_mut(GUILD, |k| k.no_chat.clear());
 
@@ -728,20 +1022,33 @@ async fn lab_no_chat_rule() {
         "be quiet for 10 minutes",
     ] {
         if request.contains("again") {
-            core.hive.knowledge.guild_mut(GUILD, |k| k.no_chat.push(rule(SCRATCHPAD, Some(core.id.clone()))));
+            core.hive.knowledge.guild_mut(GUILD, |k| {
+                k.no_chat.push(rule(SCRATCHPAD, Some(core.id.clone())))
+            });
         }
         for _ in 0..2 {
-            core.hive.knowledge.guild_mut(GUILD, |k| k.no_chat.retain(|r| r.channel_id == SCRATCHPAD && request.contains("again")));
+            core.hive.knowledge.guild_mut(GUILD, |k| {
+                k.no_chat
+                    .retain(|r| r.channel_id == SCRATCHPAD && request.contains("again"))
+            });
             if request.contains("again") && core.barred(GUILD, SCRATCHPAD).is_none() {
-                core.hive.knowledge.guild_mut(GUILD, |k| k.no_chat.push(rule(SCRATCHPAD, Some(core.id.clone()))));
+                core.hive.knowledge.guild_mut(GUILD, |k| {
+                    k.no_chat.push(rule(SCRATCHPAD, Some(core.id.clone())))
+                });
             }
             let (outcome, steps) = super::brain::think_only(&core, &text_job(&core, request)).await;
-            let rules: Vec<u64> = core.hive.knowledge.guild(GUILD, |k| k.no_chat.iter().map(|r| r.channel_id).collect());
-            println!("
+            let rules: Vec<u64> = core
+                .hive
+                .knowledge
+                .guild(GUILD, |k| k.no_chat.iter().map(|r| r.channel_id).collect());
+            println!(
+                "
 === {request}
   steps: {steps:?}
   rules now: {rules:?}
-  reply: {}", outcome.text.unwrap_or_default());
+  reply: {}",
+                outcome.text.unwrap_or_default()
+            );
         }
     }
 }
@@ -750,14 +1057,17 @@ async fn lab_no_chat_rule() {
 #[ignore]
 async fn lab_cut_off_continues() {
     let core = core();
-    let mut profile = core.profile();
+    let profile = core.profile();
     core.set_profile(profile);
     history(&core, GENERAL, false);
     let request = "compare the main CPU architectures (x86, ARM, RISC-V): history, how each works, strengths, weaknesses, who uses them, and where each is heading. be thorough, several sections";
     let (outcome, steps) = super::brain::think_only(&core, &text_job(&core, request)).await;
     println!("error: {:?}", outcome.error);
     let text = outcome.text.unwrap_or_default();
-    println!("steps: {steps:?}\nlength: {} chars\n---\n{text}\n---", text.len());
+    println!(
+        "steps: {steps:?}\nlength: {} chars\n---\n{text}\n---",
+        text.len()
+    );
 }
 
 #[tokio::test]
@@ -783,13 +1093,33 @@ async fn lab_commands_and_schedules() {
         }
         history(&core, GENERAL, false);
         let (outcome, steps) = super::brain::think_only(&core, &text_job(&core, request)).await;
-        println!("\n=== {request}\n  steps: {steps:?}\n  reply: {}", crate::llm::truncate(&outcome.text.unwrap_or_default().replace('\n', " / "), 220));
+        println!(
+            "\n=== {request}\n  steps: {steps:?}\n  reply: {}",
+            crate::llm::truncate(&outcome.text.unwrap_or_default().replace('\n', " / "), 220)
+        );
     }
-    let (commands, off, tasks) = core.hive.knowledge.guild(GUILD, |k| (k.commands.clone(), k.disabled_commands.clone(), k.tasks.clone()));
-    println!("\ncommands: {:?}", commands.iter().map(|c| format!("/{} [{:?}] {}", c.name, c.mode, c.text)).collect::<Vec<_>>());
+    let (commands, off, tasks) = core.hive.knowledge.guild(GUILD, |k| {
+        (
+            k.commands.clone(),
+            k.disabled_commands.clone(),
+            k.tasks.clone(),
+        )
+    });
+    println!(
+        "\ncommands: {:?}",
+        commands
+            .iter()
+            .map(|c| format!("/{} [{:?}] {}", c.name, c.mode, c.text))
+            .collect::<Vec<_>>()
+    );
     println!("off here: {off:?}");
     for t in tasks {
-        println!("task #{}: {} — {}", t.id, t.trigger.describe("general"), t.instruction);
+        println!(
+            "task #{}: {} — {}",
+            t.id,
+            t.trigger.describe("general"),
+            t.instruction
+        );
     }
 }
 
@@ -804,30 +1134,63 @@ async fn lab_github_watch() {
     ] {
         history(&core, GENERAL, false);
         let (outcome, steps) = super::brain::think_only(&core, &text_job(&core, request)).await;
-        println!("\n=== {request}\n  steps: {steps:?}\n  reply: {}", crate::llm::truncate(&outcome.text.unwrap_or_default().replace('\n', " / "), 400));
+        println!(
+            "\n=== {request}\n  steps: {steps:?}\n  reply: {}",
+            crate::llm::truncate(&outcome.text.unwrap_or_default().replace('\n', " / "), 400)
+        );
     }
-    let task = core.hive.knowledge.guild(GUILD, |k| k.tasks.first().cloned()).expect("a watch task");
-    println!("\ntask: {} — {}\n  trigger: {:?}", task.trigger.describe("general"), task.instruction, task.trigger);
+    let task = core
+        .hive
+        .knowledge
+        .guild(GUILD, |k| k.tasks.first().cloned())
+        .expect("a watch task");
+    println!(
+        "\ntask: {} — {}\n  trigger: {:?}",
+        task.trigger.describe("general"),
+        task.instruction,
+        task.trigger
+    );
 
     // A release comes out: pretend we last saw the one before the newest.
-    let crate::memory::TaskTrigger::GitHub { repo, .. } = &task.trigger else { panic!("not a github task") };
-    let super::github::Fetched::Body(serde_json::Value::Array(list), _) = super::github::api(&format!("/repos/{repo}/releases?per_page=3"), "", "").await.expect("releases") else { panic!() };
+    let crate::memory::TaskTrigger::GitHub { repo, .. } = &task.trigger else {
+        panic!("not a github task")
+    };
+    let super::github::Fetched::Body(serde_json::Value::Array(list), _) =
+        super::github::api(&format!("/repos/{repo}/releases?per_page=3"), "", "")
+            .await
+            .expect("releases")
+    else {
+        panic!()
+    };
     let second = list[1]["id"].as_u64().unwrap();
-    let inputs: Vec<String> = super::github::new_releases(&list, second, repo).into_iter().map(|(_, t)| t).collect();
+    let inputs: Vec<String> = super::github::new_releases(&list, second, repo)
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect();
     let mut job = text_job(&core, "");
     job.reason = super::brain::Reason::Task;
     job.triggers.clear();
     job.task = Some(task.clone());
     job.question = inputs.first().cloned();
     let (outcome, steps) = super::brain::think_only(&core, &job).await;
-    let post = super::github::finish_post(&outcome.text.unwrap_or_default(), job.question.as_deref(), &task.instruction);
+    let post = super::github::finish_post(
+        &outcome.text.unwrap_or_default(),
+        job.question.as_deref(),
+        &task.instruction,
+    );
     println!("\n=== new release arrives\n  steps: {steps:?}\n  post (as it goes out):\n{post}");
 
     history(&core, GENERAL, false);
     let request = "magi stop watching the sue repo";
     let (outcome, steps) = super::brain::think_only(&core, &text_job(&core, request)).await;
-    println!("\n=== {request}\n  steps: {steps:?}\n  reply: {}", outcome.text.unwrap_or_default().replace('\n', " / "));
-    println!("tasks left: {}", core.hive.knowledge.guild(GUILD, |k| k.tasks.len()));
+    println!(
+        "\n=== {request}\n  steps: {steps:?}\n  reply: {}",
+        outcome.text.unwrap_or_default().replace('\n', " / ")
+    );
+    println!(
+        "tasks left: {}",
+        core.hive.knowledge.guild(GUILD, |k| k.tasks.len())
+    );
 }
 
 #[tokio::test]
@@ -840,18 +1203,32 @@ async fn lab_cant_post_there() {
         json!({"id": "40", "type": 0, "name": "announcements", "guild_id": "1", "permission_overwrites": [{"id": "1", "type": 0, "allow": "0", "deny": "2048"}]}),
         &[],
     ));
-    println!("can't post in #announcements: {:?}", core.cant_post(GUILD, 40));
-    println!("can't post in #general: {:?}", core.cant_post(GUILD, GENERAL));
-    println!("if DMs are closed, tell uvx in: {:?}", super::tasks::fallback_channels(&core, GUILD, UVX, 40));
+    println!(
+        "can't post in #announcements: {:?}",
+        core.cant_post(GUILD, 40)
+    );
+    println!(
+        "can't post in #general: {:?}",
+        core.cant_post(GUILD, GENERAL)
+    );
+    println!(
+        "if DMs are closed, tell uvx in: {:?}",
+        super::tasks::fallback_channels(&core, GUILD, UVX, 40)
+    );
     assert!(core.cant_post(GUILD, 40).is_some());
     assert!(core.cant_post(GUILD, GENERAL).is_none());
     history(&core, GENERAL, false);
     let request = "magi watch https://github.com/MagiGun/sue/releases and post every new release in #announcements with its highlights";
     let (outcome, steps) = super::brain::think_only(&core, &text_job(&core, request)).await;
-    println!("\n=== {request}\n  steps: {steps:?}\n  reply: {}", outcome.text.unwrap_or_default().replace('\n', " / "));
-    println!("tasks made: {}", core.hive.knowledge.guild(GUILD, |k| k.tasks.len()));
+    println!(
+        "\n=== {request}\n  steps: {steps:?}\n  reply: {}",
+        outcome.text.unwrap_or_default().replace('\n', " / ")
+    );
+    println!(
+        "tasks made: {}",
+        core.hive.knowledge.guild(GUILD, |k| k.tasks.len())
+    );
 }
-
 
 #[tokio::test]
 #[ignore]
@@ -867,24 +1244,50 @@ async fn lab_clone_and_delete_loop() {
         let core2 = core.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(25)).await;
-            let author: User = fix(json!({"id": UVX.to_string(), "username": "uvx"}), &[("discriminator", json!("0"))]);
+            let author: User = fix(
+                json!({"id": UVX.to_string(), "username": "uvx"}),
+                &[("discriminator", json!("0"))],
+            );
             let message: Message = fix(
                 json!({"id": "5001", "channel_id": GENERAL.to_string(), "guild_id": "1", "author": author, "content": "no, first do all the clones first", "timestamp": "2026-11-01T08:00:30Z", "type": 0}),
-                &[("edited_timestamp", json!(null)), ("tts", json!(false)), ("mention_everyone", json!(false)), ("pinned", json!(false))],
+                &[
+                    ("edited_timestamp", json!(null)),
+                    ("tts", json!(false)),
+                    ("mention_everyone", json!(false)),
+                    ("pinned", json!(false)),
+                ],
             );
-            core2.steering.lock().unwrap().entry(GENERAL).or_default().push((message, super::brain::Reason::Direct));
+            core2
+                .steering
+                .lock()
+                .unwrap()
+                .entry(GENERAL)
+                .or_default()
+                .push((message, super::brain::Reason::Direct));
             println!("  (sent: no, first do all the clones first)");
         });
     }
     let started = std::time::Instant::now();
     let (outcome, steps) = super::brain::think_only(&core, &job).await;
-    println!("\n=== {request} ({:.0}s)\n  steps: {steps:?}", started.elapsed().as_secs_f32());
+    println!(
+        "\n=== {request} ({:.0}s)\n  steps: {steps:?}",
+        started.elapsed().as_secs_f32()
+    );
     let log = crate::tools::lab_fake::LOG.lock().unwrap().clone();
     for (at, what) in &log {
-        println!("  {:>5.1}s  {what}", at.duration_since(started).as_secs_f32());
+        println!(
+            "  {:>5.1}s  {what}",
+            at.duration_since(started).as_secs_f32()
+        );
     }
-    println!("  copies left: {:?}", crate::tools::lab_fake::CHANNELS.lock().unwrap());
-    println!("  reply: {}", outcome.text.unwrap_or_default().replace('\n', " / "));
+    println!(
+        "  copies left: {:?}",
+        crate::tools::lab_fake::CHANNELS.lock().unwrap()
+    );
+    println!(
+        "  reply: {}",
+        outcome.text.unwrap_or_default().replace('\n', " / ")
+    );
 }
 
 #[tokio::test]
@@ -892,24 +1295,53 @@ async fn lab_clone_and_delete_loop() {
 async fn lab_not_allowed_vs_no_tool() {
     let core = core();
     const MISAKA: u64 = 777;
-    let misaka: User = fix(json!({"id": MISAKA.to_string(), "username": "misaka"}), &[("discriminator", json!("0"))]);
+    let misaka: User = fix(
+        json!({"id": MISAKA.to_string(), "username": "misaka"}),
+        &[("discriminator", json!("0"))],
+    );
     core.world.upsert_author(GUILD, &misaka, None);
     core.hive.knowledge.channel_mut(GENERAL, |a| {
         a.messages.clear();
-        a.push(line(4990, UVX, "uvx", "magi duplicate this channel 4 times"));
-        a.push(line(4991, MAGI, "Magi", "Done — made 4 copies: general-copy-1, general-copy-2, general-copy-3, general-copy-4."));
+        a.push(line(
+            4990,
+            UVX,
+            "uvx",
+            "magi duplicate this channel 4 times",
+        ));
+        a.push(line(
+            4991,
+            MAGI,
+            "Magi",
+            "Done — made 4 copies: general-copy-1, general-copy-2, general-copy-3, general-copy-4.",
+        ));
     });
-    for (who, name, text) in [(MISAKA, "misaka", "delete them magi"), (UVX, "uvx", "do what misaka said magi")] {
+    for (who, name, text) in [
+        (MISAKA, "misaka", "delete them magi"),
+        (UVX, "uvx", "do what misaka said magi"),
+    ] {
         let mut job = text_job(&core, text);
-        let author: User = fix(json!({"id": who.to_string(), "username": name}), &[("discriminator", json!("0"))]);
+        let author: User = fix(
+            json!({"id": who.to_string(), "username": name}),
+            &[("discriminator", json!("0"))],
+        );
         job.triggers[0].author = author.clone();
         job.requester = core.principal_for(Some(GUILD), &author);
         core.hive.knowledge.channel_mut(GENERAL, |a| {
             a.messages.retain(|m| m.id != 5000);
-            a.push(line(if who == MISAKA { 4995 } else { 5000 }, who, name, text));
+            a.push(line(
+                if who == MISAKA { 4995 } else { 5000 },
+                who,
+                name,
+                text,
+            ));
         });
         let (outcome, steps) = super::brain::think_only(&core, &job).await;
-        println!("\n=== {name}: {text}\n  steps: {steps:?}\n  reply: {}", outcome.text.unwrap_or_default().replace('\n', " / "));
-        core.hive.knowledge.channel_mut(GENERAL, |a| a.push(line(5100 + who % 7, MAGI, "Magi", "(answered)")));
+        println!(
+            "\n=== {name}: {text}\n  steps: {steps:?}\n  reply: {}",
+            outcome.text.unwrap_or_default().replace('\n', " / ")
+        );
+        core.hive.knowledge.channel_mut(GENERAL, |a| {
+            a.push(line(5100 + who % 7, MAGI, "Magi", "(answered)"))
+        });
     }
 }

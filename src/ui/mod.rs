@@ -452,7 +452,8 @@ fn nav_item(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let patches: Vec<_> = std::mem::take(&mut *self.sup.live.profile_patches.lock().expect("live poisoned"));
+        let patches: Vec<_> =
+            std::mem::take(&mut *self.sup.live.profile_patches.lock().expect("live poisoned"));
         for (id, patch) in patches {
             self.edit_agent(&id, |_, profile| patch(profile));
         }

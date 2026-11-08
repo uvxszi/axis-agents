@@ -170,7 +170,10 @@ pub const PIPER_VOICES: [(&str, &str); 10] = [
     ("en_US-kristin-medium", "Kristin — US, female"),
     ("en_GB-alan-medium", "Alan — British, male"),
     ("en_GB-jenny_dioco-medium", "Jenny — British, female"),
-    ("en_GB-northern_english_male-medium", "Northern English, male"),
+    (
+        "en_GB-northern_english_male-medium",
+        "Northern English, male",
+    ),
 ];
 
 /// The voices the agent can switch to: (engine, id, description).
@@ -178,7 +181,11 @@ pub fn catalog() -> Vec<(TtsEngine, &'static str, &'static str)> {
     KOKORO_VOICES
         .iter()
         .map(|(id, d)| (TtsEngine::Kokoro, *id, *d))
-        .chain(PIPER_VOICES.iter().map(|(id, d)| (TtsEngine::Piper, *id, *d)))
+        .chain(
+            PIPER_VOICES
+                .iter()
+                .map(|(id, d)| (TtsEngine::Piper, *id, *d)),
+        )
         .collect()
 }
 
@@ -189,7 +196,11 @@ pub fn current_voice(config: &VoiceConfig) -> String {
         TtsEngine::Kokoro => (tts.kokoro_voice.clone(), "Kokoro"),
         TtsEngine::Piper => (tts.piper_voice.clone(), "Piper"),
         TtsEngine::Windows => (
-            if tts.windows_voice.is_empty() { "system default".to_owned() } else { tts.windows_voice.clone() },
+            if tts.windows_voice.is_empty() {
+                "system default".to_owned()
+            } else {
+                tts.windows_voice.clone()
+            },
             "Windows",
         ),
         TtsEngine::OpenAi => (tts.voice.clone(), "API"),
@@ -206,7 +217,10 @@ pub fn current_voice(config: &VoiceConfig) -> String {
 pub fn find_voice(query: &str) -> Option<(TtsEngine, &'static str, &'static str)> {
     let query = query.trim().to_lowercase();
     let all = catalog();
-    if let Some(exact) = all.iter().find(|(_, id, _)| id.eq_ignore_ascii_case(&query)) {
+    if let Some(exact) = all
+        .iter()
+        .find(|(_, id, _)| id.eq_ignore_ascii_case(&query))
+    {
         return Some(*exact);
     }
     let words: Vec<&str> = query
@@ -254,7 +268,9 @@ pub fn find_voice(query: &str) -> Option<(TtsEngine, &'static str, &'static str)
 
 /// A problem worth showing once (e.g. the chosen voice isn't installed).
 fn notices() -> &'static std::sync::Mutex<(Option<String>, std::collections::HashSet<String>)> {
-    static NOTICES: OnceLock<std::sync::Mutex<(Option<String>, std::collections::HashSet<String>)>> = OnceLock::new();
+    static NOTICES: OnceLock<
+        std::sync::Mutex<(Option<String>, std::collections::HashSet<String>)>,
+    > = OnceLock::new();
     NOTICES.get_or_init(Default::default)
 }
 
@@ -321,7 +337,12 @@ async fn spawn_helper(python: &str) -> Result<Helper, String> {
         .map_err(|e| format!("couldn't start Python ({python}): {e}"))?;
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = BufReader::new(child.stdout.take().ok_or("no stdout")?);
-    Ok(Helper { python: python.to_owned(), child, stdin, stdout })
+    Ok(Helper {
+        python: python.to_owned(),
+        child,
+        stdin,
+        stdout,
+    })
 }
 
 /// One request to the helper (requests are serialized).
@@ -336,10 +357,18 @@ async fn helper_call(python: &str, request: Value, timeout: Duration) -> Result<
     let helper = slot.as_mut().expect("helper just set");
     let line = format!("{request}\n");
     let exchange = async {
-        helper.stdin.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+        helper
+            .stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
         helper.stdin.flush().await.map_err(|e| e.to_string())?;
         let mut response = String::new();
-        let read = helper.stdout.read_line(&mut response).await.map_err(|e| e.to_string())?;
+        let read = helper
+            .stdout
+            .read_line(&mut response)
+            .await
+            .map_err(|e| e.to_string())?;
         if read == 0 {
             return Err("the Python helper exited (see voice/helper.log)".to_owned());
         }
@@ -384,7 +413,10 @@ pub async fn check_local(python: &str) -> LocalStatus {
             kokoro: v.get("kokoro").and_then(Value::as_bool).unwrap_or(false),
             error: None,
         },
-        Err(error) => LocalStatus { error: Some(error), ..Default::default() },
+        Err(error) => LocalStatus {
+            error: Some(error),
+            ..Default::default()
+        },
     }
 }
 
@@ -393,7 +425,15 @@ pub async fn install_local(python: &str) -> Result<String, String> {
     // The helper may hold the packages open.
     *helper_slot().lock().await = None;
     let output = command(python)
-        .args(["-m", "pip", "install", "--upgrade", "faster-whisper", "kokoro-onnx", "piper-tts"])
+        .args([
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "faster-whisper",
+            "kokoro-onnx",
+            "piper-tts",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -418,7 +458,8 @@ pub fn read_wav(bytes: &[u8]) -> Result<(Vec<i16>, u32), String> {
     let (mut format, mut channels, mut rate, mut bits) = (0u16, 0u16, 0u32, 0u16);
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
-        let mut size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap_or_default()) as usize;
+        let mut size =
+            u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap_or_default()) as usize;
         let body = pos + 8;
         // Streaming writers leave the data size unset.
         if id == b"data" && (size == 0 || size == u32::MAX as usize || body + size > bytes.len()) {
@@ -533,13 +574,22 @@ pub async fn transcribe(
                         .map_err(|e| e.to_string())?,
                 );
             if !names.is_empty() || !context.is_empty() {
-                form = form.text("prompt", format!("{} {context}", names.join(", ")).trim().to_owned());
+                form = form.text(
+                    "prompt",
+                    format!("{} {context}", names.join(", ")).trim().to_owned(),
+                );
             }
             if !config.stt.language.trim().is_empty() {
                 form = form.text("language", config.stt.language.trim().to_owned());
             }
-            let url = format!("{}/audio/transcriptions", config.stt.base_url.trim_end_matches('/'));
-            let mut request = crate::llm::http_client().post(url).multipart(form).timeout(Duration::from_secs(60));
+            let url = format!(
+                "{}/audio/transcriptions",
+                config.stt.base_url.trim_end_matches('/')
+            );
+            let mut request = crate::llm::http_client()
+                .post(url)
+                .multipart(form)
+                .timeout(Duration::from_secs(60));
             if !config.stt.api_key.trim().is_empty() {
                 request = request.bearer_auth(config.stt.api_key.trim());
             }
@@ -549,7 +599,10 @@ pub async fn transcribe(
             if !status.is_success() {
                 return Err(format!("transcription failed ({status}): {body}"));
             }
-            body.get("text").and_then(Value::as_str).unwrap_or_default().to_owned()
+            body.get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
         }
     };
     Ok(clean_transcript(&text))
@@ -610,8 +663,14 @@ pub async fn synthesize(config: &VoiceConfig, text: &str) -> Result<Vec<i16>, St
                     let _ = std::fs::remove_file(&out);
                     bytes?
                 }
-                Err(error) if cfg!(windows) && (error.contains("No module named") || error.contains("couldn't start Python")) => {
-                    note(format!("Kokoro isn't installed (Voice tab → Install) — using a Windows voice for now. {error}"));
+                Err(error)
+                    if cfg!(windows)
+                        && (error.contains("No module named")
+                            || error.contains("couldn't start Python")) =>
+                {
+                    note(format!(
+                        "Kokoro isn't installed (Voice tab → Install) — using a Windows voice for now. {error}"
+                    ));
                     windows_speak("", tts.speed, text).await?
                 }
                 Err(error) => return Err(error),
@@ -636,8 +695,14 @@ pub async fn synthesize(config: &VoiceConfig, text: &str) -> Result<Vec<i16>, St
                 }
                 // Not installed yet (Voice tab → Install): talk with a
                 // Windows voice meanwhile rather than not at all.
-                Err(error) if cfg!(windows) && (error.contains("No module named") || error.contains("couldn't start Python")) => {
-                    note(format!("Piper isn't installed (Voice tab → Install) — using a Windows voice for now. {error}"));
+                Err(error)
+                    if cfg!(windows)
+                        && (error.contains("No module named")
+                            || error.contains("couldn't start Python")) =>
+                {
+                    note(format!(
+                        "Piper isn't installed (Voice tab → Install) — using a Windows voice for now. {error}"
+                    ));
                     windows_speak("", tts.speed, text).await?
                 }
                 Err(error) => return Err(error),
@@ -801,8 +866,12 @@ fn markdown_links(text: &str) -> String {
     let mut rest = text;
     while let Some(open) = rest.find('[') {
         let image = open > 0 && rest[..open].ends_with('!');
-        let Some(close) = rest[open..].find("](") else { break };
-        let Some(end) = rest[open + close..].find(')') else { break };
+        let Some(close) = rest[open..].find("](") else {
+            break;
+        };
+        let Some(end) = rest[open + close..].find(')') else {
+            break;
+        };
         out.push_str(&rest[..if image { open - 1 } else { open }]);
         if !image {
             out.push_str(&rest[open + 1..open + close]);
@@ -827,7 +896,9 @@ fn drop_ids(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find('(') {
-        let Some(close) = rest[open..].find(')') else { break };
+        let Some(close) = rest[open..].find(')') else {
+            break;
+        };
         let aside = &rest[open..open + close + 1];
         out.push_str(&rest[..open]);
         if !has_id(aside) {
@@ -845,14 +916,19 @@ fn drop_ids(text: &str) -> String {
         }
         while kept.last().is_some_and(|w| {
             matches!(
-                w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()),
+                w.to_lowercase()
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
                 "id" | "message" | "msg" | "number"
             )
         }) {
             kept.pop();
         }
         // Keep the sentence's punctuation.
-        if let Some(end) = word.chars().last().filter(|c| matches!(c, '.' | '!' | '?' | ',')) {
+        if let Some(end) = word
+            .chars()
+            .last()
+            .filter(|c| matches!(c, '.' | '!' | '?' | ','))
+        {
             if let Some(last) = kept.last_mut() {
                 last.push(end);
             }
@@ -883,14 +959,25 @@ mod tests {
             speakable("**hey** <@123> check https://x.y/z 😂 it's `cool`"),
             "hey check it's cool"
         );
-        assert_eq!(speakable("Here's a zebra: ![Plains Zebra](https://x/z.jpg) from [Wikimedia](https://commons.org)."), "Here's a zebra: from Wikimedia.");
+        assert_eq!(
+            speakable(
+                "Here's a zebra: ![Plains Zebra](https://x/z.jpg) from [Wikimedia](https://commons.org)."
+            ),
+            "Here's a zebra: from Wikimedia."
+        );
         assert_eq!(speakable("<:yinyang:1566329537850253383> ok"), "ok");
         assert_eq!(
             speakable("Done — sent to scratchpad3 (message 1566358877392474205)."),
             "Done — sent to scratchpad3."
         );
-        assert_eq!(speakable("Deleted message ID 1566358877392474205, all good"), "Deleted, all good");
-        assert_eq!(speakable("Version 0.0.6 (out now) is 12 MB"), "Version 0.0.6 (out now) is 12 MB");
+        assert_eq!(
+            speakable("Deleted message ID 1566358877392474205, all good"),
+            "Deleted, all good"
+        );
+        assert_eq!(
+            speakable("Version 0.0.6 (out now) is 12 MB"),
+            "Version 0.0.6 (out now) is 12 MB"
+        );
     }
 
     /// Windows voice → local Whisper: `cargo test live_speech -- --ignored`.
@@ -900,15 +987,26 @@ mod tests {
         let mut config = VoiceConfig::default();
         config.tts.engine = TtsEngine::Windows;
         let started = std::time::Instant::now();
-        let stereo = synthesize(&config, "Hello Magi, please join the gaming voice channel.").await.unwrap();
-        println!("tts: {:.1}s of audio in {:.1}s", stereo.len() as f32 / 96_000.0, started.elapsed().as_secs_f32());
+        let stereo = synthesize(&config, "Hello Magi, please join the gaming voice channel.")
+            .await
+            .unwrap();
+        println!(
+            "tts: {:.1}s of audio in {:.1}s",
+            stereo.len() as f32 / 96_000.0,
+            started.elapsed().as_secs_f32()
+        );
         let mono = axis_voice::to_mono(&stereo, 16_000);
         for _ in 0..2 {
             let started = std::time::Instant::now();
-            let text = transcribe(&config, &mono, &["Magi".to_owned()], "").await.unwrap();
+            let text = transcribe(&config, &mono, &["Magi".to_owned()], "")
+                .await
+                .unwrap();
             println!("stt: {text:?} in {:.1}s", started.elapsed().as_secs_f32());
             assert!(text.to_lowercase().contains("gaming"), "{text}");
-            assert!(crate::runtime::voice::heard_name(&text, &["Magi".to_owned()]), "{text}");
+            assert!(
+                crate::runtime::voice::heard_name(&text, &["Magi".to_owned()]),
+                "{text}"
+            );
         }
     }
 
@@ -920,10 +1018,23 @@ mod tests {
         assert_eq!(config.tts.engine, TtsEngine::Kokoro);
         for _ in 0..2 {
             let started = std::time::Instant::now();
-            let stereo = synthesize(&config, "Hey, it's Magi. I joined the gaming channel.").await.unwrap();
-            println!("kokoro: {:.1}s of audio in {:.1}s", stereo.len() as f32 / 96_000.0, started.elapsed().as_secs_f32());
+            let stereo = synthesize(&config, "Hey, it's Magi. I joined the gaming channel.")
+                .await
+                .unwrap();
+            println!(
+                "kokoro: {:.1}s of audio in {:.1}s",
+                stereo.len() as f32 / 96_000.0,
+                started.elapsed().as_secs_f32()
+            );
             assert!(take_notice().is_none(), "fell back to Windows");
-            let text = transcribe(&config, &axis_voice::to_mono(&stereo, 16_000), &["Magi".to_owned()], "").await.unwrap();
+            let text = transcribe(
+                &config,
+                &axis_voice::to_mono(&stereo, 16_000),
+                &["Magi".to_owned()],
+                "",
+            )
+            .await
+            .unwrap();
             println!("heard: {text:?}");
             assert!(text.to_lowercase().contains("gaming"), "{text}");
         }

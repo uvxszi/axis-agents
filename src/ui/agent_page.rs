@@ -614,7 +614,10 @@ fn persona(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) -> bool {
                                 apply = true;
                             }
                             if pending {
-                                ui.label(RichText::new("● not applied").color(egui::Color32::from_rgb(230, 160, 60)));
+                                ui.label(
+                                    RichText::new("● not applied")
+                                        .color(egui::Color32::from_rgb(230, 160, 60)),
+                                );
                             }
                         }
                         None => {
@@ -824,7 +827,13 @@ fn model(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
                         egui::DragValue::new(&mut p.model.thinking_budget)
                             .range(0..=32_000)
                             .speed(16)
-                            .custom_formatter(|v, _| if v == 0.0 { "auto".to_owned() } else { format!("{v:.0}") }),
+                            .custom_formatter(|v, _| {
+                                if v == 0.0 {
+                                    "auto".to_owned()
+                                } else {
+                                    format!("{v:.0}")
+                                }
+                            }),
                     );
                 },
             );
@@ -842,28 +851,31 @@ fn model(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
             "Thinking",
             "For reasoning models (Qwen 3.5, DeepSeek R1…), per kind of work. Off is several times faster; Low/Medium can run out of room on small models. If a model thinks until it runs out of room, the agent retries with thinking off.",
             |ui| {
-                egui::Grid::new("thinking_modes").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                    let t = &mut p.model.thinking;
-                    for (label, id, mode) in [
-                        ("replies", "think_replies", &mut t.replies),
-                        ("chiming in", "think_ambient", &mut t.chiming_in),
-                        ("standing tasks", "think_tasks", &mut t.tasks),
-                        ("looking at images", "think_vision", &mut t.vision),
-                        ("background work", "think_background", &mut t.background),
-                        ("voice chat", "think_voice", &mut t.voice),
-                    ] {
-                        ui.label(RichText::new(label).color(WEAK));
-                        egui::ComboBox::from_id_salt(id)
-                            .selected_text(mode.label())
-                            .width(200.0)
-                            .show_ui(ui, |ui| {
-                                for option in crate::config::ReasoningMode::ALL {
-                                    ui.selectable_value(mode, option, option.label());
-                                }
-                            });
-                        ui.end_row();
-                    }
-                });
+                egui::Grid::new("thinking_modes")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        let t = &mut p.model.thinking;
+                        for (label, id, mode) in [
+                            ("replies", "think_replies", &mut t.replies),
+                            ("chiming in", "think_ambient", &mut t.chiming_in),
+                            ("standing tasks", "think_tasks", &mut t.tasks),
+                            ("looking at images", "think_vision", &mut t.vision),
+                            ("background work", "think_background", &mut t.background),
+                            ("voice chat", "think_voice", &mut t.voice),
+                        ] {
+                            ui.label(RichText::new(label).color(WEAK));
+                            egui::ComboBox::from_id_salt(id)
+                                .selected_text(mode.label())
+                                .width(200.0)
+                                .show_ui(ui, |ui| {
+                                    for option in crate::config::ReasoningMode::ALL {
+                                        ui.selectable_value(mode, option, option.label());
+                                    }
+                                });
+                            ui.end_row();
+                        }
+                    });
             },
         );
         form_row(
@@ -1026,7 +1038,15 @@ fn probe_line(ui: &mut Ui, probe: Option<Probe>) {
 
 fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
     let live = app.sup.live.snapshot(&p.id);
-    let probe = |app: &App, key: &str| app.sup.live.probes.lock().expect("live poisoned").get(key).cloned();
+    let probe = |app: &App, key: &str| {
+        app.sup
+            .live
+            .probes
+            .lock()
+            .expect("live poisoned")
+            .get(key)
+            .cloned()
+    };
     let check_key = format!("{}#voice_check", p.id);
     let install_key = format!("{}#voice_install", p.id);
     let preview_key = format!("{}#voice_preview", p.id);
@@ -1052,7 +1072,12 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
         }
         ui.add_space(6.0);
         let v = &mut p.voice;
-        toggle_row(ui, &mut v.listen, "Listen and answer", "Hear what people say in the call and reply out loud.");
+        toggle_row(
+            ui,
+            &mut v.listen,
+            "Listen and answer",
+            "Hear what people say in the call and reply out loud.",
+        );
         form_row(ui, "Answers when", "", |ui| {
             egui::ComboBox::from_id_salt("voice_reply")
                 .selected_text(v.reply.label())
@@ -1063,23 +1088,79 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
                     }
                 });
         });
-        form_row(ui, "Wait after a pause", "How long someone must be quiet before the agent treats it as the end of what they said. Raise it if it cuts you off.", |ui| {
-            ui.add(egui::Slider::new(&mut v.pause_ms, 600..=3000).step_by(100.0).suffix(" ms"));
-        });
-        toggle_row(ui, &mut v.interruptible, "Can be interrupted", "Stop talking when someone talks over it.");
+        form_row(
+            ui,
+            "Wait after a pause",
+            "How long someone must be quiet before the agent treats it as the end of what they said. Raise it if it cuts you off.",
+            |ui| {
+                ui.add(
+                    egui::Slider::new(&mut v.pause_ms, 600..=3000)
+                        .step_by(100.0)
+                        .suffix(" ms"),
+                );
+            },
+        );
+        form_row(
+            ui,
+            "Hearing sensitivity",
+            "How loud speech must be to count (RMS). Lower hears quieter speech but picks up fans and keyboards; higher needs louder, clearer speech.",
+            |ui| {
+                ui.add(egui::Slider::new(&mut v.speech_rms, 100..=2000).step_by(50.0));
+            },
+        );
+        form_row(
+            ui,
+            "Interrupt threshold",
+            "How loud someone must be to interrupt the agent while it speaks. 0 uses the same level as hearing; raise it so background noise never cuts it off.",
+            |ui| {
+                ui.add(egui::Slider::new(&mut v.interrupt_rms, 0..=3000).step_by(50.0));
+            },
+        );
+        form_row(
+            ui,
+            "Interrupt window",
+            "Sustained loudness inside this window interrupts the agent — spread-out noise never accumulates into one.",
+            |ui| {
+                ui.add(
+                    egui::Slider::new(&mut v.interrupt_window_ms, 200..=2000)
+                        .step_by(100.0)
+                        .suffix(" ms"),
+                );
+            },
+        );
+        toggle_row(
+            ui,
+            &mut v.interruptible,
+            "Can be interrupted",
+            "Stop talking when someone talks over it.",
+        );
         toggle_row(
             ui,
             &mut v.live_transcript,
             "Live transcript in the call's chat",
             "Posts what it hears and says as small, silent lines (-#), so people reading along can follow.",
         );
-        toggle_row(ui, &mut v.post_transcript, "Also post replies in the call's text chat", "Full-size messages, in addition to speaking.");
-        toggle_row(ui, &mut v.leave_when_alone, "Leave when nobody's left", "After 30 seconds alone in the channel.");
+        toggle_row(
+            ui,
+            &mut v.post_transcript,
+            "Also post replies in the call's text chat",
+            "Full-size messages, in addition to speaking.",
+        );
+        toggle_row(
+            ui,
+            &mut v.leave_when_alone,
+            "Leave when nobody's left",
+            "After 30 seconds alone in the channel.",
+        );
     });
     ui.add_space(8.0);
 
     card(ui, |ui| {
-        section(ui, "Hearing", "Speech-to-text turns what people say into text for the model.");
+        section(
+            ui,
+            "Hearing",
+            "Speech-to-text turns what people say into text for the model.",
+        );
         let stt = &mut p.voice.stt;
         form_row(ui, "Engine", "", |ui| {
             egui::ComboBox::from_id_salt("stt_engine")
@@ -1093,31 +1174,54 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
         });
         match stt.engine {
             crate::config::SttEngine::LocalWhisper => {
-                form_row(ui, "Model", "Downloaded on first use. Runs on your GPU when it can, otherwise the CPU.", |ui| {
-                    let current = WHISPER_MODELS
-                        .iter()
-                        .find(|(id, _)| *id == stt.whisper_model)
-                        .map(|(_, label)| (*label).to_owned())
-                        .unwrap_or_else(|| stt.whisper_model.clone());
-                    egui::ComboBox::from_id_salt("whisper_model")
-                        .selected_text(current)
-                        .width(300.0)
-                        .show_ui(ui, |ui| {
-                            for (id, label) in WHISPER_MODELS {
-                                ui.selectable_value(&mut stt.whisper_model, id.to_owned(), label);
-                            }
-                        });
-                });
-                form_row(ui, "Language", "Code like en or de; empty detects it.", |ui| {
-                    ui.add(TextEdit::singleline(&mut stt.language).desired_width(80.0));
-                });
+                form_row(
+                    ui,
+                    "Model",
+                    "Downloaded on first use. Runs on your GPU when it can, otherwise the CPU.",
+                    |ui| {
+                        let current = WHISPER_MODELS
+                            .iter()
+                            .find(|(id, _)| *id == stt.whisper_model)
+                            .map(|(_, label)| (*label).to_owned())
+                            .unwrap_or_else(|| stt.whisper_model.clone());
+                        egui::ComboBox::from_id_salt("whisper_model")
+                            .selected_text(current)
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                for (id, label) in WHISPER_MODELS {
+                                    ui.selectable_value(
+                                        &mut stt.whisper_model,
+                                        id.to_owned(),
+                                        label,
+                                    );
+                                }
+                            });
+                    },
+                );
+                form_row(
+                    ui,
+                    "Language",
+                    "Code like en or de; empty detects it.",
+                    |ui| {
+                        ui.add(TextEdit::singleline(&mut stt.language).desired_width(80.0));
+                    },
+                );
             }
             crate::config::SttEngine::OpenAi => {
-                form_row(ui, "Base URL", "OpenAI, Groq (https://api.groq.com/openai/v1), or a local Whisper server.", |ui| {
-                    ui.add(TextEdit::singleline(&mut stt.base_url).desired_width(320.0));
-                });
+                form_row(
+                    ui,
+                    "Base URL",
+                    "OpenAI, Groq (https://api.groq.com/openai/v1), or a local Whisper server.",
+                    |ui| {
+                        ui.add(TextEdit::singleline(&mut stt.base_url).desired_width(320.0));
+                    },
+                );
                 form_row(ui, "API key", "", |ui| {
-                    ui.add(TextEdit::singleline(&mut stt.api_key).password(true).desired_width(320.0));
+                    ui.add(
+                        TextEdit::singleline(&mut stt.api_key)
+                            .password(true)
+                            .desired_width(320.0),
+                    );
                 });
                 form_row(ui, "Model", "", |ui| {
                     ui.add(TextEdit::singleline(&mut stt.model).desired_width(200.0));
@@ -1142,41 +1246,59 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
         });
         match tts.engine {
             crate::config::TtsEngine::Kokoro => {
-                form_row(ui, "Voice", "The model (~120 MB) downloads the first time it speaks.", |ui| {
-                    let current = KOKORO_VOICES
-                        .iter()
-                        .find(|(id, _)| *id == tts.kokoro_voice)
-                        .map(|(_, label)| (*label).to_owned())
-                        .unwrap_or_else(|| tts.kokoro_voice.clone());
-                    egui::ComboBox::from_id_salt("kokoro_voice")
-                        .selected_text(current)
-                        .width(300.0)
-                        .show_ui(ui, |ui| {
-                            for (id, label) in KOKORO_VOICES {
-                                ui.selectable_value(&mut tts.kokoro_voice, id.to_owned(), label);
-                            }
-                        });
-                });
-            }
-            crate::config::TtsEngine::Piper => {
-                form_row(ui, "Voice", "Each voice is a ~60 MB download the first time it's used. Any Piper voice name works.", |ui| {
-                    let current = PIPER_VOICES
-                        .iter()
-                        .find(|(id, _)| *id == tts.piper_voice)
-                        .map(|(_, label)| (*label).to_owned())
-                        .unwrap_or_else(|| tts.piper_voice.clone());
-                    ui.vertical(|ui| {
-                        egui::ComboBox::from_id_salt("piper_voice")
+                form_row(
+                    ui,
+                    "Voice",
+                    "The model (~120 MB) downloads the first time it speaks.",
+                    |ui| {
+                        let current = KOKORO_VOICES
+                            .iter()
+                            .find(|(id, _)| *id == tts.kokoro_voice)
+                            .map(|(_, label)| (*label).to_owned())
+                            .unwrap_or_else(|| tts.kokoro_voice.clone());
+                        egui::ComboBox::from_id_salt("kokoro_voice")
                             .selected_text(current)
                             .width(300.0)
                             .show_ui(ui, |ui| {
-                                for (id, label) in PIPER_VOICES {
-                                    ui.selectable_value(&mut tts.piper_voice, id.to_owned(), label);
+                                for (id, label) in KOKORO_VOICES {
+                                    ui.selectable_value(
+                                        &mut tts.kokoro_voice,
+                                        id.to_owned(),
+                                        label,
+                                    );
                                 }
                             });
-                        ui.add(TextEdit::singleline(&mut tts.piper_voice).desired_width(300.0));
-                    });
-                });
+                    },
+                );
+            }
+            crate::config::TtsEngine::Piper => {
+                form_row(
+                    ui,
+                    "Voice",
+                    "Each voice is a ~60 MB download the first time it's used. Any Piper voice name works.",
+                    |ui| {
+                        let current = PIPER_VOICES
+                            .iter()
+                            .find(|(id, _)| *id == tts.piper_voice)
+                            .map(|(_, label)| (*label).to_owned())
+                            .unwrap_or_else(|| tts.piper_voice.clone());
+                        ui.vertical(|ui| {
+                            egui::ComboBox::from_id_salt("piper_voice")
+                                .selected_text(current)
+                                .width(300.0)
+                                .show_ui(ui, |ui| {
+                                    for (id, label) in PIPER_VOICES {
+                                        ui.selectable_value(
+                                            &mut tts.piper_voice,
+                                            id.to_owned(),
+                                            label,
+                                        );
+                                    }
+                                });
+                            ui.add(TextEdit::singleline(&mut tts.piper_voice).desired_width(300.0));
+                        });
+                    },
+                );
             }
             crate::config::TtsEngine::Windows => {
                 let voices = match probe(app, &voices_key) {
@@ -1185,12 +1307,20 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
                 };
                 form_row(ui, "Voice", "", |ui| {
                     ui.horizontal(|ui| {
-                        let shown = if tts.windows_voice.is_empty() { "System default".to_owned() } else { tts.windows_voice.clone() };
+                        let shown = if tts.windows_voice.is_empty() {
+                            "System default".to_owned()
+                        } else {
+                            tts.windows_voice.clone()
+                        };
                         egui::ComboBox::from_id_salt("windows_voice")
                             .selected_text(shown)
                             .width(260.0)
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut tts.windows_voice, String::new(), "System default");
+                                ui.selectable_value(
+                                    &mut tts.windows_voice,
+                                    String::new(),
+                                    "System default",
+                                );
                                 for name in &voices {
                                     ui.selectable_value(&mut tts.windows_voice, name.clone(), name);
                                 }
@@ -1202,11 +1332,20 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
                 });
             }
             crate::config::TtsEngine::OpenAi => {
-                form_row(ui, "Base URL", "OpenAI, or a local server like Kokoro-FastAPI (http://localhost:8880/v1).", |ui| {
-                    ui.add(TextEdit::singleline(&mut tts.base_url).desired_width(320.0));
-                });
+                form_row(
+                    ui,
+                    "Base URL",
+                    "OpenAI, or a local server like Kokoro-FastAPI (http://localhost:8880/v1).",
+                    |ui| {
+                        ui.add(TextEdit::singleline(&mut tts.base_url).desired_width(320.0));
+                    },
+                );
                 form_row(ui, "API key", "", |ui| {
-                    ui.add(TextEdit::singleline(&mut tts.api_key).password(true).desired_width(320.0));
+                    ui.add(
+                        TextEdit::singleline(&mut tts.api_key)
+                            .password(true)
+                            .desired_width(320.0),
+                    );
                 });
                 form_row(ui, "Model", "", |ui| {
                     ui.add(TextEdit::singleline(&mut tts.model).desired_width(200.0));
@@ -1231,7 +1370,10 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
         form_row(ui, "Try it", "Plays on this PC's speakers.", |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    if ui.add(TextEdit::singleline(&mut text).desired_width(280.0)).changed() {
+                    if ui
+                        .add(TextEdit::singleline(&mut text).desired_width(280.0))
+                        .changed()
+                    {
                         app.buffers.insert(text_key.clone(), text.clone());
                     }
                     if ui.button("▶ Preview").clicked() {
@@ -1251,7 +1393,10 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
     ui.add_space(8.0);
 
     let local = p.voice.stt.engine == crate::config::SttEngine::LocalWhisper
-        || matches!(p.voice.tts.engine, crate::config::TtsEngine::Piper | crate::config::TtsEngine::Kokoro);
+        || matches!(
+            p.voice.tts.engine,
+            crate::config::TtsEngine::Piper | crate::config::TtsEngine::Kokoro
+        );
     if local {
         card(ui, |ui| {
             section(
@@ -1259,9 +1404,14 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
                 "Local engines",
                 "Whisper (hearing), Kokoro and Piper (speaking) run in Python on this PC: faster-whisper, kokoro-onnx and piper-tts.",
             );
-            form_row(ui, "Python", "The python command or a full path to python.exe.", |ui| {
-                ui.add(TextEdit::singleline(&mut p.voice.python).desired_width(260.0));
-            });
+            form_row(
+                ui,
+                "Python",
+                "The python command or a full path to python.exe.",
+                |ui| {
+                    ui.add(TextEdit::singleline(&mut p.voice.python).desired_width(260.0));
+                },
+            );
             ui.horizontal(|ui| {
                 if ui.button("Check").clicked() {
                     let python = p.voice.python.clone();
@@ -1302,7 +1452,14 @@ fn voice(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
 fn lmstudio_room(app: &mut App, ui: &mut Ui, p: &AgentProfile) {
     let info = app.sup.live.snapshot(&p.id).model_info;
     let reload_key = format!("{}#reload", p.id);
-    let reload = app.sup.live.probes.lock().expect("live poisoned").get(&reload_key).cloned();
+    let reload = app
+        .sup
+        .live
+        .probes
+        .lock()
+        .expect("live poisoned")
+        .get(&reload_key)
+        .cloned();
     form_row(
         ui,
         "LM Studio room",
@@ -1312,15 +1469,29 @@ fn lmstudio_room(app: &mut App, ui: &mut Ui, p: &AgentProfile) {
                 if let (Some(loaded), Some(parallel)) = (info.loaded_context, info.parallel) {
                     let per = loaded / parallel.max(1);
                     ui.label(
-                        RichText::new(format!("loaded with {loaded} tokens ÷ {parallel} parallel = {per} per request"))
-                            .color(if per < 16_384 { theme::YELLOW } else { WEAK }),
+                        RichText::new(format!(
+                            "loaded with {loaded} tokens ÷ {parallel} parallel = {per} per request"
+                        ))
+                        .color(if per < 16_384 {
+                            theme::YELLOW
+                        } else {
+                            WEAK
+                        }),
                     );
                 }
             }
             let ctx_key = format!("{}:lms_ctx", p.id);
             let par_key = format!("{}:lms_par", p.id);
-            let mut context: u32 = app.buffers.get(&ctx_key).and_then(|v| v.parse().ok()).unwrap_or(32_768);
-            let mut parallel: u32 = app.buffers.get(&par_key).and_then(|v| v.parse().ok()).unwrap_or(2);
+            let mut context: u32 = app
+                .buffers
+                .get(&ctx_key)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32_768);
+            let mut parallel: u32 = app
+                .buffers
+                .get(&par_key)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2);
             ui.horizontal(|ui| {
                 ui.label("context");
                 if ui.add(egui::DragValue::new(&mut context).range(4096..=262_144).speed(1024)).changed() {
@@ -1345,7 +1516,9 @@ fn lmstudio_room(app: &mut App, ui: &mut Ui, p: &AgentProfile) {
                     ui.label(
                         RichText::new(format!(
                             "reloaded — {} tokens per request",
-                            info.context_window.map(|c| c.to_string()).unwrap_or_else(|| "?".to_owned())
+                            info.context_window
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "?".to_owned())
                         ))
                         .color(theme::GREEN),
                     );
@@ -1726,23 +1899,35 @@ fn commands(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) -> bool {
     let guilds = app.sup.live.snapshot(&p.id).guilds;
     let b = &mut p.behavior;
     card(ui, |ui| {
-        section(ui, "⌨ Slash commands", "Agents can also turn these off per server, and make their own commands in a server, when someone with Manage Server asks.");
-        toggle_row(ui, &mut b.slash_commands, "Slash commands", "Turn off to remove them all from Discord (after Apply).");
+        section(
+            ui,
+            "⌨ Slash commands",
+            "Agents can also turn these off per server, and make their own commands in a server, when someone with Manage Server asks.",
+        );
+        toggle_row(
+            ui,
+            &mut b.slash_commands,
+            "Slash commands",
+            "Turn off to remove them all from Discord (after Apply).",
+        );
         if b.slash_commands {
             ui.add_space(4.0);
-            egui::Grid::new("built_in_commands").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                for (name, help) in crate::runtime::commands::BUILT_IN {
-                    let mut on = !b.disabled_commands.iter().any(|d| d == name);
-                    if ui.checkbox(&mut on, format!("/{name}")).changed() {
-                        b.disabled_commands.retain(|d| d != name);
-                        if !on {
-                            b.disabled_commands.push(name.to_owned());
+            egui::Grid::new("built_in_commands")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    for (name, help) in crate::runtime::commands::BUILT_IN {
+                        let mut on = !b.disabled_commands.iter().any(|d| d == name);
+                        if ui.checkbox(&mut on, format!("/{name}")).changed() {
+                            b.disabled_commands.retain(|d| d != name);
+                            if !on {
+                                b.disabled_commands.push(name.to_owned());
+                            }
                         }
+                        ui.label(RichText::new(help).color(WEAK));
+                        ui.end_row();
                     }
-                    ui.label(RichText::new(help).color(WEAK));
-                    ui.end_row();
-                }
-            });
+                });
         }
     });
     ui.add_space(8.0);
@@ -1758,10 +1943,21 @@ fn commands(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) -> bool {
                 ui.horizontal(|ui| {
                     ui.label("/");
                     let mut name = c.name.clone();
-                    if ui.add(TextEdit::singleline(&mut name).hint_text("name").desired_width(140.0)).changed() {
+                    if ui
+                        .add(
+                            TextEdit::singleline(&mut name)
+                                .hint_text("name")
+                                .desired_width(140.0),
+                        )
+                        .changed()
+                    {
                         c.name = name.to_lowercase().replace(' ', "-");
                     }
-                    ui.add(TextEdit::singleline(&mut c.description).hint_text("description").desired_width(260.0));
+                    ui.add(
+                        TextEdit::singleline(&mut c.description)
+                            .hint_text("description")
+                            .desired_width(260.0),
+                    );
                     if ui.small_button("🗑").on_hover_text("Remove").clicked() {
                         remove = Some(index);
                     }
@@ -1774,14 +1970,22 @@ fn commands(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) -> bool {
                                 ui.selectable_value(&mut c.mode, mode, mode.label());
                             }
                         });
-                    ui.checkbox(&mut c.takes_input, "takes input").on_hover_text("Adds an optional \"input\" box to the command ({input}).");
+                    ui.checkbox(&mut c.takes_input, "takes input")
+                        .on_hover_text("Adds an optional \"input\" box to the command ({input}).");
                     ui.checkbox(&mut c.private, "only they see it");
                 });
                 let hint = match c.mode {
                     crate::config::CommandMode::Reply => "Reply text",
-                    crate::config::CommandMode::Agent => "What the AI should do, e.g. \"post today's top tech news\"",
+                    crate::config::CommandMode::Agent => {
+                        "What the AI should do, e.g. \"post today's top tech news\""
+                    }
                 };
-                ui.add(TextEdit::multiline(&mut c.reply).hint_text(hint).desired_rows(2).desired_width(560.0));
+                ui.add(
+                    TextEdit::multiline(&mut c.reply)
+                        .hint_text(hint)
+                        .desired_rows(2)
+                        .desired_width(560.0),
+                );
                 // Where it's registered.
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Servers:").color(WEAK));
@@ -1799,10 +2003,18 @@ fn commands(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) -> bool {
                         }
                     }
                     if guilds.is_empty() && !c.servers.is_empty() {
-                        ui.label(RichText::new(format!("{} server(s) — start the agent to see names", c.servers.len())).color(WEAK));
+                        ui.label(
+                            RichText::new(format!(
+                                "{} server(s) — start the agent to see names",
+                                c.servers.len()
+                            ))
+                            .color(WEAK),
+                        );
                     }
                 });
-                let built_in = crate::runtime::commands::BUILT_IN.iter().any(|(n, _)| *n == c.name);
+                let built_in = crate::runtime::commands::BUILT_IN
+                    .iter()
+                    .any(|(n, _)| *n == c.name);
                 let problem = if !crate::config::CustomCommand::valid_name(&c.name) {
                     Some("Names: 1–32 lowercase letters, numbers, - or _.")
                 } else if built_in {
@@ -1813,7 +2025,10 @@ fn commands(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) -> bool {
                     None
                 };
                 if let Some(problem) = problem {
-                    ui.label(RichText::new(format!("⚠ {problem} (skipped until fixed)")).color(egui::Color32::from_rgb(230, 160, 60)));
+                    ui.label(
+                        RichText::new(format!("⚠ {problem} (skipped until fixed)"))
+                            .color(egui::Color32::from_rgb(230, 160, 60)),
+                    );
                 }
                 ui.add_space(6.0);
             });
@@ -1835,31 +2050,57 @@ fn commands(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) -> bool {
         .knowledge
         .known_guilds()
         .into_iter()
-        .map(|(g, name)| (g, name, app.sup.hive.knowledge.guild(g, |k| k.commands.iter().filter(|c| c.agent_id == p.id).cloned().collect::<Vec<_>>())))
+        .map(|(g, name)| {
+            (
+                g,
+                name,
+                app.sup.hive.knowledge.guild(g, |k| {
+                    k.commands
+                        .iter()
+                        .filter(|c| c.agent_id == p.id)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                }),
+            )
+        })
         .filter(|(_, _, list)| !list.is_empty())
         .collect();
     if !made.is_empty() {
         ui.add_space(8.0);
         card(ui, |ui| {
-            section(ui, "Made in servers", "Commands this agent made when asked. They apply on their own (rate-limited).");
+            section(
+                ui,
+                "Made in servers",
+                "Commands this agent made when asked. They apply on their own (rate-limited).",
+            );
             let mut changed = false;
             for (guild_id, guild_name, list) in made {
                 ui.label(RichText::new(guild_name).strong());
                 for c in list {
                     ui.horizontal(|ui| {
                         ui.label(format!("/{}", c.name));
-                        ui.label(RichText::new(format!("{} · by {}", c.mode.label(), c.author_name)).color(WEAK));
+                        ui.label(
+                            RichText::new(format!("{} · by {}", c.mode.label(), c.author_name))
+                                .color(WEAK),
+                        );
                         let label = if c.disabled { "turn on" } else { "turn off" };
                         if ui.small_button(label).clicked() {
                             app.sup.hive.knowledge.guild_mut(guild_id, |k| {
-                                if let Some(x) = k.commands.iter_mut().find(|x| x.name == c.name && x.agent_id == c.agent_id) {
+                                if let Some(x) = k
+                                    .commands
+                                    .iter_mut()
+                                    .find(|x| x.name == c.name && x.agent_id == c.agent_id)
+                                {
                                     x.disabled = !x.disabled;
                                 }
                             });
                             changed = true;
                         }
                         if ui.small_button("🗑").on_hover_text("Delete").clicked() {
-                            app.sup.hive.knowledge.guild_mut(guild_id, |k| k.commands.retain(|x| !(x.name == c.name && x.agent_id == c.agent_id)));
+                            app.sup.hive.knowledge.guild_mut(guild_id, |k| {
+                                k.commands
+                                    .retain(|x| !(x.name == c.name && x.agent_id == c.agent_id))
+                            });
                             changed = true;
                         }
                     });

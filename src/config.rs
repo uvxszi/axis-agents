@@ -245,6 +245,18 @@ pub struct VoiceConfig {
     pub leave_when_alone: bool,
     /// How long a pause (ms) means someone finished talking.
     pub pause_ms: u32,
+    /// Loudness (RMS) above which a frame counts as speech. Lower hears
+    /// quieter speech (and more noise); higher needs louder talkers.
+    pub speech_rms: u16,
+    /// Loudness (RMS) someone must reach to interrupt the agent; 0 means
+    /// the same as `speech_rms`.
+    pub interrupt_rms: u16,
+    /// Interruptions must be this loud for this long (rolling ms window),
+    /// so stray claps don't cut the agent off.
+    pub interrupt_window_ms: u64,
+    /// How long after the agent speaks to keep dropping transcripts that
+    /// just echo its own voice back through open mics.
+    pub echo_guard_secs: u64,
     pub stt: SttConfig,
     pub tts: TtsConfig,
     /// Python used for local Whisper and Piper.
@@ -261,6 +273,10 @@ impl Default for VoiceConfig {
             live_transcript: false,
             leave_when_alone: true,
             pause_ms: 1300,
+            speech_rms: 450,
+            interrupt_rms: 0,
+            interrupt_window_ms: 600,
+            echo_guard_secs: 8,
             stt: SttConfig::default(),
             tts: TtsConfig::default(),
             python: "python".to_owned(),
@@ -624,7 +640,9 @@ impl CustomCommand {
     /// Discord's rule for command names.
     pub fn valid_name(name: &str) -> bool {
         (1..=32).contains(&name.chars().count())
-            && name.chars().all(|c| c.is_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            && name
+                .chars()
+                .all(|c| c.is_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     }
 }
 

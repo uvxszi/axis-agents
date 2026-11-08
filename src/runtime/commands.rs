@@ -35,7 +35,7 @@ fn requester_user(invocation: &Invocation) -> Option<User> {
 }
 
 /// The built-in commands, for the app's Commands tab.
-pub const BUILT_IN: [(&str, &str); 10] = [
+pub const BUILT_IN: [(&str, &str); 12] = [
     ("ask", "a private answer only you see"),
     ("memories", "what it remembers about you"),
     ("forget", "erase that (or opt out of notes)"),
@@ -46,18 +46,41 @@ pub const BUILT_IN: [(&str, &str); 10] = [
     ("leaderboard", "top members by XP"),
     ("status", "model, uptime, activity"),
     ("ping", "gateway and API latency"),
+    (
+        "agentinfo",
+        "everything about this agent: model, framework, tools",
+    ),
+    (
+        "mode",
+        "standard or autonomous: how much needs a confirm button",
+    ),
 ];
 
 /// Fill {user}, {server}, {channel}, {input} in a custom command's text.
-fn fill(core: &AgentCore, template: &str, interaction: &Interaction, input: Option<&str>) -> String {
-    let user = interaction.member.as_ref().and_then(|m| m.user.clone()).or_else(|| interaction.user.clone());
+fn fill(
+    core: &AgentCore,
+    template: &str,
+    interaction: &Interaction,
+    input: Option<&str>,
+) -> String {
+    let user = interaction
+        .member
+        .as_ref()
+        .and_then(|m| m.user.clone())
+        .or_else(|| interaction.user.clone());
     let server = interaction
         .guild_id
         .and_then(|g| core.world.with_guild(g.get(), |s| s.name.clone()))
         .unwrap_or_else(|| "DMs".to_owned());
-    let channel = interaction.channel_id.map(|c| format!("<#{c}>")).unwrap_or_default();
+    let channel = interaction
+        .channel_id
+        .map(|c| format!("<#{c}>"))
+        .unwrap_or_default();
     template
-        .replace("{user}", &user.map(|u| format!("<@{}>", u.id)).unwrap_or_default())
+        .replace(
+            "{user}",
+            &user.map(|u| format!("<@{}>", u.id)).unwrap_or_default(),
+        )
         .replace("{server}", &server)
         .replace("{channel}", &channel)
         .replace("{input}", input.unwrap_or(""))
@@ -113,7 +136,11 @@ pub fn customs(core: &AgentCore, guild: Option<u64>) -> Vec<Custom> {
     }
     if let Some(g) = guild {
         let made = core.hive.knowledge.guild(g, |k| {
-            k.commands.iter().filter(|c| c.agent_id == core.id && !c.disabled).cloned().collect::<Vec<_>>()
+            k.commands
+                .iter()
+                .filter(|c| c.agent_id == core.id && !c.disabled)
+                .cloned()
+                .collect::<Vec<_>>()
         });
         for c in made {
             if usable(&c.name, &c.text, &taken) {
@@ -370,84 +397,123 @@ fn build(core: &Arc<AgentCore>) -> CommandRegistry {
     });
 
     let c = Arc::clone(core);
-    registry.command("setup", format!("See and change what {name} runs in this server"), move |cmd| {
-        cmd.option(
-            CommandOption::string("section", "Which part")
-                .choice("Overview", "overview")
-                .choice("Leveling", "leveling")
-                .choice("Rank cards", "card")
-                .choice("Statistics", "stats")
-                .choice("Tickets", "tickets")
-                .choice("Who can change settings", "access")
-                .choice("This agent", "agent")
-                .finish(),
-        );
-        cmd.handler(move |invocation| {
-            let core = Arc::clone(&c);
-            async move {
-                let Some(guild_id) = invocation.interaction.guild_id.map(|g| g.get()) else {
-                    invocation.reply().content("Setup is per server.").ephemeral(true).await?;
-                    return Ok(());
-                };
-                let Some(user) = requester_user(&invocation) else { return Ok(()) };
-                if let Some(member) = &invocation.interaction.member {
-                    let mut member = member.clone();
-                    member.user = Some(user.clone());
-                    core.world.upsert_member(guild_id, &member);
+    registry.command(
+        "setup",
+        format!("See and change what {name} runs in this server"),
+        move |cmd| {
+            cmd.option(
+                CommandOption::string("section", "Which part")
+                    .choice("Overview", "overview")
+                    .choice("Leveling", "leveling")
+                    .choice("Rank cards", "card")
+                    .choice("Statistics", "stats")
+                    .choice("Tickets", "tickets")
+                    .choice("Who can change settings", "access")
+                    .choice("This agent", "agent")
+                    .finish(),
+            );
+            cmd.handler(move |invocation| {
+                let core = Arc::clone(&c);
+                async move {
+                    let Some(guild_id) = invocation.interaction.guild_id.map(|g| g.get()) else {
+                        invocation
+                            .reply()
+                            .content("Setup is per server.")
+                            .ephemeral(true)
+                            .await?;
+                        return Ok(());
+                    };
+                    let Some(user) = requester_user(&invocation) else {
+                        return Ok(());
+                    };
+                    if let Some(member) = &invocation.interaction.member {
+                        let mut member = member.clone();
+                        member.user = Some(user.clone());
+                        core.world.upsert_member(guild_id, &member);
+                    }
+                    let section: String = invocation
+                        .opt("section")?
+                        .unwrap_or_else(|| "overview".to_owned());
+                    let who = core.principal_for(Some(guild_id), &user);
+                    let can_edit = super::levels::can_manage(&core, guild_id, &who);
+                    let is_owner = who.level >= crate::config::AccessLevel::Owner;
+                    let mut data =
+                        super::setup::render(&core, guild_id, &section, can_edit, is_owner);
+                    data["flags"] = serde_json::json!(64);
+                    let interaction = &invocation.interaction;
+                    let _ = core
+                        .http
+                        .raw(
+                            "POST",
+                            &format!(
+                                "/interactions/{}/{}/callback",
+                                interaction.id, interaction.token
+                            ),
+                            Some(serde_json::json!({ "type": 4, "data": data })),
+                            None,
+                        )
+                        .await;
+                    Ok(())
                 }
-                let section: String = invocation.opt("section")?.unwrap_or_else(|| "overview".to_owned());
-                let who = core.principal_for(Some(guild_id), &user);
-                let can_edit = super::levels::can_manage(&core, guild_id, &who);
-                let is_owner = who.level >= crate::config::AccessLevel::Owner;
-                let mut data = super::setup::render(&core, guild_id, &section, can_edit, is_owner);
-                data["flags"] = serde_json::json!(64);
-                let interaction = &invocation.interaction;
-                let _ = core
-                    .http
-                    .raw(
-                        "POST",
-                        &format!("/interactions/{}/{}/callback", interaction.id, interaction.token),
-                        Some(serde_json::json!({ "type": 4, "data": data })),
-                        None,
-                    )
-                    .await;
-                Ok(())
-            }
-        });
-    });
+            });
+        },
+    );
 
     let c = Arc::clone(core);
-    registry.command("rank", "Your level and rank card (or someone else's)", move |cmd| {
-        cmd.option(CommandOption::user("user", "Whose card").finish());
-        cmd.handler(move |invocation| {
-            let core = Arc::clone(&c);
-            async move {
-                let Some(guild_id) = invocation.interaction.guild_id.map(|g| g.get()) else {
-                    invocation.reply().content("Levels are per server.").ephemeral(true).await?;
-                    return Ok(());
-                };
-                invocation.defer(false).await?;
-                let target: Option<String> = invocation.opt("user")?;
-                let user_id = target
-                    .and_then(|t| t.parse().ok())
-                    .or_else(|| requester_user(&invocation).map(|u| u.id.get()))
-                    .unwrap_or(0);
-                let data = axis::model::InteractionMessageCallbackData::default();
-                let interaction = &invocation.interaction;
-                match super::levels::rank_card(&core, guild_id, user_id).await {
-                    Ok((png, _)) => {
-                        let _ = core.http.create_followup(interaction.application_id, interaction.token.clone(), data).file("rank.png", png).await;
+    registry.command(
+        "rank",
+        "Your level and rank card (or someone else's)",
+        move |cmd| {
+            cmd.option(CommandOption::user("user", "Whose card").finish());
+            cmd.handler(move |invocation| {
+                let core = Arc::clone(&c);
+                async move {
+                    let Some(guild_id) = invocation.interaction.guild_id.map(|g| g.get()) else {
+                        invocation
+                            .reply()
+                            .content("Levels are per server.")
+                            .ephemeral(true)
+                            .await?;
+                        return Ok(());
+                    };
+                    invocation.defer(false).await?;
+                    let target: Option<String> = invocation.opt("user")?;
+                    let user_id = target
+                        .and_then(|t| t.parse().ok())
+                        .or_else(|| requester_user(&invocation).map(|u| u.id.get()))
+                        .unwrap_or(0);
+                    let data = axis::model::InteractionMessageCallbackData::default();
+                    let interaction = &invocation.interaction;
+                    match super::levels::rank_card(&core, guild_id, user_id).await {
+                        Ok((png, _)) => {
+                            let _ = core
+                                .http
+                                .create_followup(
+                                    interaction.application_id,
+                                    interaction.token.clone(),
+                                    data,
+                                )
+                                .file("rank.png", png)
+                                .await;
+                        }
+                        Err(error) => {
+                            let mut data = data;
+                            data.content = Some(format!("Couldn't draw the card: {error}"));
+                            let _ = core
+                                .http
+                                .create_followup(
+                                    interaction.application_id,
+                                    interaction.token.clone(),
+                                    data,
+                                )
+                                .await;
+                        }
                     }
-                    Err(error) => {
-                        let mut data = data;
-                        data.content = Some(format!("Couldn't draw the card: {error}"));
-                        let _ = core.http.create_followup(interaction.application_id, interaction.token.clone(), data).await;
-                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-        });
-    });
+            });
+        },
+    );
 
     let c = Arc::clone(core);
     registry.command("leaderboard", "Top members by XP", move |cmd| {
@@ -455,7 +521,10 @@ fn build(core: &Arc<AgentCore>) -> CommandRegistry {
             let core = Arc::clone(&c);
             async move {
                 let text = match invocation.interaction.guild_id.map(|g| g.get()) {
-                    Some(guild_id) => format!("**🏆 Leaderboard**\n{}", super::levels::leaderboard(&core, guild_id, 10)),
+                    Some(guild_id) => format!(
+                        "**🏆 Leaderboard**\n{}",
+                        super::levels::leaderboard(&core, guild_id, 10)
+                    ),
                     None => "Levels are per server.".to_owned(),
                 };
                 // Names shown, nobody pinged.
@@ -464,7 +533,10 @@ fn build(core: &Arc<AgentCore>) -> CommandRegistry {
                     .http
                     .raw(
                         "POST",
-                        &format!("/interactions/{}/{}/callback", interaction.id, interaction.token),
+                        &format!(
+                            "/interactions/{}/{}/callback",
+                            interaction.id, interaction.token
+                        ),
                         Some(serde_json::json!({ "type": 4, "data": {
                             "content": crate::llm::truncate(&text, 1990),
                             "allowed_mentions": { "parse": [] },
@@ -516,7 +588,11 @@ fn build(core: &Arc<AgentCore>) -> CommandRegistry {
             let core = Arc::clone(&c);
             async move {
                 let started = std::time::Instant::now();
-                let api = invocation.http.get_gateway().await.map(|_| started.elapsed().as_millis());
+                let api = invocation
+                    .http
+                    .get_gateway()
+                    .await
+                    .map(|_| started.elapsed().as_millis());
                 let gateway = core
                     .messenger
                     .lock()
@@ -525,17 +601,146 @@ fn build(core: &Arc<AgentCore>) -> CommandRegistry {
                     .and_then(|m| m.latency())
                     .map(|d| format!("{}ms", d.as_millis()))
                     .unwrap_or_else(|| "measuring…".to_owned());
-                let api = api.map(|ms| format!("{ms}ms")).unwrap_or_else(|_| "unreachable".to_owned());
+                let api = api
+                    .map(|ms| format!("{ms}ms"))
+                    .unwrap_or_else(|_| "unreachable".to_owned());
                 invocation
                     .reply()
-                    .content(format!("🏓 Pong! Gateway: **{gateway}** · API: **{api}**"))
+                    .content(format!("Gateway: **{gateway}** · API: **{api}**"))
                     .await?;
                 Ok(())
             }
         });
     });
 
+    let c = Arc::clone(core);
+    registry.command(
+        "agentinfo",
+        "Everything about this agent: model, framework, tools",
+        move |cmd| {
+            cmd.handler(move |invocation| {
+                let core = Arc::clone(&c);
+                async move {
+                    let profile = core.profile();
+                    let mode = crate::runtime::confirm::mode_of(
+                        &core,
+                        invocation.interaction.guild_id.map(|g| g.get()),
+                    );
+                    let tool_count = crate::tools::catalog().len();
+                    let knowledge = core.world.guild_ids().len();
+                    let text = format!(
+                        "**{}** · Axis Agents v{}
+• Model: **{}** via *{}*
+• Framework: Axis (Rust) + axis-voice
+• Tools: {} available · Servers: {}
+• Operation mode: **{}**
+• Uptime: {}
+• Reply length: {} · Autonomy: {}",
+                        profile.name,
+                        env!("CARGO_PKG_VERSION"),
+                        profile.model.model,
+                        profile.model.provider.label(),
+                        tool_count,
+                        knowledge,
+                        mode.label(),
+                        crate::runtime::commands::uptime_text(&core),
+                        profile.behavior.reply_length.label(),
+                        profile.behavior.autonomy.label(),
+                    );
+                    invocation.reply().content(text).ephemeral(true).await?;
+                    Ok(())
+                }
+            });
+        },
+    );
+
+    let c = Arc::clone(core);
+    registry.command("mode", "Standard or autonomous: how much needs a confirm button", move |cmd| {
+        cmd.option(axis_commands::CommandOption::string("set", "standard or autonomous").finish());
+        cmd.handler(move |invocation| {
+            let core = Arc::clone(&c);
+            async move {
+                let guild_id = invocation.interaction.guild_id.map(|g| g.get());
+                let Some(guild_id) = guild_id else {
+                    invocation.reply().content("/mode only applies inside a server.").ephemeral(true).await?;
+                    return Ok(());
+                };
+                // Only people who can manage the server may change it.
+                let requester = core.principal_for(Some(guild_id),
+                    invocation.interaction.member.as_ref().and_then(|m| m.user.as_ref())
+                    .or(invocation.interaction.user.as_ref())
+                    .ok_or_else(|| axis::prelude::AxisError::invalid_data("no user"))?);
+                let can_manage = requester.kind == crate::runtime::authority::PrincipalKind::Operator
+                    || requester.level >= crate::config::AccessLevel::Moderator;
+                let current = crate::runtime::confirm::mode_of(&core, Some(guild_id));
+                let asked = invocation.opt::<String>("set")?.map(|v| v.trim().to_lowercase());
+
+                if let Some(asked) = asked {
+                    if !can_manage {
+                        invocation.reply()
+                            .content("Only a moderator (or the operator) can change the operation mode.")
+                            .ephemeral(true).await?;
+                        return Ok(());
+                    }
+                    let mode = match asked.as_str() {
+                        "standard" | "s" => crate::memory::OperationMode::Standard,
+                        "autonomous" | "auto" | "a" => crate::memory::OperationMode::Autonomous,
+                        other => {
+                            invocation.reply()
+                                .content(format!("{other:?} is not a mode — use `standard` or `autonomous`."))
+                                .ephemeral(true).await?;
+                            return Ok(());
+                        }
+                    };
+                    core.hive.knowledge.guild_mut(guild_id, |k| k.operation_mode = mode);
+                    invocation.reply()
+                        .content(format!("Operation mode: **{}**.
+{}", mode.label(),
+                            if mode == crate::memory::OperationMode::Autonomous {
+                                "Big actions run without a confirm button; mass operations (huge purges) still ask."
+                            } else {
+                                "Big or irreversible actions post Approve/Cancel buttons first."
+                            }))
+                        .await?;
+                    return Ok(());
+                }
+
+                invocation.reply()
+                    .content(format!(
+                        "Operation mode: **{}**. {}
+Moderators: `/mode set standard` or `/mode set autonomous`.",
+                        current.label(),
+                        if current == crate::memory::OperationMode::Autonomous {
+                            "Big actions run without a confirm button; mass operations still ask."
+                        } else {
+                            "Big or irreversible actions post Approve/Cancel buttons first."
+                        }
+                    ))
+                    .ephemeral(true).await?;
+                Ok(())
+            }
+        });
+    });
+
     registry
+}
+
+/// Human-friendly uptime for /agentinfo.
+pub fn uptime_text(core: &AgentCore) -> String {
+    let uptime = core
+        .live()
+        .snapshot(&core.id)
+        .started_at
+        .map(|at| at.elapsed())
+        .unwrap_or_default();
+    let mins = uptime.as_secs() / 60;
+    if mins < 60 {
+        format!("{mins}m")
+    } else if mins < 60 * 24 {
+        format!("{}h {}m", mins / 60, mins % 60)
+    } else {
+        format!("{}d {}h", mins / (60 * 24), (mins / 60) % 24)
+    }
 }
 
 /// The parts of a command Discord stores that matter for "did it change",
@@ -575,7 +780,12 @@ fn normalize(command: &serde_json::Value) -> serde_json::Value {
 pub fn same_commands(wanted: &[serde_json::Value], registered: &[serde_json::Value]) -> bool {
     let sorted = |list: &[serde_json::Value]| {
         let mut list: Vec<serde_json::Value> = list.iter().map(normalize).collect();
-        list.sort_by_key(|c| c.get("name").and_then(|n| n.as_str()).unwrap_or("").to_owned());
+        list.sort_by_key(|c| {
+            c.get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_owned()
+        });
         list
     };
     sorted(wanted) == sorted(registered)
@@ -600,7 +810,8 @@ const GAP: std::time::Duration = std::time::Duration::from_secs(20);
 /// The command settings, to tell whether the app has unapplied changes.
 pub fn fingerprint(profile: &crate::config::AgentProfile) -> String {
     let b = &profile.behavior;
-    serde_json::to_string(&(b.slash_commands, &b.disabled_commands, &b.custom_commands)).unwrap_or_default()
+    serde_json::to_string(&(b.slash_commands, &b.disabled_commands, &b.custom_commands))
+        .unwrap_or_default()
 }
 
 fn set_status(core: &AgentCore, text: impl Into<String>) {
@@ -623,7 +834,13 @@ pub fn request_sync(core: &Arc<AgentCore>) {
             .map(|t| GAP.saturating_sub(t.elapsed()))
             .unwrap_or_default();
         if !wait.is_zero() {
-            set_status(&core, format!("applying in {}s (Discord rate limits)", wait.as_secs().max(1)));
+            set_status(
+                &core,
+                format!(
+                    "applying in {}s (Discord rate limits)",
+                    wait.as_secs().max(1)
+                ),
+            );
             tokio::time::sleep(wait).await;
         }
         core.command_sync.pending.store(false, Ordering::SeqCst);
@@ -632,9 +849,15 @@ pub fn request_sync(core: &Arc<AgentCore>) {
 }
 
 /// Replace the commands at `path` when they differ from `wanted`.
-async fn put_if_changed(core: &AgentCore, path: &str, wanted: Vec<serde_json::Value>) -> Result<bool, String> {
+async fn put_if_changed(
+    core: &AgentCore,
+    path: &str,
+    wanted: Vec<serde_json::Value>,
+) -> Result<bool, String> {
     match core.http.raw("GET", path, None, None).await {
-        Ok(serde_json::Value::Array(registered)) if same_commands(&wanted, &registered) => return Ok(false),
+        Ok(serde_json::Value::Array(registered)) if same_commands(&wanted, &registered) => {
+            return Ok(false);
+        }
         // Can't read them (e.g. no access to that server's commands) and
         // nothing to add: leave it alone.
         Err(_) if wanted.is_empty() => return Ok(false),
@@ -667,7 +890,11 @@ async fn sync(core: &Arc<AgentCore>) {
         registry
             .to_fields()
             .iter()
-            .filter(|f| f.name.as_deref().is_none_or(|n| !disabled.iter().any(|d| d == n)))
+            .filter(|f| {
+                f.name
+                    .as_deref()
+                    .is_none_or(|n| !disabled.iter().any(|d| d == n))
+            })
             .filter_map(|f| serde_json::to_value(f).ok())
             .collect()
     } else {
@@ -682,9 +909,21 @@ async fn sync(core: &Arc<AgentCore>) {
         Err(error) => errors.push(format!("global: {error}")),
     }
     for guild_id in core.world.guild_ids() {
-        let wanted: Vec<serde_json::Value> = customs(core, Some(guild_id)).iter().map(custom_json).collect();
-        let name = core.world.with_guild(guild_id, |g| g.name.clone()).unwrap_or_else(|| guild_id.to_string());
-        match put_if_changed(core, &format!("/applications/{app_id}/guilds/{guild_id}/commands"), wanted).await {
+        let wanted: Vec<serde_json::Value> = customs(core, Some(guild_id))
+            .iter()
+            .map(custom_json)
+            .collect();
+        let name = core
+            .world
+            .with_guild(guild_id, |g| g.name.clone())
+            .unwrap_or_else(|| guild_id.to_string());
+        match put_if_changed(
+            core,
+            &format!("/applications/{app_id}/guilds/{guild_id}/commands"),
+            wanted,
+        )
+        .await
+        {
             Ok(true) => updated.push(name),
             Ok(false) => {}
             Err(error) => errors.push(format!("{name}: {error}")),
@@ -705,8 +944,16 @@ async fn sync(core: &Arc<AgentCore>) {
 }
 
 /// Run a custom command.
-async fn run_custom(core: &Arc<AgentCore>, interaction: &Interaction, custom: &Custom, input: Option<String>) {
-    let callback = format!("/interactions/{}/{}/callback", interaction.id, interaction.token);
+async fn run_custom(
+    core: &Arc<AgentCore>,
+    interaction: &Interaction,
+    custom: &Custom,
+    input: Option<String>,
+) {
+    let callback = format!(
+        "/interactions/{}/{}/callback",
+        interaction.id, interaction.token
+    );
     let flags = if custom.private { 64 } else { 0 };
     let text = fill(core, &custom.text, interaction, input.as_deref());
     match custom.mode {
@@ -729,9 +976,19 @@ async fn run_custom(core: &Arc<AgentCore>, interaction: &Interaction, custom: &C
             // "Thinking…" while the agent works; its answer replaces it.
             let _ = core
                 .http
-                .raw("POST", &callback, Some(serde_json::json!({ "type": 5, "data": { "flags": flags } })), None)
+                .raw(
+                    "POST",
+                    &callback,
+                    Some(serde_json::json!({ "type": 5, "data": { "flags": flags } })),
+                    None,
+                )
                 .await;
-            let Some(user) = interaction.member.as_ref().and_then(|m| m.user.clone()).or_else(|| interaction.user.clone()) else {
+            let Some(user) = interaction
+                .member
+                .as_ref()
+                .and_then(|m| m.user.clone())
+                .or_else(|| interaction.user.clone())
+            else {
                 return;
             };
             let guild_id = interaction.guild_id.map(|g| g.get());
@@ -742,7 +999,9 @@ async fn run_custom(core: &Arc<AgentCore>, interaction: &Interaction, custom: &C
             }
             let mut question = format!(
                 "{} used your /{} command, which means: {text}\nDo that now (with your tools when needed) and reply with the result.",
-                user.global_name.clone().unwrap_or_else(|| user.username.clone()),
+                user.global_name
+                    .clone()
+                    .unwrap_or_else(|| user.username.clone()),
                 custom.name
             );
             if let Some(input) = input.filter(|i| !i.trim().is_empty()) {
@@ -768,6 +1027,10 @@ async fn run_custom(core: &Arc<AgentCore>, interaction: &Interaction, custom: &C
 }
 
 pub async fn handle(core: &Arc<AgentCore>, interaction: Interaction) {
+    // Approve/Cancel buttons on dangerous actions (AAv2).
+    if super::confirm::Confirmations::on_component(core, &interaction).await {
+        return;
+    }
     // Page buttons on long answers.
     if super::pages::on_component(core, &interaction).await {
         return;
@@ -789,7 +1052,10 @@ pub async fn handle(core: &Arc<AgentCore>, interaction: Interaction) {
         // A built-in turned off in this server.
         if let Some(g) = guild {
             let off = BUILT_IN.iter().any(|(n, _)| *n == data.name)
-                && core.hive.knowledge.guild(g, |k| k.disabled_commands.iter().any(|d| *d == data.name));
+                && core
+                    .hive
+                    .knowledge
+                    .guild(g, |k| k.disabled_commands.iter().any(|d| *d == data.name));
             if off {
                 let _ = core
                     .http
@@ -804,8 +1070,16 @@ pub async fn handle(core: &Arc<AgentCore>, interaction: Interaction) {
             }
         }
         let custom = guild
-            .and_then(|g| customs(core, Some(g)).into_iter().find(|c| c.name == data.name))
-            .or_else(|| customs(core, None).into_iter().find(|c| c.name == data.name));
+            .and_then(|g| {
+                customs(core, Some(g))
+                    .into_iter()
+                    .find(|c| c.name == data.name)
+            })
+            .or_else(|| {
+                customs(core, None)
+                    .into_iter()
+                    .find(|c| c.name == data.name)
+            });
         if let Some(custom) = custom {
             let input = data
                 .options
@@ -844,11 +1118,18 @@ mod tests {
             json!({ "id": "1", "application_id": "9", "version": "4", "type": 1, "name": "ping", "description": "Check the latency", "default_member_permissions": null }),
         ];
         assert!(same_commands(&wanted, &registered));
-        let changed = vec![wanted[0].clone(), json!({ "name": "rank", "description": "Your level and card" })];
+        let changed = vec![
+            wanted[0].clone(),
+            json!({ "name": "rank", "description": "Your level and card" }),
+        ];
         assert!(!same_commands(&changed, &registered));
         assert!(!same_commands(&wanted[..1], &registered));
-        let a = vec![json!({ "name": "quiet", "description": "q", "options": [{ "type": 4, "name": "m", "description": "d", "min_value": 1.0, "max_value": 10080.0 }] })];
-        let b = vec![json!({ "name": "quiet", "type": 1, "description": "q", "options": [{ "type": 4, "name": "m", "description": "d", "min_value": 1, "max_value": 10080 }] })];
+        let a = vec![
+            json!({ "name": "quiet", "description": "q", "options": [{ "type": 4, "name": "m", "description": "d", "min_value": 1.0, "max_value": 10080.0 }] }),
+        ];
+        let b = vec![
+            json!({ "name": "quiet", "type": 1, "description": "q", "options": [{ "type": 4, "name": "m", "description": "d", "min_value": 1, "max_value": 10080 }] }),
+        ];
         assert!(same_commands(&a, &b));
     }
 }
@@ -864,26 +1145,70 @@ mod live {
     async fn lab_registered_commands_match() {
         let config = crate::config::load(&crate::paths::config_path()).expect("config");
         let profile = config.agents[0].clone();
-        let http = Arc::new(axis::rest::Http::builder(Token::new(profile.token.clone())).build().expect("http"));
-        let me = http.raw("GET", "/applications/@me", None, None).await.expect("application");
+        let http = Arc::new(
+            axis::rest::Http::builder(Token::new(profile.token.clone()))
+                .build()
+                .expect("http"),
+        );
+        let me = http
+            .raw("GET", "/applications/@me", None, None)
+            .await
+            .expect("application");
         let app_id = me["id"].as_str().expect("id").to_owned();
-        let hive = super::super::hive::Hive::new(Arc::new(super::super::live::Live::default()), config.settings.clone());
-        let memory = Arc::new(crate::memory::MemoryStore::load(std::env::temp_dir().join("axis-lab-commands.json")));
+        let hive = super::super::hive::Hive::new(
+            Arc::new(super::super::live::Live::default()),
+            config.settings.clone(),
+        );
+        let memory = Arc::new(crate::memory::MemoryStore::load(
+            std::env::temp_dir().join("axis-lab-commands.json"),
+        ));
         let core = AgentCore::new(profile, hive, memory, http, true);
-        let wanted: Vec<serde_json::Value> = build(&core).to_fields().iter().map(|f| serde_json::to_value(f).unwrap()).collect();
-        let registered = core.http.raw("GET", &format!("/applications/{app_id}/commands"), None, None).await.expect("fetch");
+        let wanted: Vec<serde_json::Value> = build(&core)
+            .to_fields()
+            .iter()
+            .map(|f| serde_json::to_value(f).unwrap())
+            .collect();
+        let registered = core
+            .http
+            .raw(
+                "GET",
+                &format!("/applications/{app_id}/commands"),
+                None,
+                None,
+            )
+            .await
+            .expect("fetch");
         let registered = registered.as_array().cloned().unwrap_or_default();
-        let names = |l: &[serde_json::Value]| l.iter().filter_map(|c| c["name"].as_str().map(str::to_owned)).collect::<Vec<_>>();
-        println!("wanted: {:?}\nregistered: {:?}\nsame: {}", names(&wanted), names(&registered), same_commands(&wanted, &registered));
-        let without_ping: Vec<_> = wanted.iter().filter(|c| c["name"] != "ping").cloned().collect();
-        println!("same apart from the new /ping: {}", same_commands(&without_ping, &registered));
+        let names = |l: &[serde_json::Value]| {
+            l.iter()
+                .filter_map(|c| c["name"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        println!(
+            "wanted: {:?}\nregistered: {:?}\nsame: {}",
+            names(&wanted),
+            names(&registered),
+            same_commands(&wanted, &registered)
+        );
+        let without_ping: Vec<_> = wanted
+            .iter()
+            .filter(|c| c["name"] != "ping")
+            .cloned()
+            .collect();
+        println!(
+            "same apart from the new /ping: {}",
+            same_commands(&without_ping, &registered)
+        );
         for w in &without_ping {
             if let Some(r) = registered.iter().find(|r| r["name"] == w["name"]) {
                 let (a, b) = (normalize(w), normalize(r));
                 if a != b {
-                    println!("DIFF {}
+                    println!(
+                        "DIFF {}
   ours:    {a}
-  discord: {b}", w["name"]);
+  discord: {b}",
+                        w["name"]
+                    );
                 }
             }
         }

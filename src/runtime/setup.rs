@@ -35,16 +35,34 @@ fn button(action: &str, label: &str, style: u8) -> Value {
 }
 
 fn toggle(action: &str, label: &str, on: bool) -> Value {
-    button(action, &format!("{label}: {}", if on { "on" } else { "off" }), if on { 3 } else { 2 })
+    button(
+        action,
+        &format!("{label}: {}", if on { "on" } else { "off" }),
+        if on { 3 } else { 2 },
+    )
 }
 
 fn roles_text(roles: &[u64]) -> String {
-    if roles.is_empty() { "none".to_owned() } else { roles.iter().map(|r| format!("<@&{r}>")).collect::<Vec<_>>().join(", ") }
+    if roles.is_empty() {
+        "none".to_owned()
+    } else {
+        roles
+            .iter()
+            .map(|r| format!("<@&{r}>"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// The panel for a section: an embed, a section picker, and (for people
 /// allowed to change things) buttons.
-pub fn render(core: &AgentCore, guild_id: u64, section: &str, can_edit: bool, is_owner: bool) -> Value {
+pub fn render(
+    core: &AgentCore,
+    guild_id: u64,
+    section: &str,
+    can_edit: bool,
+    is_owner: bool,
+) -> Value {
     let k: GuildKnowledge = core.hive.knowledge.guild(guild_id, |k| k.clone());
     let profile = core.profile();
     let l = &k.leveling;
@@ -57,7 +75,15 @@ pub fn render(core: &AgentCore, guild_id: u64, section: &str, can_edit: bool, is
             if k.settings_access.users.is_empty() {
                 String::new()
             } else {
-                format!(", {}", k.settings_access.users.iter().map(|u| format!("<@{u}>")).collect::<Vec<_>>().join(", "))
+                format!(
+                    ", {}",
+                    k.settings_access
+                        .users
+                        .iter()
+                        .map(|u| format!("<@{u}>"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
         )
     } else {
@@ -262,7 +288,15 @@ pub fn render(core: &AgentCore, guild_id: u64, section: &str, can_edit: bool, is
 async fn callback(core: &AgentCore, interaction: &Interaction, kind: u8, data: Value) {
     let _ = core
         .http
-        .raw("POST", &format!("/interactions/{}/{}/callback", interaction.id, interaction.token), Some(json!({ "type": kind, "data": data })), None)
+        .raw(
+            "POST",
+            &format!(
+                "/interactions/{}/{}/callback",
+                interaction.id, interaction.token
+            ),
+            Some(json!({ "type": kind, "data": data })),
+            None,
+        )
         .await;
 }
 
@@ -284,13 +318,27 @@ fn modal_values(components: &Value) -> Vec<(String, String)> {
         .as_array()
         .into_iter()
         .flatten()
-        .flat_map(|row| row.get("components").and_then(Value::as_array).cloned().unwrap_or_default())
-        .filter_map(|c| Some((c.get("custom_id")?.as_str()?.to_owned(), c.get("value")?.as_str()?.to_owned())))
+        .flat_map(|row| {
+            row.get("components")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|c| {
+            Some((
+                c.get("custom_id")?.as_str()?.to_owned(),
+                c.get("value")?.as_str()?.to_owned(),
+            ))
+        })
         .collect()
 }
 
 fn user_of(interaction: &Interaction) -> Option<User> {
-    interaction.member.as_ref().and_then(|m| m.user.clone()).or_else(|| interaction.user.clone())
+    interaction
+        .member
+        .as_ref()
+        .and_then(|m| m.user.clone())
+        .or_else(|| interaction.user.clone())
 }
 
 /// The section a panel message shows, from its select menu.
@@ -299,7 +347,11 @@ fn current_section(interaction: &Interaction) -> String {
         .message
         .as_ref()
         .and_then(|m| m.components.first().cloned())
-        .and_then(|row| row.pointer("/components/0/options").and_then(Value::as_array).cloned())
+        .and_then(|row| {
+            row.pointer("/components/0/options")
+                .and_then(Value::as_array)
+                .cloned()
+        })
         .and_then(|options| {
             options
                 .iter()
@@ -312,8 +364,16 @@ fn current_section(interaction: &Interaction) -> String {
 fn roles_from(core: &AgentCore, guild_id: u64, text: &str) -> (Vec<u64>, Vec<String>) {
     let mut ids = Vec::new();
     let mut unknown = Vec::new();
-    for item in text.split([',', '\n']).map(str::trim).filter(|s| !s.is_empty()) {
-        match core.world.with_guild(guild_id, |g| g.find_role(item).map(|r| r.id.get())).flatten() {
+    for item in text
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        match core
+            .world
+            .with_guild(guild_id, |g| g.find_role(item).map(|r| r.id.get()))
+            .flatten()
+        {
             Some(id) => ids.push(id),
             None => unknown.push(item.to_owned()),
         }
@@ -324,14 +384,22 @@ fn roles_from(core: &AgentCore, guild_id: u64, text: &str) -> (Vec<u64>, Vec<Str
 /// A `/setup` component or form. Returns false when it isn't ours.
 pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> bool {
     let (custom_id, values, modal_components) = match &interaction.data {
-        Some(InteractionData::MessageComponent(d)) => (d.custom_id.clone(), d.values.clone().unwrap_or_default(), None),
-        Some(InteractionData::ModalSubmit(d)) => (d.custom_id.clone(), Vec::new(), Some(d.components.clone())),
+        Some(InteractionData::MessageComponent(d)) => (
+            d.custom_id.clone(),
+            d.values.clone().unwrap_or_default(),
+            None,
+        ),
+        Some(InteractionData::ModalSubmit(d)) => {
+            (d.custom_id.clone(), Vec::new(), Some(d.components.clone()))
+        }
         _ => return false,
     };
     let Some(action) = custom_id.strip_prefix(PREFIX) else {
         return false;
     };
-    let (Some(guild_id), Some(user)) = (interaction.guild_id.map(|g| g.get()), user_of(interaction)) else {
+    let (Some(guild_id), Some(user)) =
+        (interaction.guild_id.map(|g| g.get()), user_of(interaction))
+    else {
         return true;
     };
     if let Some(member) = &interaction.member {
@@ -341,11 +409,21 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
     }
     let who: Principal = core.principal_for(Some(guild_id), &user);
     let can_edit = levels::can_manage(core, guild_id, &who);
-    let is_owner = who.level >= AccessLevel::Owner || who.kind == super::authority::PrincipalKind::Operator;
+    let is_owner =
+        who.level >= AccessLevel::Owner || who.kind == super::authority::PrincipalKind::Operator;
     let mut section = current_section(interaction);
     if action == "section" {
-        section = values.first().cloned().unwrap_or_else(|| "overview".to_owned());
-        callback(core, interaction, 7, render(core, guild_id, &section, can_edit, is_owner)).await;
+        section = values
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "overview".to_owned());
+        callback(
+            core,
+            interaction,
+            7,
+            render(core, guild_id, &section, can_edit, is_owner),
+        )
+        .await;
         return true;
     }
     if !can_edit || (action.starts_with("ac_") || action == "m:access") && !is_owner {
@@ -365,68 +443,183 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
         // Forms open in a pop-up.
         "lvl_edit" => {
             let l = core.hive.knowledge.guild(guild_id, |k| k.leveling.clone());
-            callback(core, interaction, 9, modal("lvl", "Leveling", &[
-                ("xp_min", "Least XP per message", l.xp_min.to_string(), false),
-                ("xp_max", "Most XP per message", l.xp_max.to_string(), false),
-                ("cooldown", "Seconds between XP messages", l.cooldown_secs.to_string(), false),
-                ("voice", "Voice XP per minute (0 = none)", l.voice_xp_per_minute.to_string(), false),
-                ("message", "Level-up message ({user} {level} {name})", l.message.clone(), true),
-            ])).await;
+            callback(
+                core,
+                interaction,
+                9,
+                modal(
+                    "lvl",
+                    "Leveling",
+                    &[
+                        (
+                            "xp_min",
+                            "Least XP per message",
+                            l.xp_min.to_string(),
+                            false,
+                        ),
+                        ("xp_max", "Most XP per message", l.xp_max.to_string(), false),
+                        (
+                            "cooldown",
+                            "Seconds between XP messages",
+                            l.cooldown_secs.to_string(),
+                            false,
+                        ),
+                        (
+                            "voice",
+                            "Voice XP per minute (0 = none)",
+                            l.voice_xp_per_minute.to_string(),
+                            false,
+                        ),
+                        (
+                            "message",
+                            "Level-up message ({user} {level} {name})",
+                            l.message.clone(),
+                            true,
+                        ),
+                    ],
+                ),
+            )
+            .await;
             return true;
         }
         "lvl_rewards" => {
-            let rewards = core.hive.knowledge.guild(guild_id, |k| k.leveling.rewards.clone());
+            let rewards = core
+                .hive
+                .knowledge
+                .guild(guild_id, |k| k.leveling.rewards.clone());
             let text = rewards
                 .iter()
                 .map(|r| {
-                    let name = core.world.with_guild(guild_id, |g| g.roles.get(&r.role_id).map(|x| x.name.clone())).flatten().unwrap_or_else(|| r.role_id.to_string());
+                    let name = core
+                        .world
+                        .with_guild(guild_id, |g| {
+                            g.roles.get(&r.role_id).map(|x| x.name.clone())
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| r.role_id.to_string());
                     format!("{}: {name}", r.level)
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            callback(core, interaction, 9, modal("rewards", "Role rewards", &[("rewards", "One per line: level: role name", text, true)])).await;
+            callback(
+                core,
+                interaction,
+                9,
+                modal(
+                    "rewards",
+                    "Role rewards",
+                    &[("rewards", "One per line: level: role name", text, true)],
+                ),
+            )
+            .await;
             return true;
         }
         "card_edit" => {
-            let c = core.hive.knowledge.guild(guild_id, |k| k.leveling.card.clone());
-            callback(core, interaction, 9, modal("card", "Rank card design", &[
-                ("background", "Background color (#hex)", c.background, false),
-                ("background_url", "Background image URL (optional)", c.background_url, false),
-                ("accent", "Accent color (#hex)", c.accent, false),
-                ("text", "Text color (#hex)", c.text, false),
-                ("muted", "Secondary text color (#hex)", c.muted, false),
-            ])).await;
+            let c = core
+                .hive
+                .knowledge
+                .guild(guild_id, |k| k.leveling.card.clone());
+            callback(
+                core,
+                interaction,
+                9,
+                modal(
+                    "card",
+                    "Rank card design",
+                    &[
+                        ("background", "Background color (#hex)", c.background, false),
+                        (
+                            "background_url",
+                            "Background image URL (optional)",
+                            c.background_url,
+                            false,
+                        ),
+                        ("accent", "Accent color (#hex)", c.accent, false),
+                        ("text", "Text color (#hex)", c.text, false),
+                        ("muted", "Secondary text color (#hex)", c.muted, false),
+                    ],
+                ),
+            )
+            .await;
             return true;
         }
         "ac_edit" => {
-            let a = core.hive.knowledge.guild(guild_id, |k| k.settings_access.clone());
-            let roles = a.roles.iter().filter_map(|r| core.world.with_guild(guild_id, |g| g.roles.get(r).map(|x| x.name.clone())).flatten()).collect::<Vec<_>>().join(", ");
-            let users = a.users.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ");
-            callback(core, interaction, 9, modal("access", "Who can change settings", &[
-                ("roles", "Roles (names, comma-separated)", roles, false),
-                ("users", "People (user IDs, comma-separated)", users, false),
-            ])).await;
+            let a = core
+                .hive
+                .knowledge
+                .guild(guild_id, |k| k.settings_access.clone());
+            let roles = a
+                .roles
+                .iter()
+                .filter_map(|r| {
+                    core.world
+                        .with_guild(guild_id, |g| g.roles.get(r).map(|x| x.name.clone()))
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let users = a
+                .users
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            callback(
+                core,
+                interaction,
+                9,
+                modal(
+                    "access",
+                    "Who can change settings",
+                    &[
+                        ("roles", "Roles (names, comma-separated)", roles, false),
+                        ("users", "People (user IDs, comma-separated)", users, false),
+                    ],
+                ),
+            )
+            .await;
             return true;
         }
         "card_preview" => {
-            let _ = core.http.raw(
-                "POST",
-                &format!("/interactions/{}/{}/callback", interaction.id, interaction.token),
-                Some(json!({ "type": 5, "data": { "flags": 64 } })),
-                None,
-            ).await;
+            let _ = core
+                .http
+                .raw(
+                    "POST",
+                    &format!(
+                        "/interactions/{}/{}/callback",
+                        interaction.id, interaction.token
+                    ),
+                    Some(json!({ "type": 5, "data": { "flags": 64 } })),
+                    None,
+                )
+                .await;
             let data = axis::model::InteractionMessageCallbackData {
                 flags: Some(axis::model::MessageFlags::EPHEMERAL),
                 ..Default::default()
             };
             match levels::rank_card(core, guild_id, user.id.get()).await {
                 Ok((png, _)) => {
-                    let _ = core.http.create_followup(interaction.application_id, interaction.token.clone(), data).file("rank.png", png).await;
+                    let _ = core
+                        .http
+                        .create_followup(
+                            interaction.application_id,
+                            interaction.token.clone(),
+                            data,
+                        )
+                        .file("rank.png", png)
+                        .await;
                 }
                 Err(e) => {
                     let mut data = data;
                     data.content = Some(format!("Couldn't draw the card: {e}"));
-                    let _ = core.http.create_followup(interaction.application_id, interaction.token.clone(), data).await;
+                    let _ = core
+                        .http
+                        .create_followup(
+                            interaction.application_id,
+                            interaction.token.clone(),
+                            data,
+                        )
+                        .await;
                 }
             }
             return true;
@@ -434,14 +627,29 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
         // Form results.
         "m:lvl" => {
             let values = modal_values(modal_components.as_ref().unwrap_or(&Value::Null));
-            let get = |k: &str| values.iter().find(|(f, _)| f == k).map(|(_, v)| v.trim().to_owned());
+            let get = |k: &str| {
+                values
+                    .iter()
+                    .find(|(f, _)| f == k)
+                    .map(|(_, v)| v.trim().to_owned())
+            };
             edit(&|k| {
                 let l = &mut k.leveling;
-                if let Some(v) = get("xp_min").and_then(|v| v.parse().ok()) { l.xp_min = v; }
-                if let Some(v) = get("xp_max").and_then(|v| v.parse().ok()) { l.xp_max = v; }
-                if let Some(v) = get("cooldown").and_then(|v| v.parse().ok()) { l.cooldown_secs = v; }
-                if let Some(v) = get("voice").and_then(|v| v.parse().ok()) { l.voice_xp_per_minute = v; }
-                if let Some(v) = get("message").filter(|v| !v.is_empty()) { l.message = v; }
+                if let Some(v) = get("xp_min").and_then(|v| v.parse().ok()) {
+                    l.xp_min = v;
+                }
+                if let Some(v) = get("xp_max").and_then(|v| v.parse().ok()) {
+                    l.xp_max = v;
+                }
+                if let Some(v) = get("cooldown").and_then(|v| v.parse().ok()) {
+                    l.cooldown_secs = v;
+                }
+                if let Some(v) = get("voice").and_then(|v| v.parse().ok()) {
+                    l.voice_xp_per_minute = v;
+                }
+                if let Some(v) = get("message").filter(|v| !v.is_empty()) {
+                    l.message = v;
+                }
             });
             section = "leveling".into();
         }
@@ -452,10 +660,16 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
             let mut unknown = Vec::new();
             for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
                 let (level, role) = line.split_once([':', '=', '-']).unwrap_or((line, ""));
-                let level = level.trim().trim_start_matches(|c: char| !c.is_ascii_digit()).parse::<u32>();
+                let level = level
+                    .trim()
+                    .trim_start_matches(|c: char| !c.is_ascii_digit())
+                    .parse::<u32>();
                 let (ids, missing) = roles_from(core, guild_id, role);
                 match (level, ids.first()) {
-                    (Ok(level), Some(role_id)) => rewards.push(LevelReward { level, role_id: *role_id }),
+                    (Ok(level), Some(role_id)) => rewards.push(LevelReward {
+                        level,
+                        role_id: *role_id,
+                    }),
                     _ => unknown.push(line.to_owned()),
                 }
                 unknown.extend(missing);
@@ -469,22 +683,46 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
         }
         "m:card" => {
             let values = modal_values(modal_components.as_ref().unwrap_or(&Value::Null));
-            let get = |k: &str| values.iter().find(|(f, _)| f == k).map(|(_, v)| v.trim().to_owned());
+            let get = |k: &str| {
+                values
+                    .iter()
+                    .find(|(f, _)| f == k)
+                    .map(|(_, v)| v.trim().to_owned())
+            };
             edit(&|k| {
                 let c = &mut k.leveling.card;
-                if let Some(v) = get("background").filter(|v| !v.is_empty()) { c.background = v; }
-                if let Some(v) = get("background_url") { c.background_url = v; }
-                if let Some(v) = get("accent").filter(|v| !v.is_empty()) { c.accent = v; }
-                if let Some(v) = get("text").filter(|v| !v.is_empty()) { c.text = v; }
-                if let Some(v) = get("muted").filter(|v| !v.is_empty()) { c.muted = v; }
+                if let Some(v) = get("background").filter(|v| !v.is_empty()) {
+                    c.background = v;
+                }
+                if let Some(v) = get("background_url") {
+                    c.background_url = v;
+                }
+                if let Some(v) = get("accent").filter(|v| !v.is_empty()) {
+                    c.accent = v;
+                }
+                if let Some(v) = get("text").filter(|v| !v.is_empty()) {
+                    c.text = v;
+                }
+                if let Some(v) = get("muted").filter(|v| !v.is_empty()) {
+                    c.muted = v;
+                }
             });
             section = "card".into();
         }
         "m:access" => {
             let values = modal_values(modal_components.as_ref().unwrap_or(&Value::Null));
-            let get = |k: &str| values.iter().find(|(f, _)| f == k).map(|(_, v)| v.clone()).unwrap_or_default();
+            let get = |k: &str| {
+                values
+                    .iter()
+                    .find(|(f, _)| f == k)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
             let (roles, unknown) = roles_from(core, guild_id, &get("roles"));
-            let users: Vec<u64> = get("users").split([',', ' ', '\n']).filter_map(|u| crate::runtime::world::parse_snowflake(u.trim())).collect();
+            let users: Vec<u64> = get("users")
+                .split([',', ' ', '\n'])
+                .filter_map(|u| crate::runtime::world::parse_snowflake(u.trim()))
+                .collect();
             edit(&|k| {
                 k.settings_access.roles = roles.clone();
                 k.settings_access.users = users.clone();
@@ -548,7 +786,11 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
             let mut profile = core.profile();
             apply(&mut profile);
             core.set_profile(profile);
-            core.live().profile_patches.lock().expect("live poisoned").push((core.id.clone(), Box::new(apply)));
+            core.live()
+                .profile_patches
+                .lock()
+                .expect("live poisoned")
+                .push((core.id.clone(), Box::new(apply)));
             core.live().repaint();
         }
         _ => {}
