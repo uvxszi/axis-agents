@@ -424,6 +424,7 @@ async fn scenario_denial(core: &Arc<AgentCore>) -> Result<String, String> {
         autonomous: false,
         replies_here: true,
         media,
+        wants_file_attached: false,
         inputs: vec![],
     };
     let call = axis_agents::llm::ToolCall {
@@ -873,6 +874,7 @@ async fn scenario_numbered_user_pick(core: &Arc<AgentCore>) -> Result<String, St
         media: Arc::new(std::sync::Mutex::new(
             axis_agents::tools::images::Media::default(),
         )),
+        wants_file_attached: false,
         inputs: vec![],
     };
     let listing = axis_agents::tools::users::find_users(&ctx, &serde_json::json!({ "like": "" }))
@@ -937,6 +939,7 @@ async fn scenario_interactive_voting(core: &Arc<AgentCore>) -> Result<String, St
         media: Arc::new(std::sync::Mutex::new(
             axis_agents::tools::images::Media::default(),
         )),
+        wants_file_attached: false,
         inputs: vec![],
     };
 
@@ -1046,6 +1049,7 @@ async fn scenario_gif_and_sticker_search_and_pick(core: &Arc<AgentCore>) -> Resu
         media: Arc::new(std::sync::Mutex::new(
             axis_agents::tools::images::Media::default(),
         )),
+        wants_file_attached: false,
         inputs: vec![],
     };
 

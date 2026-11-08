@@ -95,19 +95,11 @@ pub fn build_body(endpoint: &Endpoint, request: &ChatRequest<'_>, quirks: Quirks
     }
     if let Some(effort) = request.reasoning {
         if !quirks.no_reasoning_effort {
-            // LM Studio's reasoning setting is "on"/"off" only — sending
-            // low/medium/high makes it warn and fall back to "on". Map
-            // the effort to its vocabulary and let thinking_budget_tokens
-            // (below) control the depth instead.
-            if endpoint.kind == ProviderKind::LmStudio {
-                let setting = match effort {
-                    "none" => "off",
-                    _ => "on",
-                };
-                body["reasoning_effort"] = json!(setting);
-            } else {
-                body["reasoning_effort"] = json!(effort);
-            }
+            // Send the effort verbatim (none/low/medium/high — the modern
+            // vocabulary; current LM Studio takes exactly these). Servers
+            // that reject the field reply 400 and learn_quirk drops it on
+            // the retry.
+            body["reasoning_effort"] = json!(effort);
         }
     }
     // LM Studio caps thinking exactly — the only reliable "off" for models

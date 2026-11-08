@@ -13,7 +13,7 @@
 //! - `list_files` shows what exists.
 //!
 //! Files live under `data_dir()/sandbox/{channel}` so a later turn can
-//! attach what an earlier turn made. Everything is capped: 8 MB per file
+//! attach what an earlier turn made. Everything is capped: 25 MB per file
 //! (Discord's bot upload limit), 64 MB per channel sandbox, files pruned
 //! after an hour.
 
@@ -28,12 +28,12 @@ use serde_json::Value;
 use super::{ToolCtx, images};
 use crate::paths;
 
-const MAX_FILE: usize = 8 * 1024 * 1024;
-const MAX_SANDBOX: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_FILE: usize = 25 * 1024 * 1024;
+const MAX_SANDBOX: u64 = 128 * 1024 * 1024;
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SCRIPT_OUTPUT: usize = 2000;
 
-pub(crate) fn sandbox_dir_pub(channel_id: u64) -> PathBuf {
+pub fn sandbox_dir_pub(channel_id: u64) -> PathBuf {
     sandbox_dir(channel_id)
 }
 
@@ -117,15 +117,38 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let dir = sandbox_dir(ctx.channel_id);
     // `size` is an alias for `until_bytes`: an EXACT byte target the app
     // guarantees in code, so "a 1MB file" is 1048576 bytes, never ~900KB.
-    let target: Option<usize> = args
-        .get("until_bytes")
-        .or_else(|| args.get("size"))
-        .and_then(Value::as_u64)
-        .map(|bytes| (bytes as usize).min(MAX_FILE));
+    // A target set on an earlier call for this same file sticks — a model
+    // that drops the arg on a retry must not get to finish small.
+    let target: Option<usize> = {
+        let given = args
+            .get("until_bytes")
+            .or_else(|| args.get("size"))
+            .and_then(Value::as_u64)
+            .map(|bytes| (bytes as usize).min(MAX_FILE));
+        given.or_else(|| {
+            peek_shortfall(ctx.channel_id).and_then(|(n, _, want)| (n == name).then_some(want))
+        })
+    };
     let bytes: Vec<u8> = if let Some(pattern) = args.get("repeat").and_then(Value::as_str) {
-        // Pattern expansion: fast, deterministic, zero model tokens.
+        // Pattern expansion: fast, deterministic, zero model tokens — for
+        // GENERATED DATA (ids, logs, numbers). Prose through repeat is
+        // copy-paste filler; a document goes through write_section.
+        let looks_like_prose = pattern.chars().count() > 240
+            && pattern.contains(". ")
+            && pattern.split_whitespace().count() > 40;
+        if looks_like_prose {
+            return Err(
+                "repeat is for generated data (ids, logs, test data), not prose — a document grows with write_section, section by section"
+                    .to_owned(),
+            );
+        }
         let join = args.get("join").and_then(Value::as_str);
-        let times = args.get("times").and_then(Value::as_u64);
+        // A size target wins over a repeat count: the ask was an exact size.
+        let times = if target.is_some() {
+            None
+        } else {
+            args.get("times").and_then(Value::as_u64)
+        };
         match (times, target) {
             (Some(times), _) => expand_pattern(pattern, join, Some(times as usize), None),
             (None, Some(until)) => expand_pattern(pattern, join, None, Some(until)),
@@ -138,9 +161,11 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         }
     } else if let Some(content) = args.get("content").and_then(Value::as_str) {
         let mut bytes = content.as_bytes().to_vec();
-        // An exact target pads or trims plain content too.
+        // An exact target only trims content down — padding prose UP with
+        // spaces would fake the size (a 4 KB story in a "60 KB" file).
+        // A shortfall lands in the WARNING below instead: keep writing.
         if let Some(until) = target {
-            bytes = exact_size(bytes, until, b' ');
+            bytes.truncate(until);
         }
         bytes
     } else {
@@ -153,25 +178,46 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     if bytes.len() > MAX_FILE {
         return Err(format!(
-            "that's {} bytes — over the {} MB upload limit",
-            bytes.len(),
+            "that's {} MB — over the {} MB upload limit; split the work into several files",
+            bytes.len() / 1024 / 1024,
             MAX_FILE / 1024 / 1024
         ));
     }
+    // Sizes in whole MB only: KB and raw byte counts just mislead small
+    // models comparing magnitudes. (A file with no target that came out
+    // under 1 MB gets a KB label — "0 MB" would read as nothing.)
     let target_note = match target {
-        Some(want) if bytes.len() == want => format!(" exactly the requested {want} bytes"),
+        Some(want) if bytes.len() == want => {
+            format!(" exactly the requested {}", size_label(want))
+        }
         Some(want) => format!(
-            " WARNING: {} bytes, not the requested {want} — call write_file again with until_bytes={want}",
-            bytes.len()
+            " WARNING: only {}, not the {} asked for — and write_file cannot continue a file, so do not call it again with the same content. Keep going with write_section (name: \"{name}\"): it picks up this file and appends section by section until the target.",
+            size_label(bytes.len()),
+            size_label(want)
         ),
-        None => String::new(),
+        None => format!(" ({})", size_label(bytes.len())),
     };
     let path = dir.join(&name);
-    let size = bytes.len();
     paths::write_atomic(&path, &bytes)?;
     enforce_caps(&dir);
+    // Track the shortfall so the brain can push back if the model tries
+    // to answer and walk away from a half-sized file.
+    if let Some(want) = target {
+        note_shortfall(ctx.channel_id, &name, bytes.len(), want);
+    }
+    // The request asked for the file attached: done in the same breath —
+    // no second tool call for the model to fumble.
+    if ctx.wants_file_attached {
+        ctx.media
+            .lock()
+            .expect("media poisoned")
+            .add_file(&name, bytes);
+        return Ok(format!(
+            "wrote {name}{target_note} AND attached it below your reply — nothing else to do, just answer the person."
+        ));
+    }
     Ok(format!(
-        "wrote {name} ({size} bytes,{target_note}) to the file sandbox. Attach it with attach_file (name: \"{name}\") or reference it in convert_file."
+        "wrote {name}{target_note} to the file sandbox. To attach it to your reply, call attach_file (name: \"{name}\") — do not call write_file again."
     ))
 }
 
@@ -229,7 +275,7 @@ pub async fn run_script(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     let text = crate::llm::truncate(&text, MAX_SCRIPT_OUTPUT);
     let after = snapshot_files(&dir);
-    let new_files: Vec<String> = after
+    let new_files: Vec<(String, usize)> = after
         .iter()
         .filter(|(name, _)| {
             !before.iter().any(|(n, _)| n == name)
@@ -238,15 +284,19 @@ pub async fn run_script(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
                     Err(_) => false,
                 }
         })
-        .map(|(name, size)| format!("{name} ({size} bytes)"))
+        .cloned()
         .collect();
-    let files_note = if new_files.is_empty() {
+    let shown: Vec<String> = new_files
+        .iter()
+        .map(|(name, size)| format!("{name} ({})", size_label(*size)))
+        .collect();
+    let files_note = if shown.is_empty() {
         String::new()
     } else {
         format!(
             "
 Files written: {}. Attach with attach_file.",
-            new_files.join(", ")
+            shown.join(", ")
         )
     };
     // When the request named a byte target, verify against it in code —
@@ -257,30 +307,139 @@ Files written: {}. Attach with attach_file.",
             .and_then(Value::as_u64),
         new_files.first(),
     ) {
-        (Some(want), Some(first)) => {
-            // Entries look like "name (123 bytes)".
-            let bytes = first
-                .rsplit('(')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .trim_end_matches(')')
-                .trim_end_matches(" bytes")
-                .parse::<u64>()
-                .ok();
-            match bytes {
-                Some(bytes) if bytes == want => String::new(),
-                Some(bytes) => format!(
+        (Some(want), Some((_, bytes))) => {
+            if *bytes as u64 == want {
+                String::new()
+            } else {
+                format!(
                     "
-NOTE: the file is {bytes} bytes, not the {want} asked for. Fix it deterministically: write_file with repeat + until_bytes={want} hits the exact size."
-                ),
-                None => String::new(),
+NOTE: the file is {} MB, not the {} MB asked for. Fix it deterministically: write_file with repeat + until_bytes={want} hits the exact size.",
+                    bytes / 1024 / 1024,
+                    want / 1024 / 1024
+                )
             }
         }
         _ => String::new(),
     };
     enforce_caps(&dir);
     Ok(format!("```{text}```{status}{files_note}{size_note}"))
+}
+
+/// A size the way the model should read it: KB for anything under a MB
+/// ("0 MB" would read as nothing), whole MB above — the model only ever
+/// compares MB-scale magnitudes, never KB arithmetic.
+pub fn size_label(bytes: usize) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{} KB", (bytes / 1024).max(1))
+    } else {
+        format!("{} MB", bytes / 1024 / 1024)
+    }
+}
+
+/// The channel's open size shortfall (file name, bytes so far, target):
+/// set when a file with a size target comes out short, cleared when it
+/// reaches the target. The brain turns it into a "not finished" nudge so
+/// the model cannot just answer and walk away.
+fn shortfalls() -> &'static std::sync::Mutex<std::collections::HashMap<u64, (String, usize, usize)>>
+{
+    static SHORTFALLS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, (String, usize, usize)>>,
+    > = std::sync::OnceLock::new();
+    SHORTFALLS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn note_shortfall(channel_id: u64, name: &str, have: usize, want: usize) {
+    if have >= want {
+        shortfalls()
+            .lock()
+            .expect("shortfalls poisoned")
+            .remove(&channel_id);
+    } else {
+        shortfalls()
+            .lock()
+            .expect("shortfalls poisoned")
+            .insert(channel_id, (name.to_owned(), have, want));
+    }
+}
+
+pub(crate) fn peek_shortfall(channel_id: u64) -> Option<(String, usize, usize)> {
+    shortfalls()
+        .lock()
+        .expect("shortfalls poisoned")
+        .get(&channel_id)
+        .cloned()
+}
+
+pub(crate) fn clear_shortfall(channel_id: u64) {
+    shortfalls()
+        .lock()
+        .expect("shortfalls poisoned")
+        .remove(&channel_id);
+}
+
+/// Bracket-style attachment markers a small model sometimes writes instead
+/// of calling the tool ("Here it is: [attach_file]" or
+/// "[attach_file: notes.txt]"). The app performs the attachment the model
+/// meant: markers are stripped from the text and the files they named (or,
+/// unnamed, the most recently written sandbox file) are returned for
+/// upload. Never shown to the chat as raw syntax.
+pub(crate) fn repair_attach_markers(
+    channel_id: u64,
+    text: &str,
+) -> (String, Vec<(String, Vec<u8>)>) {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[attach") {
+        let Some(end_rel) = rest[start..].find(']') else {
+            break; // no closing bracket: leave the rest untouched
+        };
+        let end = start + end_rel;
+        out.push_str(&rest[..start]);
+        let inside = &rest[start + 1..end];
+        // "attach_file", "attach" — then an optional ": name" / "name".
+        let named = inside
+            .trim_start_matches("attach_file")
+            .trim_start_matches("attach")
+            .trim_start_matches(':')
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim();
+        let dir = sandbox_dir(channel_id);
+        let candidate = if named.is_empty() {
+            // No name: the file written most recently.
+            snapshot_files(&dir)
+                .into_iter()
+                .max_by_key(|(name, _size)| {
+                    std::fs::metadata(dir.join(name))
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u128)
+                        .unwrap_or(0)
+                })
+                .map(|(name, _)| name)
+        } else {
+            sanitize_name(named).ok()
+        };
+        let attached = candidate.and_then(|name| {
+            let bytes = std::fs::read(dir.join(&name)).ok()?;
+            (bytes.len() <= MAX_FILE).then(|| {
+                files.push((name.clone(), bytes));
+                name
+            })
+        });
+        if attached.is_none() {
+            // Nothing to attach: drop the marker, keep the sentence.
+            tracing::debug!(marker = inside, "attach marker with no matching file");
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    // A lead-in like "attached below:" now tells the truth — the file IS
+    // attached below the reply.
+    (out, files)
 }
 
 fn snapshot_files(dir: &Path) -> Vec<(String, usize)> {
@@ -312,10 +471,7 @@ pub async fn attach_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
     let bytes = std::fs::read(&path)
         .map_err(|_| format!("{name} isn't in the file sandbox — check list_files"))?;
     if bytes.len() > MAX_FILE {
-        return Err(format!(
-            "{name} is {} bytes — over the 8 MB limit",
-            bytes.len()
-        ));
+        return Err(format!("{name} is over the 25 MB limit"));
     }
     ctx.media
         .lock()
@@ -363,7 +519,7 @@ pub async fn convert_file(ctx: &ToolCtx, args: &Value) -> Result<String, String>
         }
     };
     if converted.len() > MAX_FILE {
-        return Err("the converted file is over the 8 MB limit".to_owned());
+        return Err("the converted file is over the 25 MB limit".to_owned());
     }
     paths::write_atomic(&dir.join(&target), &converted)?;
     Ok(format!(
@@ -381,7 +537,7 @@ pub async fn list_files(ctx: &ToolCtx, _args: &Value) -> Result<String, String> 
     enforce_caps(&dir);
     let lines: Vec<String> = files
         .iter()
-        .map(|(name, size)| format!("- {name} ({} bytes)", size))
+        .map(|(name, size)| format!("- {name} ({})", size_label(*size)))
         .collect();
     Ok(format!(
         "Files in this channel's sandbox:\n{}",
@@ -459,6 +615,7 @@ pub(crate) fn expand_pattern(
 }
 
 /// Resize `bytes` to exactly `want` by padding with `pad` or trimming.
+#[cfg(test)]
 pub(crate) fn exact_size(mut bytes: Vec<u8>, want: usize, pad: u8) -> Vec<u8> {
     bytes.truncate(want);
     while bytes.len() < want {

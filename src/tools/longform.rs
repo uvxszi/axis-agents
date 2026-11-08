@@ -27,6 +27,9 @@ struct Doc {
     /// The model's private running summary (never shown to the user).
     summary: String,
     sections: u32,
+    /// The size target for the WHOLE document, remembered from the first
+    /// call that set it — finishing early is not the model's call.
+    target: Option<usize>,
 }
 
 fn docs() -> &'static Mutex<HashMap<u64, Doc>> {
@@ -54,28 +57,74 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
         .get("finished")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let name = args
+    // An optional size target (until_bytes/size) for the WHOLE document:
+    // when set, progress is reported in MB each section and finishing
+    // early is not the model's call.
+    let target: Option<usize> = args
+        .get("until_bytes")
+        .or_else(|| args.get("size"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize);
+    let mut name = args
         .get("name")
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| "document.txt".to_owned());
+    // A file with an open size target was already started (write_file) —
+    // continue THAT one, even when the model forgot to pass its name.
+    {
+        let dir = super::files::sandbox_dir_pub(ctx.channel_id);
+        let named = super::files::sanitize_name_pub(&name)
+            .ok()
+            .map(|n| dir.join(n));
+        let doc_empty = {
+            let map = docs().lock().expect("longform poisoned");
+            map.get(&ctx.channel_id)
+                .map(|d| d.text.is_empty())
+                .unwrap_or(true)
+        };
+        if doc_empty && !named.as_ref().is_some_and(|p| p.exists()) {
+            if let Some((short_name, _, _)) = super::files::peek_shortfall(ctx.channel_id) {
+                let path = super::files::sanitize_name_pub(&short_name)
+                    .ok()
+                    .map(|n| dir.join(n));
+                if path.as_ref().is_some_and(|p| p.exists()) {
+                    name = short_name;
+                }
+            }
+        }
+    }
 
-    let (total_before, _tail_before, summary_before, sections_before) = {
+    let (summary_before, sections_before, doc_target) = {
         let mut map = docs().lock().expect("longform poisoned");
         let doc = map.entry(ctx.channel_id).or_default();
+        // The target sticks once set: a model that drops until_bytes on a
+        // later call must not get to finish early.
+        if target.is_some() {
+            doc.target = target;
+        }
+        let doc_target = doc.target;
+        // A file the model already started with write_file under this
+        // name: pick it up so the document continues instead of restarting.
+        if doc.text.is_empty() {
+            let existing = std::fs::read(
+                super::files::sandbox_dir_pub(ctx.channel_id)
+                    .join(super::files::sanitize_name_pub(&name).unwrap_or_else(|_| name.clone())),
+            )
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default();
+            if !existing.trim().is_empty() {
+                doc.text = existing;
+            }
+        }
         if !doc.text.is_empty() && !doc.text.ends_with('\n') {
             doc.text.push('\n');
         }
         doc.text.push_str(section);
         doc.sections += 1;
-        (
-            doc.text.len(),
-            tail_of(&doc.text),
-            doc.summary.clone(),
-            doc.sections,
-        )
+        (doc.summary.clone(), doc.sections, doc_target)
     };
-    let _ = total_before;
 
     // Fold the new section into the private summary. The summary is the
     // model's memory of its own text — characters, plot, arguments made,
@@ -114,6 +163,24 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
         )
     };
 
+    let (current_label, target_label, short) = {
+        let map = docs().lock().expect("longform poisoned");
+        let len = map.get(&ctx.channel_id).map(|d| d.text.len()).unwrap_or(0);
+        let current = super::files::size_label(len);
+        let want = doc_target.map(super::files::size_label).unwrap_or_default();
+        let short = doc_target.is_some_and(|t| len < t);
+        // Keep the shortfall current so the brain's "not finished" nudge
+        // reflects real progress (and clears when the target is met).
+        if let Some(t) = doc_target {
+            super::files::note_shortfall(ctx.channel_id, &name, len, t);
+        }
+        (current, want, short)
+    };
+    if done && short {
+        return Err(format!(
+            "not finished: the document is {current_label} of the {target_label} asked for. Keep writing sections — finished: true is not allowed until the target is reached."
+        ));
+    }
     if done {
         // Publish: write the whole document to the sandbox as a file.
         let text = {
@@ -126,16 +193,41 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
         let path = dir.join(super::files::sanitize_name_pub(&name)?);
         crate::paths::write_atomic(&path, text.as_bytes())?;
         let chars = text.chars().count();
+        let label = super::files::size_label(text.len());
+        // The ask was "a file" — deliver it: attach with the reply (when
+        // it fits an upload) instead of leaving the model to chain
+        // another tool call.
+        if text.len() <= super::files::MAX_FILE {
+            ctx.media
+                .lock()
+                .expect("media poisoned")
+                .add_file(&name, text.into_bytes());
+            return Ok(format!(
+                "document finished: {chars} characters ({label}) across {sections_before} sections, saved as {name} AND attached below your reply — just confirm to the person, do not rewrite it in chat."
+            ));
+        }
         return Ok(format!(
-            "document finished: {chars} characters across {sections_before} sections, saved as {name}. Attach it with attach_file (name: \"{name}\"). Do not rewrite it in chat."
+            "document finished: {chars} characters ({label}) across {sections_before} sections, saved as {name} in the sandbox (too large to attach). Do not rewrite it in chat."
         ));
     }
 
+    let progress = if doc_target.is_some() {
+        format!(
+            " Document so far: {current_label} of the {target_label} target — keep writing until you reach it."
+        )
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "Section {sections_before} kept ({tail_after_len} chars so far). Continue with the next section.\nYOUR PRIVATE NOTES (the user never sees these; do not repeat them as text):\n{summary}\nThe document currently ends with:\n---\n{tail_before_and_after}\n---\nWrite the next section now — continue seamlessly from that ending. Same voice, no recap, no heading like 'Section {next}' unless the structure calls for it.",
-        tail_after_len = tail_after.len(),
-        tail_before_and_after = tail_after,
-        next = sections_before + 1,
+        "Section {sections_before} kept.{progress}
+YOUR PRIVATE NOTES (the user never sees these; do not repeat them as text):
+{summary}
+The document currently ends with:
+---
+{tail}
+---
+Write the next section now — continue seamlessly from that ending. Same voice, no recap, never a summary in place of prose.",
+        tail = tail_after,
     ))
 }
 

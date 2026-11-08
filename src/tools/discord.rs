@@ -8,6 +8,10 @@ use axis::prelude::{
     ChannelId, EmojiId, GenericId, GuildId, MessageId, Permissions, RoleId, Timestamp, UserId,
 };
 use serde_json::Value;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 
 use super::{ToolCtx, arg, discord_error, flag, list, number, required};
 use crate::memory::{ModAction, Strike, now_ms};
@@ -269,7 +273,10 @@ fn format_time(ts: Timestamp) -> String {
     )
 }
 
-pub fn format_message(message: &Message) -> String {
+/// Render a message for the model. `guild_id` comes from the caller's
+/// context: REST-fetched messages don't carry one, but the jump link needs
+/// it (gateway messages' own guild_id wins when present).
+pub fn format_message(guild_id: Option<u64>, message: &Message) -> String {
     let author = message
         .member
         .as_ref()
@@ -288,6 +295,16 @@ pub fn format_message(message: &Message) -> String {
         },
         message.content
     );
+    // A ready-to-copy jump link: the model pastes this verbatim, never
+    // builds one from ids.
+    if let Some(guild_id) = message.guild_id.map(|g| g.get()).or(guild_id) {
+        let url = format!(
+            "https://discord.com/channels/{}/{}/{}",
+            guild_id, message.channel_id, message.id
+        );
+        remember_link(message.id.get(), &url);
+        line.push_str(&format!(" [link: {url}]"));
+    }
     for attachment in &message.attachments {
         line.push_str(&format!(" [attachment: {}]", attachment.filename));
     }
@@ -619,15 +636,98 @@ pub async fn read_messages(ctx: &ToolCtx, args: &Value) -> Result<String, String
         request = request.before(MessageId::new(before));
     }
     let mut messages = request.await.map_err(discord_error)?;
+    // The bot's own status messages (the work icon and its progress
+    // edits) are for the room, not for the model — reading them back
+    // makes it talk about its own "thinking".
+    let me = ctx.core.world.my_id();
+    messages.retain(|m| !(m.author.id.get() == me && is_status_content(&m.content)));
     messages.reverse();
     if messages.is_empty() {
         return Ok("no messages".to_owned());
     }
+    let guild = ctx.guild_id;
     Ok(messages
         .iter()
-        .map(format_message)
+        .map(|m| format_message(guild, m))
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join(
+            "
+",
+        ))
+}
+
+/// Is this the content of one of the bot's own status messages? The bare
+/// work icon (often alone), possibly with short progress lines under it —
+/// never real prose.
+pub(crate) fn is_status_content(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lines: Vec<&str> = trimmed.lines().collect();
+    lines.iter().all(|line| {
+        let line = line.trim().trim_start_matches("-#").trim();
+        line.chars().count() <= 48 && !line.ends_with(['.', '!', '?'])
+    }) && lines.len() <= 4
+}
+
+/// Message jump links the model was shown (read_messages/search), by
+/// message id — the canonical form, built by the app.
+fn shown_links() -> &'static Mutex<HashMap<u64, String>> {
+    static LINKS: OnceLock<Mutex<HashMap<u64, String>>> = OnceLock::new();
+    LINKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_link(message_id: u64, url: &str) {
+    let mut links = shown_links().lock().expect("links poisoned");
+    links.insert(message_id, url.to_owned());
+    // A bounded cache: the most recent links are the relevant ones.
+    if links.len() > 400 {
+        let oldest: Vec<u64> = links.keys().copied().take(100).collect();
+        for id in oldest {
+            links.remove(&id);
+        }
+    }
+}
+
+/// Small models re-compose jump links from what they remember ("…/Probe
+/// Server/general/303") instead of pasting the one they were given. Any
+/// discord.com/channels URL in a reply whose trailing message id is known
+/// is rewritten to the canonical URL the app showed; unknown ones are left
+/// untouched.
+pub(crate) fn repair_links(text: &str) -> String {
+    const PREFIX: &str = "https://discord.com/channels/";
+    if !text.contains(PREFIX) {
+        return text.to_owned();
+    }
+    let links = shown_links().lock().expect("links poisoned").clone();
+    if links.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(PREFIX) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + PREFIX.len()..];
+        // The URL runs until whitespace or a closing bracket/paren.
+        let end = after
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '>' | '|'))
+            .unwrap_or(after.len());
+        let candidate = &after[..end];
+        let last_number = candidate.rsplit('/').next().unwrap_or("");
+        match last_number
+            .parse::<u64>()
+            .ok()
+            .and_then(|id| links.get(&id))
+        {
+            Some(canonical) => out.push_str(canonical),
+            // Unknown or partial: paste it back as-is rather than break it.
+            None => out.push_str(&rest[start..start + PREFIX.len() + end]),
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 pub async fn search_messages(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -661,13 +761,22 @@ pub async fn search_messages(ctx: &ToolCtx, args: &Value) -> Result<String, Stri
                     message.author.to_lowercase().contains(a) || message.author_id.to_string() == *a
                 });
                 if author_ok && query.split_whitespace().all(|word| content.contains(word)) {
+                    let link = Some(guild_id).map(|g| {
+                        let url = format!(
+                            "https://discord.com/channels/{g}/{channel_id}/{}",
+                            message.id
+                        );
+                        remember_link(message.id, &url);
+                        format!(" [link: {url}]")
+                    });
                     hits.push((
                         message.id,
                         format!(
-                            "#{name} [id {}] {}: {}",
+                            "#{name} [id {}] {}: {}{link}",
                             message.id,
                             message.author,
-                            crate::llm::truncate(&message.content, 300)
+                            crate::llm::truncate(&message.content, 300),
+                            link = link.unwrap_or_default()
                         ),
                     ));
                 }
@@ -701,10 +810,11 @@ pub async fn get_pinned(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     if pins.items.is_empty() {
         return Ok("no pinned messages".to_owned());
     }
+    let guild = ctx.guild_id;
     Ok(pins
         .items
         .iter()
-        .map(|p| format_message(&p.message))
+        .map(|p| format_message(guild, &p.message))
         .collect::<Vec<_>>()
         .join("\n"))
 }

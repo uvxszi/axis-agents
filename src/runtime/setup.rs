@@ -234,13 +234,11 @@ pub fn render(
                 ("Name".into(), profile.name.clone()),
                 ("Model".into(), profile.model.model.clone()),
                 ("Thinking message".into(), format!("{} · {}", profile.behavior.thinking_style.label(), if profile.behavior.small_thinking { "small text" } else { "normal text" })),
-                ("\"thought for\" footer".into(), on_off(profile.behavior.show_footer).to_owned()),
                 ("Voice".into(), format!("answers out loud: {} · voice: {}", on_off(profile.voice.listen), crate::runtime::speech::current_voice(&profile.voice))),
                 ("More".into(), "Everything else is in the Axis Agents app.".into()),
             ],
             vec![json!({ "type": 1, "components": [
                 toggle("ag_small", "Small thinking text", profile.behavior.small_thinking),
-                toggle("ag_footer", "Footer", profile.behavior.show_footer),
                 toggle("ag_listen", "Answer in voice", profile.voice.listen),
             ]})],
         ),
@@ -776,11 +774,10 @@ pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> b
         "pv_dms" => edit(&|k| k.privacy.dms = !k.privacy.dms),
         "pv_messages" => edit(&|k| k.privacy.outside_messages = !k.privacy.outside_messages),
         "pv_audit" => edit(&|k| k.privacy.audit_search = !k.privacy.audit_search),
-        "ag_small" | "ag_footer" | "ag_listen" => {
+        "ag_small" | "ag_listen" => {
             let action = action.to_owned();
             let apply = move |p: &mut crate::config::AgentProfile| match action.as_str() {
                 "ag_small" => p.behavior.small_thinking = !p.behavior.small_thinking,
-                "ag_footer" => p.behavior.show_footer = !p.behavior.show_footer,
                 _ => p.voice.listen = !p.voice.listen,
             };
             let mut profile = core.profile();

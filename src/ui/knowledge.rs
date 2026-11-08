@@ -339,6 +339,84 @@ fn directives(app: &mut App, ui: &mut Ui, guild_id: u64) {
                 .guild_mut(guild_id, |k| k.quiet.clear());
         }
     });
+    ui.add_space(8.0);
+    // "Never chat in #x" — the harshest rule, and the one a confused
+    // agent can set on itself. It must always be visible and liftable.
+    let no_chat = app
+        .sup
+        .hive
+        .knowledge
+        .guild(guild_id, |k| k.no_chat.clone());
+    card(ui, |ui| {
+        section(
+            ui,
+            "No-chat rules",
+            "Channels where an agent never speaks at all — set in chat, by a person or by the agent itself.",
+        );
+        if no_chat.is_empty() {
+            ui.label(RichText::new("None.").color(FAINT));
+        }
+        for rule in &no_chat {
+            let channel = app
+                .sup
+                .hive
+                .knowledge
+                .channel(rule.channel_id, |a| a.name.clone());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "never chats in #{channel} · set by {} · for {}",
+                        rule.setter_name,
+                        rule.agent_id.as_deref().unwrap_or("all agents")
+                    ))
+                    .color(TEXT),
+                );
+                if ui.small_button("lift").clicked() {
+                    app.sup.hive.knowledge.guild_mut(guild_id, |k| {
+                        k.no_chat.retain(|r| {
+                            !(r.channel_id == rule.channel_id && r.agent_id == rule.agent_id)
+                        })
+                    });
+                }
+            });
+        }
+    });
+    ui.add_space(8.0);
+    let chill = app.sup.hive.knowledge.guild(guild_id, |k| k.chill.clone());
+    card(ui, |ui| {
+        section(
+            ui,
+            "Chill channels",
+            "Extra-brief mode with self-pruning — set with \"be chill in #x\".",
+        );
+        if chill.is_empty() {
+            ui.label(RichText::new("None.").color(FAINT));
+        }
+        for rule in &chill {
+            let channel = app
+                .sup
+                .hive
+                .knowledge
+                .channel(rule.channel_id, |a| a.name.clone());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "chill in #{channel} · set by {} · for {}",
+                        rule.setter_name,
+                        rule.agent_id.as_deref().unwrap_or("all agents")
+                    ))
+                    .color(TEXT),
+                );
+                if ui.small_button("lift").clicked() {
+                    app.sup.hive.knowledge.guild_mut(guild_id, |k| {
+                        k.chill.retain(|r| {
+                            !(r.channel_id == rule.channel_id && r.agent_id == rule.agent_id)
+                        })
+                    });
+                }
+            });
+        }
+    });
 }
 
 fn moderation(app: &mut App, ui: &mut Ui, guild_id: u64) {

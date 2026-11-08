@@ -146,7 +146,7 @@ fn build_catalog() -> Vec<ToolDef> {
             required: []),
         tool!("read_messages", ServerInfo, Conversational, Permissions::READ_MESSAGE_HISTORY, guild: false, core: true,
             keywords: ["earlier", "said", "messages", "history", "read", "summar", "recap", "context", "scroll", "above", "latest", "last", "update", "news", "changelog", "release", "version", "announce", "channel", "what's new", "check"],
-            "Read recent messages in a channel (newest last). Use it whenever a question is about what's in a channel — latest updates, announcements, what someone said — instead of answering from memory.",
+            "Read recent messages in a channel (newest last). Use it whenever a question is about what's in a channel — latest updates, announcements, what someone said — instead of answering from memory. \"What I/they said above\" means the last few messages: start with limit 10 and only page further back (before_message_id) if those don't cover it.",
             { "channel": ("string", "Channel name, e.g. general (omit for this one)"), "limit": ("integer", "How many (1-100, default 30)"), "before_message_id": ("string", "Only messages before this ID") },
             required: []),
         tool!("search_messages", ServerInfo, Conversational, none, guild: true, core: false,
@@ -166,8 +166,8 @@ fn build_catalog() -> Vec<ToolDef> {
             keywords: ["thread", "threads", "forum", "post", "posts"],
             "List active threads and forum posts.", {}, required: []),
         tool!("voice_overview", ServerInfo, Conversational, none, guild: true, core: false,
-            keywords: ["voice", "vc", "call", "talking", "who's in"],
-            "Show who is in which voice channel.", {}, required: []),
+            keywords: ["voice", "vc", "who's in"],
+            "Show who is in which voice channel. Only for questions about VOICE channels — who is in a call, who's in VC. Never for text-channel questions or general chat.", {}, required: []),
         // --- messaging -------------------------------------------------------
         tool!("send_message", Messaging, Helper, Permissions::SEND_MESSAGES, guild: false, core: false,
             keywords: ["send", "post", "announce", "tell", "say", "message", "channel"],
@@ -646,12 +646,12 @@ fn build_catalog() -> Vec<ToolDef> {
             required: []),
         tool!("write_file", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["file", "write", "make a file", "create a file", "save", "document", "txt", "csv", "json", "generate", "repeated", "1mb", "mb file"],
-            "Write a file into this channel's file sandbox. For a SIZE-targeted or repetitive file (\"a 1MB file of the word legion\") this is the right tool: pass `repeat`, `until_bytes` (or `size`) for the exact byte count, and `join` for the separator — join: \" \") puts a space between repeats, the default is a newline. The app hits the exact size every time and you write none of the bytes yourself. For normal content pass `content` (an exact size pads/trims it too). Max 8 MB. Attach the result with attach_file.",
+            "Write a file into this channel's file sandbox. For a SIZE-targeted or repetitive file (\"a 1MB file of the word legion\") this is the right tool: pass `repeat`, `until_bytes` (or `size`) for the exact byte count, and `join` for the separator — join: \" \") puts a space between repeats, the default is a newline. The app hits the exact size every time and you write none of the bytes yourself. For normal content pass `content` (an exact size pads/trims it too). Max 25 MB. Attach the result with attach_file.",
             { "name": ("string", "File name, e.g. legion.txt"), "content": ("string", "The file's text content (omit when using repeat)"), "repeat": ("string", "A short pattern to repeat (e.g. a word or line)"), "times": ("number", "Repeat count (with repeat)"), "until_bytes": ("number", "EXACT target size in bytes — the file will be exactly this many bytes"), "size": ("number", "Alias for until_bytes"), "join": ("string", "Separator between repeats: a space \" \") for readable columns, \"\n\" or omit for lines") }, required: ["name"]),
         tool!("write_section", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["chapter", "story", "essay", "write", "section", "novel", "long", "continue writing", "part", "scene", "article", "guide", "document"],
-            "Write ONE section of a long document (a chapter, scene, essay part — roughly 300-800 words of actual prose, never a summary). The app keeps the full text and gives you back your private running notes plus the last lines, so you can write any length without the text crowding your memory. Repeat per section; pass finished: true on the last one and it is saved as a file you attach. Never write the whole piece in one reply and never summarize instead of writing — the section IS the content.",
-            { "text": ("string", "The section's full text — real prose, not a summary"), "finished": ("boolean", "true when this is the last section (saves the file)"), "name": ("string", "File name for the finished document (default document.txt)") }, required: ["text"]),
+            "Write ONE section of a long document (a chapter, scene, essay part — 500-1500 words of actual prose, never a summary). The app keeps the full text and gives you back your private running notes plus the last lines, so you can write any length without the text crowding your memory. If a file with this name was already started (write_file), it picks up where that file ends and appends. Repeat per section; pass finished: true on the last one and it is saved as a file you attach. Never write the whole piece in one reply and never summarize instead of writing — the section IS the content.",
+            { "text": ("string", "The section's full text — real prose, not a summary"), "finished": ("boolean", "true on the LAST section (saves the file; NOT allowed before a size target is reached)"), "until_bytes": ("number", "Target size in bytes for the WHOLE document — pass it on every section"), "size": ("number", "Alias for until_bytes"), "name": ("string", "File name for the finished document (default document.txt)") }, required: ["text"]),
         tool!("run_script", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["script", "python", "code", "compute", "calculate", "generate", "loop", "program", "execute", "sandbox"],
             "Run a short Python script in this channel's sandbox (isolated mode, 30s limit). Use it whenever the job is computational or repetitive: generate files, crunch numbers, transform data — write 5 lines of code instead of producing content by hand. The script sees and writes files in the sandbox; anything it writes can be attached with attach_file. Output (stdout+stderr) comes back to you.",
@@ -695,6 +695,10 @@ pub struct ToolCtx {
     pub replies_here: bool,
     /// Images made or loaded for this reply (uploaded with it).
     pub media: Arc<std::sync::Mutex<images::Media>>,
+    /// The person's request asked for the file to be attached/sent with
+    /// the reply ("write X and attach it") — write_file then attaches as
+    /// soon as it writes; the model never has to chain a second call.
+    pub wants_file_attached: bool,
     /// Images around the conversation (on the message being answered,
     /// the one it replies to, recent ones), by name.
     pub inputs: Vec<crate::runtime::vision::ImageSource>,
@@ -1122,6 +1126,7 @@ pub async fn run_confirmed(
         autonomous: false,
         replies_here: true,
         media: Arc::default(),
+        wants_file_attached: false,
         inputs: Vec::new(),
     };
     let run = dispatch(&ctx, name, &args);

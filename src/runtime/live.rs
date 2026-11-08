@@ -186,11 +186,31 @@ pub struct Live {
     pub profile_patches: Mutex<Vec<(String, ProfilePatch)>>,
     agents: Mutex<HashMap<String, AgentLive>>,
     feed: Mutex<VecDeque<FeedItem>>,
+    /// Every job's process, kept after it finishes — the "Thinking" card
+    /// shows the live one; this is the full history the operator can
+    /// scroll back through.
+    journal: Mutex<Vec<ProcessEntry>>,
     pub playground: Mutex<HashMap<String, Playground>>,
     pub probes: Mutex<HashMap<String, Probe>>,
     pub mcp: Mutex<HashMap<String, McpStatus>>,
     egui: Mutex<Option<egui::Context>>,
     thought_ids: AtomicU64,
+}
+
+/// One finished (or running) job in the process journal.
+#[derive(Debug, Clone)]
+pub struct ProcessEntry {
+    pub id: u64,
+    pub agent_id: String,
+    pub channel: String,
+    pub about: String,
+    pub started_ms: i64,
+    pub ended_ms: Option<i64>,
+    pub steps: Vec<String>,
+    /// The last of the model's reasoning (capped when stored).
+    pub reasoning: String,
+    /// The final answer (capped when stored).
+    pub answer: String,
 }
 
 impl Live {
@@ -279,8 +299,8 @@ impl Live {
         self.agent(agent, |live| {
             live.thoughts.push(Thought {
                 id,
-                channel,
-                about,
+                channel: channel.clone(),
+                about: about.clone(),
                 started: Instant::now(),
                 phase: "reading the conversation".to_owned(),
                 reasoning: String::new(),
@@ -288,6 +308,24 @@ impl Live {
                 steps: Vec::new(),
             })
         });
+        // The journal keeps every job — the live thought disappears when
+        // the job ends, this stays for the process log.
+        let mut journal = self.journal.lock().expect("live poisoned");
+        journal.push(ProcessEntry {
+            id,
+            agent_id: agent.to_owned(),
+            channel,
+            about,
+            started_ms: crate::memory::now_ms(),
+            ended_ms: None,
+            steps: Vec::new(),
+            reasoning: String::new(),
+            answer: String::new(),
+        });
+        if journal.len() > 300 {
+            let drop = journal.len() - 300;
+            journal.drain(..drop);
+        }
         id
     }
 
@@ -297,9 +335,38 @@ impl Live {
                 f(thought);
             }
         });
+        // Mirror into the journal so the log matches what happened.
+        let mut mirror = None;
+        self.agent(agent, |live| {
+            if let Some(thought) = live.thoughts.iter().find(|t| t.id == id) {
+                mirror = Some((
+                    thought.steps.clone(),
+                    crate::llm::truncate(&thought.reasoning, 600).to_owned(),
+                    crate::llm::truncate(&thought.answer, 900).to_owned(),
+                ));
+            }
+        });
+        if let Some((steps, reasoning, answer)) = mirror {
+            let mut journal = self.journal.lock().expect("live poisoned");
+            if let Some(entry) = journal.iter_mut().find(|e| e.id == id) {
+                entry.steps = steps;
+                entry.reasoning = reasoning;
+                entry.answer = answer;
+            }
+        }
     }
 
     pub fn end_thought(&self, agent: &str, id: u64) {
         self.agent(agent, |live| live.thoughts.retain(|t| t.id != id));
+        let mut journal = self.journal.lock().expect("live poisoned");
+        if let Some(entry) = journal.iter_mut().find(|e| e.id == id) {
+            entry.ended_ms = Some(crate::memory::now_ms());
+        }
+    }
+
+    /// The process journal, newest first.
+    pub fn process_log(&self, limit: usize) -> Vec<ProcessEntry> {
+        let journal = self.journal.lock().expect("live poisoned");
+        journal.iter().rev().take(limit).cloned().collect()
     }
 }

@@ -1678,12 +1678,6 @@ fn behavior(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
             "Small thinking text",
             "Show the thinking message in Discord's small subtext (-#) instead of normal size.",
         );
-        toggle_row(
-            ui,
-            &mut b.show_footer,
-            "\"thought for 3.2s\" footer",
-            "A small line under replies.",
-        );
         form_row(
             ui,
             "Working reaction",

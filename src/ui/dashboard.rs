@@ -157,6 +157,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 thinking_now(app, &mut cols[0]);
                 activity(app, &mut cols[1], None);
             });
+            ui.add_space(8.0);
+            process_log(app, ui);
         });
 }
 
@@ -220,6 +222,76 @@ fn thinking_now(app: &App, ui: &mut Ui) {
         }
         if !any {
             ui.label(RichText::new("Nobody is thinking right now.").color(FAINT));
+        }
+    });
+}
+
+/// The full process history: every job the agents ran, kept after it
+/// finished — what it was about, the steps it took, its reasoning and
+/// answer. Nothing disappears when a job completes.
+pub fn process_log(app: &App, ui: &mut Ui) {
+    let log = app.sup.live.process_log(60);
+    card(ui, |ui| {
+        widgets::section(
+            ui,
+            "📜 Process log",
+            "Every job, kept after it finishes — steps, reasoning, and the answer.",
+        );
+        if log.is_empty() {
+            ui.label(RichText::new("Nothing yet.").color(FAINT));
+            return;
+        }
+        for entry in &log {
+            egui::CollapsingHeader::new(
+                RichText::new(format!(
+                    "{} · #{} · {}",
+                    entry.agent_id,
+                    entry.channel,
+                    crate::llm::truncate(&entry.about, 80)
+                ))
+                .size(12.5)
+                .color(TEXT),
+            )
+            .id_salt(("process", entry.id))
+            .show_unindented(ui, |ui| {
+                let duration = entry
+                    .ended_ms
+                    .map(|end| format!("{}s", (end - entry.started_ms) / 1000))
+                    .unwrap_or_else(|| "running".to_owned());
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} step{}",
+                        duration,
+                        entry.steps.len(),
+                        if entry.steps.len() == 1 { "" } else { "s" }
+                    ))
+                    .size(12.0)
+                    .color(WEAK),
+                );
+                for (n, step) in entry.steps.iter().enumerate() {
+                    ui.label(
+                        RichText::new(format!("{}. {}", n + 1, step))
+                            .size(12.5)
+                            .color(theme::BLUE),
+                    );
+                }
+                if !entry.reasoning.trim().is_empty() {
+                    ui.label(
+                        RichText::new(crate::llm::truncate(entry.reasoning.trim(), 500))
+                            .italics()
+                            .size(12.5)
+                            .color(WEAK),
+                    );
+                }
+                if !entry.answer.trim().is_empty() {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(crate::llm::truncate(entry.answer.trim(), 700))
+                            .size(13.0)
+                            .color(TEXT),
+                    );
+                }
+            });
         }
     });
 }

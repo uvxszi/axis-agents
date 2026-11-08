@@ -364,6 +364,10 @@ pub fn gate(
         "delete_event" => Some("delete a server event".to_owned()),
         "ban_member" => Some("ban a member".to_owned()),
         "edit_server" => Some("change server settings".to_owned()),
+        // Muting itself is the one trap an agent can walk into from a
+        // vague "settle down": a wrong no-chat rule silences it in a
+        // whole channel until someone lifts it in the app.
+        "stop_chatting_in" => Some("stop chatting in a channel (no-chat rule)".to_owned()),
         "purge_messages" => Some(format!("purge {purge_count} messages")),
         "discord_api" => args
             .get("method")

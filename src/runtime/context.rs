@@ -716,12 +716,21 @@ fn instruction(core: &AgentCore, job: &Job) -> String {
             job.question.as_deref().unwrap_or("")
         );
     }
+    let latest_text = last
+        .map(|m| m.full_text().trim().to_owned())
+        .unwrap_or_default();
     match job.reason {
-        Reason::Direct => {
-            format!("{who} is talking to you (message {ids}). Reply to them directly.")
-        }
+        Reason::Direct => format!(
+            "{who} is talking to you. Their message:
+\"{latest_text}\"
+
+That quoted message — and nothing older — is what you answer now; the conversation above is only background. If it asks you to DO something (send, make, find, attach, change…), do it with a tool first, then confirm. If it is only a remark (about noise, mood, the channel), answer THAT briefly — never drift back to an older topic."
+        ),
         Reason::Conversation => format!(
-            "You were just talking with {who}; their latest message ({ids}) may be meant for you. If it is, reply. If they're clearly talking to someone else, reply exactly NO_REPLY."
+            "You were just talking with {who}. Their latest message:
+\"{latest_text}\"
+
+That quoted message — and nothing older — is what you answer now. If it is meant for you, reply (and do what it asks with a tool). If they're clearly talking to someone else, reply exactly NO_REPLY."
         ),
         Reason::Ambient => match job.question.as_deref() {
             Some(hint) => format!(
@@ -936,6 +945,13 @@ fn channel_transcript(
             .filter(|m| !m.deleted)
             // An in-progress thinking message is not part of the talk.
             .filter(|m| !(m.author_id == me && strip_artifacts(&m.content).is_empty()))
+            // Neither is status chrome: the thinking emote, step lines
+            // ("✅ posting in media") — anything the app rendered, not
+            // something the agent said. The model must never see (or
+            // start imitating) its own progress UI.
+            .filter(|m| {
+                !(m.author_id == me && crate::tools::discord::is_status_content(&m.content))
+            })
             .collect();
         for (index, message) in visible.iter().rev().enumerate() {
             let with_id = trigger_ids.contains(&message.id) || (!compact && index < 12);

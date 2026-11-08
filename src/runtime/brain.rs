@@ -575,6 +575,9 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
     }
     let media: Arc<Mutex<tools::images::Media>> = Arc::default();
     let mut convo: Vec<Msg> = Vec::new();
+    // A size shortfall belongs to ONE job: a leftover from an earlier job
+    // would hijack this one's replies.
+    tools::files::clear_shortfall(job.channel_id);
     let ctx = ToolCtx {
         core: Arc::clone(core),
         guild_id: job.guild_id,
@@ -584,6 +587,15 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         autonomous: job.reason == Reason::Ambient,
         replies_here: matches!(job.outlet, Outlet::Channel),
         media: Arc::clone(&media),
+        // "write X and attach/send it": the app performs the attach step
+        // itself — a small model reliably manages one tool, not a chain.
+        wants_file_attached: request_text(job)
+            .map(|t| {
+                let t = t.to_lowercase();
+                (t.contains("attach") || t.contains("send it") || t.contains("send the file"))
+                    && !t.contains("don't attach")
+            })
+            .unwrap_or(false),
         inputs: super::vision::sources(core, &job.triggers),
     };
     let mut max_rounds = profile.behavior.max_tool_rounds.clamp(1, 24);
@@ -612,6 +624,8 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
     let mut out_budget = prompt.max_output;
     let mut tool_uses: HashMap<String, u32> = HashMap::new();
     let mut count_nudges = 0u32;
+    // Pushbacks for a file still short of its size target.
+    let mut size_nudges = 0u32;
     // Calls that worked, per tool (what counted jobs count).
     let mut ok_uses: HashMap<String, u32> = HashMap::new();
     // Tools the agent loaded mid-job (load_tools).
@@ -1045,6 +1059,21 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                 continue;
             }
         }
+        // A file with a size target that came out short: the model may not
+        // just answer and walk away — keep writing until the target.
+        if calls.is_empty() && !last_round && size_nudges < 2 {
+            if let Some((name, have, want)) = tools::files::peek_shortfall(job.channel_id) {
+                size_nudges += 1;
+                convo.push(Msg::assistant(content.clone()));
+                convo.push(Msg::user(format!(
+                    "Not finished: {name} is {} of the {} asked for. Continue it now with write_section (it appends and tracks the target) — real prose, never padding, never repeating yourself. Only if it truly cannot be done, say exactly how far you got.",
+                    tools::files::size_label(have),
+                    tools::files::size_label(want)
+                )));
+                round += 1;
+                continue;
+            }
+        }
         if calls.is_empty() || last_round {
             // Pushed to act and still only claimed it: don't pass that on.
             let content = if calls.is_empty()
@@ -1057,6 +1086,17 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             } else {
                 content
             };
+            // "[attach_file]" written as text instead of the tool being
+            // called: perform the attachment it meant, strip the marker.
+            let (content, repaired) = tools::files::repair_attach_markers(job.channel_id, &content);
+            if !repaired.is_empty() {
+                for (name, bytes) in repaired {
+                    media.lock().expect("media poisoned").add_file(&name, bytes);
+                }
+            }
+            // Hand-recomposed jump links ("…/Probe Server/general/303")
+            // become the canonical URL the app showed the model.
+            let content = tools::discord::repair_links(&content);
             return Outcome {
                 text: Some(content),
                 error: None,
@@ -1809,20 +1849,11 @@ pub fn claims_action(text: &str) -> bool {
         "i left",
         "joining",
         "i'll join",
-        "done —",
-        "done!",
-        "done.",
-        "on it",
         "i'll remind",
         "reminder set",
         "i've set",
         "changing",
         "i've changed",
-        "i'll do that",
-        "doing it now",
-        "consider it done",
-        "i'll make sure",
-        "from now on",
         "i've made",
         "i made",
         "i've updated",
@@ -2387,6 +2418,34 @@ pub fn clean_reply(text: &str, name: &str) -> String {
         }
     }
     text = context::strip_artifacts(&text);
+    // "[notes.txt](file://notes.txt)" — a local-sandbox path pasted as a
+    // link. In chat it's dead text: the real file rides below the reply.
+    // Reduce to the bare name (or drop the whole bracket if empty).
+    while let Some(at) = text.find("](file://") {
+        let close = text[at..].find(')').map(|c| at + c).unwrap_or(at + 8);
+        let open = text[..at].rfind('[');
+        match open {
+            Some(open) if !text[open + 1..at].is_empty() => {
+                text = format!(
+                    "{}{}{}",
+                    &text[..open],
+                    &text[open + 1..at],
+                    &text[close + 1..]
+                );
+            }
+            _ => {
+                text = format!("{}{}", &text[..at + 1], &text[close + 1..]);
+            }
+        }
+    }
+    if text.contains("file://") {
+        // Bare file:// URLs (no markdown around them) just go away.
+        text = text
+            .split_whitespace()
+            .filter(|word| !word.contains("file://"))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
     if let Some(stripped) = text.strip_suffix("NO_REPLY") {
         text = stripped.trim_end().to_owned();
     }
@@ -2682,6 +2741,18 @@ async fn deliver(
     {
         final_text =
             super::github::finish_post(&final_text, job.question.as_deref(), &task.instruction);
+    }
+    // Honesty tag: a file with a size target that never reached it. The
+    // model must not be able to claim "complete" — the person sees exactly
+    // how far it got, and "continue" resumes it.
+    if matches!(job.outlet, Outlet::Channel) {
+        if let Some((name, have, want)) = tools::files::peek_shortfall(job.channel_id) {
+            final_text.push_str(&format!(
+                "\n-# ⚠ {name} is {} of the {} asked for — say \"continue\" and I'll keep writing.",
+                tools::files::size_label(have),
+                tools::files::size_label(want)
+            ));
+        }
     }
     let chunks = split_message(&final_text);
     // Replies ping the person being answered (that's what makes it a
