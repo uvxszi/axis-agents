@@ -2305,8 +2305,59 @@ fn strip_address(text: &str, job: &Job) -> String {
     out
 }
 
+/// Does this text still carry tool-call markup?
+pub fn contains_tool_markup(text: &str) -> bool {
+    text.contains("<function=")
+        || text.contains("<fn=")
+        || text.contains("<tool_call>")
+        || text.contains("</tool_call>")
+}
+
+/// Pull the human-readable text out of leaked tool markup: the value of a
+/// `content` parameter when there is one, else the text with all tags
+/// stripped. Never returns the raw markup.
+fn salvage_markup_text(text: &str) -> String {
+    for open in ["<parameter=content>", "<param=content>"] {
+        if let Some(start) = text.find(open) {
+            let value_start = start + open.len();
+            if let Some(rel_end) = text[value_start..]
+                .find("</parameter>")
+                .or_else(|| text[value_start..].find("</param>"))
+            {
+                let salvaged = text[value_start..value_start + rel_end].trim();
+                if !salvaged.is_empty() {
+                    return salvaged.to_owned();
+                }
+            }
+        }
+    }
+    // No content parameter: strip every tag and keep what's left.
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            other if depth == 0 => out.push(other),
+            _ => {}
+        }
+    }
+    let stripped = out.trim();
+    if stripped.is_empty() {
+        "...".to_owned()
+    } else {
+        stripped.to_owned()
+    }
+}
+
 pub fn clean_reply(text: &str, name: &str) -> String {
     let mut text = text.trim().to_owned();
+    // Last-ditch guard: tool-call markup must never reach the chat. If a
+    // reply still carries it (a model leaking its native format), salvage
+    // the `content` parameter's text; otherwise strip the tags.
+    if contains_tool_markup(&text) {
+        text = salvage_markup_text(&text);
+    }
     // "[12:01] Nova (you):" style prefixes copied from the transcript.
     if text.starts_with('[') {
         if let Some(end) = text.find(']') {
@@ -2968,6 +3019,32 @@ pub async fn playground_turn(core: Arc<AgentCore>, text: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaked_markup_never_reaches_chat() {
+        let leaked = "<function=send_message>
+<parameter=channel>robots</parameter>
+<parameter=content>
+Ohhh right! My bad - pure legion density, not readability.
+</parameter>
+</function>
+</tool_call>";
+        assert!(contains_tool_markup(leaked));
+        let cleaned = clean_reply(leaked, "Magi");
+        assert!(!contains_tool_markup(&cleaned), "{cleaned}");
+        assert!(cleaned.contains("legion density"), "{cleaned}");
+        assert!(!cleaned.contains('<'), "{cleaned}");
+    }
+
+    #[test]
+    fn markup_without_content_strips_to_plain_text() {
+        let cleaned = clean_reply("before <tool_call>{skill}</tool_call> after", "Magi");
+        assert!(!contains_tool_markup(&cleaned), "{cleaned}");
+        assert!(
+            cleaned.contains("before") && cleaned.contains("after"),
+            "{cleaned}"
+        );
+    }
 
     #[test]
     fn no_reply_variants() {

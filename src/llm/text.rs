@@ -188,7 +188,31 @@ pub fn parse_text_tool_calls(text: &str) -> (Vec<ToolCall>, String) {
     }
     rest.push_str(remaining);
 
-    // Fallback: a bare JSON object (or ```json fence) that is a tool call.
+    // Fallback 1: an XML-style call — <function=name> or <fn=name> with
+    // <parameter=key>value</parameter> children, with or without a
+    // <tool_call> wrapper. Models trained on XML tool formats (Qwen's
+    // native style) emit these when a server advertises no native tools;
+    // treating them as calls keeps the markup out of the chat.
+    if calls.is_empty() {
+        let mut xml_rest = rest.clone();
+        while let Some(call) = parse_call_xml(&xml_rest, calls.len()) {
+            // Remove the matched block from xml_rest (the parse reports
+            // where it stopped via the returned span length).
+            let _ = &call;
+            let span = xml_call_span(&xml_rest).unwrap_or((0, 0));
+            xml_rest = format!(
+                "{}{}",
+                &xml_rest[..span.0],
+                &xml_rest[span.1.min(xml_rest.len())..]
+            );
+            calls.push(call);
+        }
+        if !calls.is_empty() {
+            return (calls, xml_rest.trim().to_owned());
+        }
+    }
+
+    // Fallback 2: a bare JSON object (or ```json fence) that is a tool call.
     if calls.is_empty() {
         let trimmed = rest.trim();
         let unfenced = trimmed
@@ -204,6 +228,85 @@ pub fn parse_text_tool_calls(text: &str) -> (Vec<ToolCall>, String) {
         }
     }
     (calls, rest.trim().to_owned())
+}
+
+/// Where the first XML-style call block starts and ends in `text`.
+fn xml_call_span(text: &str) -> Option<(usize, usize)> {
+    let start = text.find("<function=").or_else(|| text.find("<fn="))?;
+    let open_end = text[start..].find('>')? + start + 1;
+    // The block ends at the matching close tag, or at the next opening.
+    let end = text[open_end..]
+        .find("</function>")
+        .or_else(|| text[open_end..].find("</fn>"))
+        .or_else(|| text[open_end..].find("<function="))
+        .or_else(|| text[open_end..].find("<fn="))
+        .map(|at| open_end + at)?;
+    // Include the closing tag itself when found.
+    let close_len = if text[end..].starts_with("</function>") {
+        "</function>".len()
+    } else if text[end..].starts_with("</fn>") {
+        "</fn>".len()
+    } else {
+        0
+    };
+    Some((start, (end + close_len).min(text.len())))
+}
+
+/// Parse the first XML-style call in `text`, if any.
+fn parse_call_xml(text: &str, index: usize) -> Option<ToolCall> {
+    let start = text.find("<function=").or_else(|| text.find("<fn="))?;
+    let name_start = start + text[start..].find('=')? + 1;
+    let name_end = name_start + text[name_start..].find('>')?;
+    let name = text[name_start..name_end].trim().to_owned();
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let body_end = xml_call_span(text)?.1;
+    let body = &text[name_end + 1..body_end];
+    let mut arguments = serde_json::Map::new();
+    let mut remaining = body;
+    while let Some(pstart) = remaining
+        .find("<parameter=")
+        .or_else(|| remaining.find("<param="))
+    {
+        let tag = if remaining[pstart..].starts_with("<parameter=") {
+            "<parameter="
+        } else {
+            "<param="
+        };
+        let key_start = pstart + tag.len();
+        let key_end = key_start + remaining[key_start..].find('>')?;
+        let key = remaining[key_start..key_end].trim().to_owned();
+        let value_start = key_end + 1;
+        let value_end = remaining[value_start..]
+            .find("</parameter>")
+            .or_else(|| remaining[value_start..].find("</param>"))
+            .map(|at| value_start + at)?;
+        let value = remaining[value_start..value_end].trim();
+        // Numbers, booleans and null stay typed; everything else is a
+        // string.
+        let parsed: Value = match value {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            "null" => Value::Null,
+            other => other
+                .parse::<i64>()
+                .map(Value::from)
+                .or_else(|_| other.parse::<f64>().map(Value::from))
+                .unwrap_or_else(|_| Value::String(other.to_owned())),
+        };
+        arguments.insert(key, parsed);
+        remaining = &remaining[value_end
+            + remaining[value_end..]
+                .find('>')
+                .map(|at| at + 1)
+                .unwrap_or(0)..];
+    }
+    Some(ToolCall {
+        id: format!("text_call_{index}_{}", fastrand::u32(..)),
+        name,
+        arguments: Value::Object(arguments),
+    })
 }
 
 fn parse_call_json(inner: &str, index: usize) -> Option<ToolCall> {
@@ -228,6 +331,45 @@ fn parse_call_json(inner: &str, index: usize) -> Option<ToolCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xml_style_call_parses() {
+        // The exact shape a Qwen model emits when it leaks its native
+        // format into the text protocol.
+        let text = "<function=send_message>
+<parameter=channel>general</parameter>
+<parameter=content>hi there</parameter>
+</function>";
+        let (calls, rest) = parse_text_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "send_message");
+        assert_eq!(calls[0].arguments["channel"], "general");
+        assert_eq!(calls[0].arguments["content"], "hi there");
+        assert!(
+            !rest.contains("<function"),
+            "markup must be consumed: {rest}"
+        );
+    }
+
+    #[test]
+    fn xml_style_call_without_wrapper_parses() {
+        let text = "sure, posting it now
+<fn=send_message><param=content>done</param></fn>";
+        let (calls, rest) = parse_text_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "send_message");
+        assert_eq!(calls[0].arguments["content"], "done");
+        assert!(rest.contains("posting it now"));
+    }
+
+    #[test]
+    fn xml_params_stay_typed() {
+        let text = "<function=timeout><parameter=minutes>10</parameter><parameter=user_id>42</parameter><parameter>note</parameter></function>";
+        let (calls, _) = parse_text_tool_calls(text);
+        assert_eq!(calls[0].arguments["minutes"], 10);
+        assert_eq!(calls[0].arguments["user_id"], 42);
+        assert_eq!(calls[0].arguments["note"], Value::Null);
+    }
 
     #[test]
     fn think_tags_split_across_chunks() {

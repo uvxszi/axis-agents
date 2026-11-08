@@ -155,6 +155,18 @@ impl Default for ModelConfig {
     }
 }
 
+/// Where the agent's name has to appear for the message to count as
+/// addressed to it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NamePosition {
+    /// The name anywhere in the message counts.
+    #[default]
+    Anywhere,
+    /// Only when the name is the first or second word ("magi help",
+    /// "hey magi, ...") — talking *about* the agent doesn't summon it.
+    Start,
+}
+
 /// Thinking for reasoning models, sent as `reasoning_effort`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReasoningMode {
@@ -553,6 +565,10 @@ impl ReplyLength {
 pub struct BehaviorConfig {
     pub respond_to_mentions: bool,
     pub respond_to_name: bool,
+    /// Where in a message the agent's name counts as being called:
+    /// anywhere in the text, or only as the first or second word.
+    #[serde(default)]
+    pub name_position: NamePosition,
     pub respond_to_replies: bool,
     pub respond_in_dms: bool,
     /// 0–100: how often the agent joins conversations it was not
@@ -655,6 +671,7 @@ impl Default for BehaviorConfig {
         Self {
             respond_to_mentions: true,
             respond_to_name: true,
+            name_position: Default::default(),
             respond_to_replies: true,
             respond_in_dms: true,
             chattiness: 15,

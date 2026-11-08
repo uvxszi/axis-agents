@@ -1573,8 +1573,32 @@ fn behavior(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
         toggle_row(
             ui,
             &mut b.respond_to_name,
-            "Its name in any message",
-            "\"hey nova…\", \"what does Nova think\" — reads the surrounding context and answers.",
+            "Its name in a message",
+            "\"hey magi…\" — reads the surrounding context and answers.",
+        );
+        form_row(
+            ui,
+            "Name counts as",
+            "Where the name must appear for the message to count as addressed to it.",
+            |ui| {
+                egui::ComboBox::from_id_salt("name_position")
+                    .selected_text(match b.name_position {
+                        crate::config::NamePosition::Anywhere => "Anywhere in the message",
+                        crate::config::NamePosition::Start => "First or second word",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut b.name_position,
+                            crate::config::NamePosition::Anywhere,
+                            "Anywhere in the message",
+                        );
+                        ui.selectable_value(
+                            &mut b.name_position,
+                            crate::config::NamePosition::Start,
+                            "First or second word (recommended)",
+                        );
+                    });
+            },
         );
         toggle_row(ui, &mut b.respond_to_replies, "Replies to its messages", "");
         toggle_row(ui, &mut b.respond_in_dms, "Direct messages", "");

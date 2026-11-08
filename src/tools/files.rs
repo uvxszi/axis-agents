@@ -107,40 +107,34 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             .ok_or("give the file a name")?,
     )?;
     let dir = sandbox_dir(ctx.channel_id);
+    // `size` is an alias for `until_bytes`: an EXACT byte target the app
+    // guarantees in code, so "a 1MB file" is 1048576 bytes, never ~900KB.
+    let target: Option<usize> = args
+        .get("until_bytes")
+        .or_else(|| args.get("size"))
+        .and_then(Value::as_u64)
+        .map(|bytes| (bytes as usize).min(MAX_FILE));
     let bytes: Vec<u8> = if let Some(pattern) = args.get("repeat").and_then(Value::as_str) {
         // Pattern expansion: fast, deterministic, zero model tokens.
-        let until = args.get("until_bytes").and_then(Value::as_u64);
+        let join = args.get("join").and_then(Value::as_str);
         let times = args.get("times").and_then(Value::as_u64);
-        let mut out = Vec::new();
-        let mut line = pattern.as_bytes().to_vec();
-        if let Some(newline) = args.get("join").and_then(Value::as_str) {
-            line.extend_from_slice(newline.as_bytes());
-        } else {
-            line.push(b'\n');
-        }
-        match (times, until) {
-            (Some(times), _) => {
-                for _ in 0..times.min(10_000_000) {
-                    out.extend_from_slice(&line);
-                }
-            }
-            (None, Some(until)) => {
-                let until = until.min(MAX_FILE as u64) as usize;
-                while out.len() < until {
-                    out.extend_from_slice(&line);
-                }
-                out.truncate(until);
-            }
+        match (times, target) {
+            (Some(times), _) => expand_pattern(pattern, join, Some(times as usize), None),
+            (None, Some(until)) => expand_pattern(pattern, join, None, Some(until)),
             (None, None) => {
                 return Err(
-                    "with `repeat`, also give `times` (how many) or `until_bytes` (target size)"
+                    "with `repeat`, also give `times` (how many) or `until_bytes`/`size` (exact target size)"
                         .to_owned(),
                 );
             }
         }
-        out
     } else if let Some(content) = args.get("content").and_then(Value::as_str) {
-        content.as_bytes().to_vec()
+        let mut bytes = content.as_bytes().to_vec();
+        // An exact target pads or trims plain content too.
+        if let Some(until) = target {
+            bytes = exact_size(bytes, until, b' ');
+        }
+        bytes
     } else {
         return Err(
             "give `content`, or `repeat` + `times`/`until_bytes` for generated data".to_owned(),
@@ -156,12 +150,20 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             MAX_FILE / 1024 / 1024
         ));
     }
+    let target_note = match target {
+        Some(want) if bytes.len() == want => format!(" exactly the requested {want} bytes"),
+        Some(want) => format!(
+            " WARNING: {} bytes, not the requested {want} — call write_file again with until_bytes={want}",
+            bytes.len()
+        ),
+        None => String::new(),
+    };
     let path = dir.join(&name);
     let size = bytes.len();
     paths::write_atomic(&path, &bytes)?;
     enforce_caps(&dir);
     Ok(format!(
-        "wrote {name} ({size} bytes) to the file sandbox. Attach it with attach_file (name: \"{name}\") or reference it in convert_file."
+        "wrote {name} ({size} bytes,{target_note}) to the file sandbox. Attach it with attach_file (name: \"{name}\") or reference it in convert_file."
     ))
 }
 
@@ -234,12 +236,43 @@ pub async fn run_script(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         String::new()
     } else {
         format!(
-            "\nFiles written: {}. Attach with attach_file.",
+            "
+Files written: {}. Attach with attach_file.",
             new_files.join(", ")
         )
     };
+    // When the request named a byte target, verify against it in code —
+    // the model never hand-checks arithmetic.
+    let size_note = match (
+        args.get("until_bytes")
+            .or_else(|| args.get("size"))
+            .and_then(Value::as_u64),
+        new_files.first(),
+    ) {
+        (Some(want), Some(first)) => {
+            // Entries look like "name (123 bytes)".
+            let bytes = first
+                .rsplit('(')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches(')')
+                .trim_end_matches(" bytes")
+                .parse::<u64>()
+                .ok();
+            match bytes {
+                Some(bytes) if bytes == want => String::new(),
+                Some(bytes) => format!(
+                    "
+NOTE: the file is {bytes} bytes, not the {want} asked for. Fix it deterministically: write_file with repeat + until_bytes={want} hits the exact size."
+                ),
+                None => String::new(),
+            }
+        }
+        _ => String::new(),
+    };
     enforce_caps(&dir);
-    Ok(format!("```{text}```{status}{files_note}"))
+    Ok(format!("```{text}```{status}{files_note}{size_note}"))
 }
 
 fn snapshot_files(dir: &Path) -> Vec<(String, usize)> {
@@ -373,6 +406,59 @@ fn encode_to(image: &image::DynamicImage, format: &str) -> Result<Vec<u8>, Strin
     Ok(bytes.into_inner())
 }
 
+/// Expand `pattern` joined by `join` (default newline): `times` full
+/// repeats, or an EXACT byte target (the result is exactly that many
+/// bytes — trimmed mid-pattern and padded with the unit's last byte when
+/// needed).
+pub(crate) fn expand_pattern(
+    pattern: &str,
+    join: Option<&str>,
+    times: Option<usize>,
+    until: Option<usize>,
+) -> Vec<u8> {
+    let mut unit = pattern.as_bytes().to_vec();
+    match join {
+        Some(join) => unit.extend_from_slice(join.as_bytes()),
+        None => unit.push(b'\n'),
+    }
+    if unit.is_empty() {
+        unit = b" ".to_vec();
+    }
+    let mut out = Vec::new();
+    match (times, until) {
+        (Some(times), None) => {
+            out.reserve(unit.len().saturating_mul(times));
+            for _ in 0..times.min(10_000_000) {
+                out.extend_from_slice(&unit);
+            }
+            out
+        }
+        (_, Some(until)) => {
+            let until = until.min(MAX_FILE);
+            let whole = until / unit.len();
+            for _ in 0..whole {
+                out.extend_from_slice(&unit);
+            }
+            out.extend_from_slice(&unit[..until - out.len()]);
+            while out.len() < until {
+                out.push(*unit.last().unwrap_or(&b' '));
+            }
+            out.truncate(until);
+            out
+        }
+        (None, None) => out,
+    }
+}
+
+/// Resize `bytes` to exactly `want` by padding with `pad` or trimming.
+pub(crate) fn exact_size(mut bytes: Vec<u8>, want: usize, pad: u8) -> Vec<u8> {
+    bytes.truncate(want);
+    while bytes.len() < want {
+        bytes.push(pad);
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +479,28 @@ mod tests {
         // `write_file`; here we check the cap math the function relies on.
         let line = b"legion\n".repeat(3);
         assert_eq!(line.len(), 21);
+    }
+
+    #[test]
+    fn pattern_hits_exact_byte_targets() {
+        // 1MB of "legion " (spaces via join) lands on exactly 1048576.
+        let out = expand_pattern("legion", Some(" "), None, Some(1024 * 1024));
+        assert_eq!(out.len(), 1024 * 1024);
+        assert!(out.starts_with(b"legion legion"));
+        // Newline-joined, odd target: still exact.
+        let out = expand_pattern("legion", None, None, Some(1000));
+        assert_eq!(out.len(), 1000);
+        // Explicit count: full repeats only, as asked.
+        let out = expand_pattern("legion", Some(" "), Some(100), None);
+        assert_eq!(out.len(), 700);
+    }
+
+    #[test]
+    fn content_resized_to_exact_target() {
+        let out = exact_size(b"abc".to_vec(), 10, b' ');
+        assert_eq!(out, b"abc       ".to_vec());
+        let out = exact_size(b"abcdefghij".to_vec(), 3, b' ');
+        assert_eq!(out, b"abc".to_vec());
     }
 
     #[test]

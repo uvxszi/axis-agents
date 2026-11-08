@@ -456,6 +456,28 @@ pub fn mentions_word(text: &str, word: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Why a message reached the agent.
+/// Does this text call the agent by name, honoring the configured
+/// position? `Anywhere` matches the name as any whole word; `Start`
+/// requires it as the first or second word.
+pub fn named_in(profile: &crate::config::AgentProfile, text: &str) -> bool {
+    match profile.behavior.name_position {
+        crate::config::NamePosition::Anywhere => profile
+            .trigger_words()
+            .iter()
+            .any(|word| mentions_word(text, word)),
+        crate::config::NamePosition::Start => {
+            let words: Vec<&str> = text.split_whitespace().take(2).collect();
+            profile.trigger_words().iter().any(|word| {
+                words.iter().any(|text| {
+                    let text = text.trim_start_matches('@');
+                    text.trim_matches(|c: char| !c.is_alphanumeric())
+                        .eq_ignore_ascii_case(word)
+                })
+            })
+        }
+    }
+}
+
 pub fn classify(core: &Arc<AgentCore>, message: &Message) -> Option<Reason> {
     let profile = core.profile();
     let me = core.world.my_id();
@@ -483,10 +505,7 @@ pub fn classify(core: &Arc<AgentCore>, message: &Message) -> Option<Reason> {
         .referenced_message
         .as_ref()
         .is_some_and(|r| r.author.id.get() == me);
-    let named = profile
-        .trigger_words()
-        .iter()
-        .any(|word| mentions_word(&message.content, word));
+    let named = named_in(&profile, &message.content);
     let hq = guild_id.and_then(|g| core.hive.knowledge.guild(g, |k| k.hq.channel_id));
     let in_hq = hq == Some(channel_id);
     let settings = core.hive.settings();
@@ -1475,6 +1494,40 @@ mod tests {
         let t = base(TaskScope::Global, watch(10));
         assert!(task_in_scope(&t, 99, None));
         assert!(task_in_scope(&t, 98, Some(97)));
+    }
+
+    #[test]
+    fn name_position_start_only_counts_first_two_words() {
+        use crate::config::{AgentProfile, BehaviorConfig, NamePosition};
+        fn profile(position: NamePosition) -> AgentProfile {
+            AgentProfile {
+                name: "magi".to_owned(),
+                behavior: BehaviorConfig {
+                    name_position: position,
+                    ..BehaviorConfig::default()
+                },
+                ..AgentProfile::default()
+            }
+        }
+        // Start mode: first word.
+        assert!(named_in(&profile(NamePosition::Start), "magi help me"));
+        // Second word ("hey magi, ...").
+        assert!(named_in(
+            &profile(NamePosition::Start),
+            "hey magi what's 2+2"
+        ));
+        // Anywhere mode: deep in the sentence.
+        assert!(named_in(
+            &profile(NamePosition::Anywhere),
+            "I was telling magi about it"
+        ));
+        // Start mode: deep in the sentence does NOT count.
+        assert!(!named_in(
+            &profile(NamePosition::Start),
+            "I was telling magi about it"
+        ));
+        // Possessive second word still fine ("hey magi's").
+        assert!(named_in(&profile(NamePosition::Start), "hey Magi, look"));
     }
 
     #[test]

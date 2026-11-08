@@ -499,10 +499,10 @@ async fn scenario_catch_up_toggle(core: &Arc<AgentCore>) -> Result<String, Strin
             author_name: "simadmin".to_owned(),
             author_rank: 0,
             author_level: axis_agents::config::AccessLevel::Owner,
-            created: now_ms() - 10 * 3600_000,
+            created: now_ms() - 10 * 3_600_000,
             active: true,
             runs: 0,
-            last_run: now_ms() - 10 * 3600_000,
+            last_run: now_ms() - 10 * 3_600_000,
             last_result: String::new(),
             origin_channel: CHANNEL,
             scope: TaskScope::Origin,
@@ -644,6 +644,77 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+// --- Scenarios: exact size + markup leak ---------------------------------------------
+
+async fn scenario_exact_size_file(core: &Arc<AgentCore>) -> Result<String, String> {
+    // The model asks write_file for exactly 1MB of "legion " (spaced).
+    set_script(vec![
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("write_file", json!({
+                    "name": "legion_spaced.txt",
+                    "repeat": "legion",
+                    "until_bytes": 1_048_576,
+                    "join": " "
+                }))] }),
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("attach_file", json!({ "name": "legion_spaced.txt" }))] }),
+        json!({ "role": "assistant", "content": "The exact 1MB file is below." }),
+    ]);
+    brain::run(
+        core,
+        job(
+            admin_principal(core),
+            "make me exactly 1MB of the word legion with spaces",
+        ),
+    )
+    .await;
+    let path = axis_agents::paths::data_dir()
+        .join("sandbox")
+        .join(CHANNEL.to_string())
+        .join("legion_spaced.txt");
+    let bytes = std::fs::read(&path).map_err(|e| format!("file missing: {e}"))?;
+    if bytes.len() != 1_048_576 {
+        return Err(format!("{} bytes, not exactly 1048576", bytes.len()));
+    }
+    if !bytes.starts_with(b"legion legion") {
+        return Err("no spaces between the words".to_owned());
+    }
+    Ok(format!("exactly 1048576 bytes with spaces between words"))
+}
+
+async fn scenario_markup_leak(core: &Arc<AgentCore>) -> Result<String, String> {
+    // The model "replies" in its native XML call format — the exact leak.
+    // The app must parse it as a tool call (send_message executes) and
+    // the raw markup must never reach Discord.
+    set_script(vec![
+        json!({ "role": "assistant", "content": "<function=send_message>
+<parameter=channel>general</parameter>
+<parameter=content>Redone with spaces — exact 1MB this time.</parameter>
+</function>" }),
+        json!({ "role": "assistant", "content": "Redone: spaced, exact 1MB." }),
+    ]);
+    brain::run(
+        core,
+        job(admin_principal(core), "you forgot the spaces, redo it"),
+    )
+    .await;
+    let posted = discord_calls("POST");
+    let leaked: Vec<&String> = posted
+        .iter()
+        .map(|(_, b)| b)
+        .filter(|b| b.contains("<function") || b.contains("<parameter"))
+        .collect();
+    if !leaked.is_empty() {
+        return Err(format!("raw markup reached Discord: {leaked:?}"));
+    }
+    // The parsed call should have sent the salvaged content.
+    let sent = posted.iter().any(|(_, b)| b.contains("Redone with spaces"));
+    if !sent {
+        return Err("the XML call was not parsed into a send_message".to_owned());
+    }
+    Ok("XML call format parsed as a tool call; markup never reached chat".to_owned())
+}
+
 // --- Main --------------------------------------------------------------------------
 
 fn main() {
@@ -695,6 +766,12 @@ async fn sim_main(scratch: &std::path::Path) {
         ("chill cleanup prunes own chatter", |c| {
             Box::pin(scenario_chill_cleanup(c))
         }),
+        ("exact-size spaced file", |c| {
+            Box::pin(scenario_exact_size_file(c))
+        }),
+        ("XML tool-call leak is parsed, not posted", |c| {
+            Box::pin(scenario_markup_leak(c))
+        }),
     ];
 
     println!("Axis Agents simulation — real pipeline, mocked Discord + LLM\n");
@@ -709,9 +786,9 @@ async fn sim_main(scratch: &std::path::Path) {
             Err(error) => println!("  FAIL  {name}: {error}"),
         }
     }
-    println!("\n{passed}/8 scenarios passed.");
+    println!("\n{passed}/10 scenarios passed.");
     let _ = std::fs::remove_dir_all(scratch);
-    if passed < 8 {
+    if passed < 10 {
         std::process::exit(1);
     }
 }
