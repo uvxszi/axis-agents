@@ -151,7 +151,8 @@ fn render_view(
     // A steady, compact status — the header plus what it's doing now —
     // so the message doesn't grow and then collapse when the reply lands.
     let size = if small { "-# " } else { "" };
-    let mut out = format!("{size}{} thinking…", emojis.thinking.trim());
+    // Icon only; progress lines follow below it as work happens.
+    let mut out = format!("{size}{}", emojis.thinking.trim());
     if style == ThinkingStyle::Placeholder {
         return out;
     }
@@ -433,8 +434,7 @@ async fn present(
                     .http
                     .create_message(channel)
                     .content(rendered.clone())
-                    .allowed_mentions(AllowedMentions::none())
-                    .flags(MessageFlags::SUPPRESS_NOTIFICATIONS);
+                    .allowed_mentions(AllowedMentions::none());
                 match request.await {
                     Ok(message) => {
                         placeholder = Some(message.id);
@@ -2696,8 +2696,49 @@ async fn deliver(
         AllowedMentions::none()
     }
     .with_replied_user(ping);
-    if let Some(id) = placeholder {
-        let _ = core.http.delete_message(channel, id).await;
+    // Live-answer flow: when the whole answer fits one message and a
+    // status placeholder exists, the placeholder BECOMES the answer —
+    // edited in place, files attached to it — instead of a second
+    // message. Mentions in the content still notify on the edit, and
+    // later content-only edits never strip the attachments.
+    let edit_in_place = placeholder.is_some()
+        && matches!(job.outlet, Outlet::Channel)
+        && chunks.len() == 1
+        && outcome.files.len() <= 10;
+    let mut first_id: Option<axis::prelude::MessageId> = None;
+    let mut edited_in_place = false;
+    if let (true, Some(id)) = (edit_in_place, placeholder) {
+        let mut request = core
+            .http
+            .edit_message(channel, id)
+            .content(chunks[0].clone())
+            .allowed_mentions(mentions.clone());
+        for (name, bytes) in &outcome.files {
+            request = request.file(name.clone(), bytes.clone());
+        }
+        match request.await {
+            Ok(edited) => {
+                edited_in_place = true;
+                first_id = Some(edited.id);
+            }
+            Err(error) => {
+                // Fall through to the fresh-message flow; the placeholder
+                // is deleted there.
+                core.feed(
+                    FeedKind::Error,
+                    format!(
+                        "could not edit the answer into place ({}); sending a new message",
+                        tools::discord_error(error)
+                    ),
+                    Some(label.clone()),
+                );
+            }
+        }
+    }
+    if !edited_in_place {
+        if let Some(id) = placeholder {
+            let _ = core.http.delete_message(channel, id).await;
+        }
     }
     // Long answers: pages with buttons — unless they asked for it all at
     // once, then several messages (each under Discord's limit). Files and
@@ -2709,8 +2750,7 @@ async fn deliver(
     } else {
         Vec::new()
     };
-    let mut first_id = None;
-    if pages.len() > 1 {
+    if !edited_in_place && pages.len() > 1 {
         let mut request = core
             .http
             .create_message(channel)
@@ -2753,7 +2793,11 @@ async fn deliver(
             }
         }
     }
-    let chunks = if pages.len() > 1 { Vec::new() } else { chunks };
+    let chunks = if pages.len() > 1 || edited_in_place {
+        Vec::new()
+    } else {
+        chunks
+    };
     let last = chunks.len().saturating_sub(1);
     for (index, chunk) in chunks.iter().enumerate() {
         let mut request = core

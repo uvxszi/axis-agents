@@ -868,10 +868,9 @@ fn early_thinking(core: &Arc<AgentCore>, channel_id: u64) {
     } else {
         ""
     };
-    let text = format!(
-        "{size}{} thinking… · 0s",
-        profile.behavior.emojis.thinking.trim()
-    );
+    // Icon only — the configured status icon (the operator's chess
+    // piece); no words, no elapsed counter.
+    let text = format!("{size}{}", profile.behavior.emojis.thinking.trim());
     tokio::spawn(async move {
         let mut guard = guard;
         if let Ok(message) = core
@@ -879,7 +878,9 @@ fn early_thinking(core: &Arc<AgentCore>, channel_id: u64) {
             .create_message(ChannelId::new(channel_id))
             .content(text)
             .allowed_mentions(AllowedMentions::none())
-            .flags(axis::model::MessageFlags::SUPPRESS_NOTIFICATIONS)
+            // No SUPPRESS_NOTIFICATIONS: the icon alone mentions nobody,
+            // and leaving the flag off lets the final edit-in-place
+            // (which adds the answer and its mentions) push-notify.
             .await
         {
             *guard = Some(message.id);

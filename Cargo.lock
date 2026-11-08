@@ -130,7 +130,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot 0.12.5",
  "percent-encoding",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 
@@ -155,7 +155,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "axis"
 version = "0.1.0"
-source = "git+https://github.com/uvxszi/axis#0a524f97aac2b115eeb9142ff84acb08ed5301d0"
+source = "git+https://github.com/uvxszi/axis#3b81040378f1039ff37168bf8bfb3d0fdcfea350"
 dependencies = [
  "axis-commands",
  "axis-core",
@@ -170,7 +170,7 @@ dependencies = [
 [[package]]
 name = "axis-commands"
 version = "0.1.0"
-source = "git+https://github.com/uvxszi/axis#0a524f97aac2b115eeb9142ff84acb08ed5301d0"
+source = "git+https://github.com/uvxszi/axis#3b81040378f1039ff37168bf8bfb3d0fdcfea350"
 dependencies = [
  "axis-core",
  "axis-model",
@@ -183,7 +183,7 @@ dependencies = [
 [[package]]
 name = "axis-core"
 version = "0.1.0"
-source = "git+https://github.com/uvxszi/axis#0a524f97aac2b115eeb9142ff84acb08ed5301d0"
+source = "git+https://github.com/uvxszi/axis#3b81040378f1039ff37168bf8bfb3d0fdcfea350"
 dependencies = [
  "bitflags 2.13.2",
  "serde",
@@ -196,7 +196,7 @@ dependencies = [
 [[package]]
 name = "axis-events"
 version = "0.1.0"
-source = "git+https://github.com/uvxszi/axis#0a524f97aac2b115eeb9142ff84acb08ed5301d0"
+source = "git+https://github.com/uvxszi/axis#3b81040378f1039ff37168bf8bfb3d0fdcfea350"
 dependencies = [
  "axis-core",
  "axis-gateway",
@@ -210,7 +210,7 @@ dependencies = [
 [[package]]
 name = "axis-gateway"
 version = "0.1.0"
-source = "git+https://github.com/uvxszi/axis#0a524f97aac2b115eeb9142ff84acb08ed5301d0"
+source = "git+https://github.com/uvxszi/axis#3b81040378f1039ff37168bf8bfb3d0fdcfea350"
 dependencies = [
  "axis-core",
  "futures-util",
@@ -224,7 +224,7 @@ dependencies = [
 [[package]]
 name = "axis-model"
 version = "0.1.0"
-source = "git+https://github.com/uvxszi/axis#0a524f97aac2b115eeb9142ff84acb08ed5301d0"
+source = "git+https://github.com/uvxszi/axis#3b81040378f1039ff37168bf8bfb3d0fdcfea350"
 dependencies = [
  "axis-core",
  "bitflags 2.13.2",
@@ -235,7 +235,7 @@ dependencies = [
 [[package]]
 name = "axis-rest"
 version = "0.1.0"
-source = "git+https://github.com/uvxszi/axis#0a524f97aac2b115eeb9142ff84acb08ed5301d0"
+source = "git+https://github.com/uvxszi/axis#3b81040378f1039ff37168bf8bfb3d0fdcfea350"
 dependencies = [
  "axis-core",
  "axis-model",
@@ -1091,7 +1091,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2442,7 +2442,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3261,7 +3261,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3563,7 +3563,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4738,7 +4738,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -708,11 +708,73 @@ async fn scenario_markup_leak(core: &Arc<AgentCore>) -> Result<String, String> {
         return Err(format!("raw markup reached Discord: {leaked:?}"));
     }
     // The parsed call should have sent the salvaged content.
-    let sent = posted.iter().any(|(_, b)| b.contains("Redone with spaces"));
+    // With edit-in-place the salvaged text may land as an edit to the
+    // status message; either way the markup never got through.
+    let patches = discord_calls("PATCH");
+    let sent = posted
+        .iter()
+        .chain(patches.iter())
+        .any(|(_, b)| b.contains("Redone with spaces"));
     if !sent {
-        return Err("the XML call was not parsed into a send_message".to_owned());
+        return Err("the salvaged content never reached Discord".to_owned());
     }
-    Ok("XML call format parsed as a tool call; markup never reached chat".to_owned())
+    Ok("XML markup salvaged to plain text; never posted raw".to_owned())
+}
+
+// --- Scenario: live edited answer ---------------------------------------------------
+
+async fn scenario_live_edited_answer(core: &Arc<AgentCore>) -> Result<String, String> {
+    // "search for x": the status message is posted fast, edited with
+    // progress, then EDITED INTO the final answer with a file attached —
+    // one message the whole way, attachments landing at the end.
+    set_script(vec![
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("web_search", json!({ "query": "chess openings" }))] }),
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("write_file", json!({
+                    "name": "openings.txt", "content": "1. e4 e5
+2. Nf3 Nc6
+3. Bb5"
+                }))] }),
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("attach_file", json!({ "name": "openings.txt" }))] }),
+        json!({ "role": "assistant", "content": "Found it — the Ruy Lopez. Openings file below." }),
+    ]);
+    brain::run(
+        core,
+        job(
+            admin_principal(core),
+            "magi search for the best chess opening and save it",
+        ),
+    )
+    .await;
+
+    let posts = discord_calls("POST");
+    let patches = discord_calls("PATCH");
+    // A status message was posted (the icon), and the FINAL answer landed
+    // as a PATCH on that same message — not as a separate POST.
+    let status_post = posts
+        .iter()
+        .find(|(p, b)| p.ends_with("/messages") && !b.contains("Found it"));
+    let Some((status_path, _)) = status_post else {
+        return Err(format!(
+            "no status message was posted first (posts: {posts:?})"
+        ));
+    };
+    let _ = status_path;
+    let answer_patch = patches.iter().find(|(_, b)| b.contains("Found it"));
+    let Some((_, _)) = answer_patch else {
+        return Err(format!(
+            "the answer never landed as an edit (patches: {patches:?})"
+        ));
+    };
+    // No second message carrying the answer text.
+    if posts.iter().any(|(_, b)| b.contains("Found it")) {
+        return Err(
+            "the answer was posted as a NEW message instead of editing the status".to_owned(),
+        );
+    }
+    Ok("status posted fast, progress edited, answer edited in place".to_owned())
 }
 
 // --- Main --------------------------------------------------------------------------
@@ -772,6 +834,9 @@ async fn sim_main(scratch: &std::path::Path) {
         ("XML tool-call leak is parsed, not posted", |c| {
             Box::pin(scenario_markup_leak(c))
         }),
+        ("live edited answer (one message, start to end)", |c| {
+            Box::pin(scenario_live_edited_answer(c))
+        }),
     ];
 
     println!("Axis Agents simulation — real pipeline, mocked Discord + LLM\n");
@@ -786,9 +851,9 @@ async fn sim_main(scratch: &std::path::Path) {
             Err(error) => println!("  FAIL  {name}: {error}"),
         }
     }
-    println!("\n{passed}/10 scenarios passed.");
+    println!("\n{passed}/11 scenarios passed.");
     let _ = std::fs::remove_dir_all(scratch);
-    if passed < 10 {
+    if passed < 11 {
         std::process::exit(1);
     }
 }
