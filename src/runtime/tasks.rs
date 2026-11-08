@@ -11,7 +11,7 @@ use std::{sync::Arc, time::Duration};
 use axis::model::{Member, Message};
 use axis::prelude::ChannelId;
 
-use super::agent::{AgentCore, task_channel_matches};
+use super::agent::{AgentCore, task_in_scope};
 use super::authority::{Principal, PrincipalKind};
 use super::brain::{self, Job, Outlet, Reason};
 use super::hive::ClaimKind;
@@ -265,9 +265,7 @@ pub fn on_message(core: &Arc<AgentCore>, guild_id: u64, message: &Message) -> bo
     // Decide synchronously when the cache allows it.
     let likely = tasks.iter().any(|task| match task.trigger {
         TaskTrigger::NewPost { .. } => starter,
-        TaskTrigger::NewMessage { .. } => {
-            task_channel_matches(&task.trigger, channel_id, cached_parent)
-        }
+        TaskTrigger::NewMessage { .. } => task_in_scope(task, channel_id, cached_parent),
         _ => false,
     });
     if !likely {
@@ -286,11 +284,8 @@ pub fn on_message(core: &Arc<AgentCore>, guild_id: u64, message: &Message) -> bo
         }
         for task in tasks {
             let matches = match task.trigger {
-                TaskTrigger::NewPost { .. } => {
-                    starter && task_channel_matches(&task.trigger, channel_id, parent)
-                }
-                TaskTrigger::NewMessage { .. } => {
-                    task_channel_matches(&task.trigger, channel_id, parent)
+                TaskTrigger::NewPost { .. } | TaskTrigger::NewMessage { .. } => {
+                    task_in_scope(&task, channel_id, parent)
                 }
                 _ => false,
             };
@@ -383,8 +378,36 @@ async fn compact_quiet_channels(core: &Arc<AgentCore>) {
     }
 }
 
+/// With "catch up on start" off, everything that piled up while the agent
+/// was down is skipped: recurring schedules count the start as their last
+/// run, and GitHub watchers jump to the current latest item, so the agent
+/// starts from *now* instead of working through the backlog.
+fn skip_startup_backlog(core: &Arc<AgentCore>) {
+    if core.profile().behavior.catch_up_on_start {
+        return;
+    }
+    let now = now_ms();
+    for guild_id in core.world.guild_ids() {
+        core.hive.knowledge.guild_mut(guild_id, |k| {
+            for task in k.tasks.iter_mut().filter(|t| t.agent_id == core.id) {
+                match &mut task.trigger {
+                    TaskTrigger::Schedule { .. } => task.last_run = now,
+                    TaskTrigger::GitHub { checked, .. } => *checked = now,
+                    _ => {}
+                }
+            }
+        });
+    }
+    core.feed(
+        crate::runtime::live::FeedKind::System,
+        "starting fresh: skipped what piled up while I was off",
+        None,
+    );
+}
+
 /// Fire scheduled tasks when due.
 pub async fn scheduler(core: Arc<AgentCore>) {
+    skip_startup_backlog(&core);
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     let mut ticks: u64 = 0;
     loop {
@@ -393,6 +416,7 @@ pub async fn scheduler(core: Arc<AgentCore>) {
         backfill_embeddings(&core).await;
         if ticks % 10 == 0 {
             compact_quiet_channels(&core).await;
+            super::chill::tick(&core).await;
         }
         if core.paused.load(std::sync::atomic::Ordering::Relaxed) {
             continue;

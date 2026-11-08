@@ -1111,6 +1111,7 @@ pub async fn setup_tickets(ctx: &ToolCtx, args: &Value) -> Result<String, String
             last_run: 0,
             last_result: String::new(),
             origin_channel: ctx.channel_id,
+            scope: crate::memory::TaskScope::Origin,
         });
         id
     });

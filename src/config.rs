@@ -558,6 +558,10 @@ pub struct BehaviorConfig {
     /// 0–100: how often the agent joins conversations it was not
     /// addressed in.
     pub chattiness: u8,
+    /// On start, work through what piled up while it was off (missed
+    /// schedule ticks, new GitHub releases). Off = start from now.
+    #[serde(default = "default_true")]
+    pub catch_up_on_start: bool,
     /// After talking with someone, keep listening to them (without a new
     /// mention) for this long.
     pub conversation_window_secs: u64,
@@ -654,6 +658,7 @@ impl Default for BehaviorConfig {
             respond_to_replies: true,
             respond_in_dms: true,
             chattiness: 15,
+            catch_up_on_start: true,
             conversation_window_secs: 180,
             debounce_ms: 1200,
             thinking_style: ThinkingStyle::Live,
@@ -944,6 +949,10 @@ impl Default for McpServerConfig {
             access: AccessLevel::Admin,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn new_id() -> String {

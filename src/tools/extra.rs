@@ -95,6 +95,10 @@ pub fn definitions() -> Vec<ToolDef> {
             "Lift a \"never chat here\" rule so you can chat in those channels again. Only someone ranked at least as high as whoever set it.",
             { "channels": ("string", "Channel or category names, comma-separated ('this' for this one, 'all' for every one)"), "all_agents": ("boolean", "For every agent") },
             required: ["channels"]),
+        def!("set_chill", Memory, Conversational, guild: true, core: false,
+            keywords: ["chill", "relax", "calm down", "tone it down", "quiet down", "less chatty", "stop yapping", "keep it down", "low key", "lurk"],
+            "Turn chill mode on or off for channels: in a chill channel you stay extra brief and never chime in unprompted, and afterwards the app quietly deletes your own low-value chatter and leaves one summary line (other people's messages are never touched). Moderators set it.",
+            { "channels": ("string", "Channel(s) to chill, comma-separated (omit for this one)"), "off": ("boolean", "false (default) to chill, true to lift it") }, required: []),
         def!("go_quiet", Memory, Conversational, guild: false, core: false,
             keywords: ["shut up", "be quiet", "stop talking", "go away", "stop replying", "quiet", "silence", "leave me alone"],
             "Stop chatting for a while: scope 'me' (stop replying to the requester unless they @mention you) or 'channel' (moderators: stay quiet in this channel for some minutes unless someone ranked as high @mentions you). For \"never\" chat in a channel, use stop_chatting_in.",
@@ -104,7 +108,7 @@ pub fn definitions() -> Vec<ToolDef> {
         def!("create_task", Memory, Conversational, guild: true, core: false,
             keywords: ["always look", "keep an eye", "watch", "every time", "whenever", "each new", "every day", "every hour", "monitor", "task", "duty", "remind", "check", "every morning", "every night", "every week", "every monday", "every friday", "weekdays", "daily", "weekly", "schedule", "scheduled", "at 9", "tomorrow at", "tonight at", "later today", "in an hour", "every 30 minutes"],
             "Take on a standing task you keep doing until told to stop (for GitHub repos use watch_github instead): react to every new forum post or message in a channel, greet new members, or run on a schedule — every N minutes/hours, every day at a time, on certain weekdays at a time, or once at a set time. Moderators can assign tasks.",
-            { "instruction": ("string", "Exactly what to do each time, in the requester's words"), "watch": ("string", "new_posts (forum threads), new_messages, schedule (repeating), once (one time), or member_join"), "channel": ("string", "The channel to watch (or post to, for schedule/once/member_join)"), "every_minutes": ("integer", "Schedule: repeat every N minutes (min 15; 60 = hourly, 1440 = daily)"), "at": ("string", "Schedule/once: time of day, e.g. 09:00 or 9pm (local time)"), "days": ("string", "Schedule with a time: which days, e.g. mon,wed,fri or weekdays (default every day)"), "date": ("string", "Once: the date, YYYY-MM-DD (default today, or tomorrow if the time passed)"), "in_minutes": ("integer", "Once: run this many minutes from now"), "agent": ("string", "Assign to another agent by name (default: you)") },
+            { "instruction": ("string", "Exactly what to do each time, in the requester's words"), "watch": ("string", "new_posts (forum threads), new_messages, schedule (repeating), once (one time), or member_join"), "channel": ("string", "The channel to watch (or post to, for schedule/once/member_join)"), "scope": ("string", "Where the watch applies: this channel (default), a list of channels, or global (every channel in the server)"), "channels": ("string", "scope=list: the channels to watch, comma-separated"), "every_minutes": ("integer", "Schedule: repeat every N minutes (min 15; 60 = hourly, 1440 = daily)"), "at": ("string", "Schedule/once: time of day, e.g. 09:00 or 9pm (local time)"), "days": ("string", "Schedule with a time: which days, e.g. mon,wed,fri or weekdays (default every day)"), "date": ("string", "Once: the date, YYYY-MM-DD (default today, or tomorrow if the time passed)"), "in_minutes": ("integer", "Once: run this many minutes from now"), "agent": ("string", "Assign to another agent by name (default: you)") },
             required: ["instruction", "watch", "channel"]),
         def!("watch_github", Memory, Conversational, guild: true, core: false,
             keywords: ["github", "repo", "repository", "release", "releases", "commit", "commits", "new version", "github.com", "watch for", "keep an eye on"],
@@ -205,6 +209,7 @@ pub async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<String,
         "go_quiet" => go_quiet(ctx, args),
         "stop_chatting_in" => stop_chatting_in(ctx, args),
         "wait" => wait(ctx, args).await,
+        "set_chill" => set_chill(ctx, args),
         "watch_github" => watch_github(ctx, args).await,
         "stop_watching_github" => stop_watching_github(ctx, args),
         "create_command" => create_command(ctx, args),
@@ -624,7 +629,7 @@ async fn watch_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let repo = crate::runtime::github::parse_repo(&wanted)
         .or_else(|| {
             crate::runtime::github::parse_repo(
-                &request_text(ctx)
+                request_text(ctx)
                     .split_whitespace()
                     .find(|w| w.contains("github.com/"))
                     .unwrap_or(""),
@@ -695,6 +700,32 @@ async fn watch_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             "already watching {repo} {kind} for that channel (task #{id})"
         ));
     }
+    // Scope: this channel (default), a list, or the whole server.
+    let scope = {
+        let said_scope = arg(args, "scope").unwrap_or_default().to_lowercase();
+        let listed: Vec<u64> = arg(args, "channels")
+            .and_then(|list| {
+                let (ids, missing) = channel_ids(ctx, &list);
+                if !missing.is_empty() && said_scope.contains("list") {
+                    return None;
+                }
+                Some(ids)
+            })
+            .unwrap_or_default();
+        match said_scope.as_str() {
+            "global" | "server" | "everywhere" | "all" | "anywhere" => {
+                crate::memory::TaskScope::Global
+            }
+            "list" | "channels" | "these" | "some" => {
+                if listed.is_empty() {
+                    return Err("scope=list needs the channels: name them in `channels`".to_owned());
+                }
+                crate::memory::TaskScope::Channels(listed)
+            }
+            _ if !listed.is_empty() => crate::memory::TaskScope::Channels(listed),
+            _ => crate::memory::TaskScope::Origin,
+        }
+    };
     let id = ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
         k.next_task += 1;
         let id = k.next_task;
@@ -722,6 +753,7 @@ async fn watch_github(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             last_run: now_ms(),
             last_result: String::new(),
             origin_channel: ctx.channel_id,
+            scope,
         });
         id
     });
@@ -1266,6 +1298,70 @@ fn channel_ids(ctx: &ToolCtx, text: &str) -> (Vec<u64>, Vec<String>) {
     (found, missing)
 }
 
+/// Chill mode: extra brief + self-pruning in specific channels.
+fn set_chill(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
+    let guild_id = ctx.require_guild()?;
+    if ctx.autonomous || ctx.requester.kind == PrincipalKind::Agent {
+        return Err("only people can set where I stay chill".to_owned());
+    }
+    let query = arg(args, "channels").unwrap_or_default();
+    let channels = if query.trim().is_empty() {
+        vec![ctx.channel_id]
+    } else {
+        let (ids, missing) = channel_ids(ctx, &query);
+        if !missing.is_empty() {
+            return Err(format!("couldn't find channel(s): {}", missing.join(", ")));
+        }
+        ids
+    };
+    let off = flag(args, "off").unwrap_or(false);
+    let mut done = Vec::new();
+    let mut denied = Vec::new();
+    for id in channels {
+        let name = ctx
+            .core
+            .world
+            .with_guild(guild_id, |g| g.channel_name(id))
+            .unwrap_or_default();
+        let staff = ctx.requester.kind == PrincipalKind::Operator
+            || ctx.requester.level >= AccessLevel::Moderator
+            || ctx
+                .requester_permissions_in(id)
+                .intersects(Permissions::MANAGE_MESSAGES | Permissions::MANAGE_CHANNELS);
+        if !staff {
+            denied.push(format!("#{name}"));
+            continue;
+        }
+        ctx.core.hive.knowledge.guild_mut(guild_id, |k| {
+            k.chill.retain(|r| r.channel_id != id);
+            if !off {
+                k.chill.push(crate::memory::ChillRule {
+                    channel_id: id,
+                    agent_id: Some(ctx.core.id.clone()),
+                    setter_id: ctx.requester.user_id,
+                    setter_name: ctx.requester.name.clone(),
+                });
+            }
+        });
+        done.push(format!("#{name}"));
+    }
+    if !denied.is_empty() {
+        return Err(format!(
+            "denied: {} isn't a moderator in {}",
+            ctx.requester.name,
+            denied.join(", ")
+        ));
+    }
+    Ok(if off {
+        format!("chill mode lifted in {}", done.join(", "))
+    } else {
+        format!(
+            "chill mode on in {}: one-liners when spoken to, no chiming in, and I tidy up my own low-value chatter there afterwards (only my messages).",
+            done.join(", ")
+        )
+    })
+}
+
 fn stop_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let guild_id = ctx.require_guild()?;
     if ctx.autonomous || ctx.requester.kind == PrincipalKind::Agent {
@@ -1680,6 +1776,7 @@ fn create_task(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             last_run: now_ms(),
             last_result: String::new(),
             origin_channel: ctx.channel_id,
+            scope: crate::memory::TaskScope::Origin,
         });
         id
     });
@@ -1994,6 +2091,7 @@ async fn set_reminder(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             last_run: 0,
             last_result: String::new(),
             origin_channel: ctx.channel_id,
+            scope: crate::memory::TaskScope::Origin,
         });
         id
     });

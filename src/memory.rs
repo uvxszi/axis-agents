@@ -465,6 +465,18 @@ pub struct ServerCommand {
     pub created: i64,
 }
 
+/// A channel where the agent is told to be chill: minimal, brief, and it
+/// cleans up after its own chatty stretches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChillRule {
+    /// A channel, or a category (covers every channel in it).
+    pub channel_id: u64,
+    /// Agent ID; `None` = all agents.
+    pub agent_id: Option<String>,
+    pub setter_id: u64,
+    pub setter_name: String,
+}
+
 /// "Never chat in #x": no replies, no chiming in, no posts there at all —
 /// until someone ranked at least as high lifts it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -722,6 +734,23 @@ pub fn parse_days(text: &str) -> Option<Vec<u8>> {
 
 /// Is a time-of-day schedule due? (At most once per day, after its time,
 /// not more than 6 hours late.)
+#[cfg(test)]
+mod standing_task_tests {
+    use super::*;
+
+    #[test]
+    fn old_task_json_defaults_scope() {
+        let json = r#"{
+            "id": 1, "agent_id": "a", "instruction": "x",
+            "trigger": { "NewMessage": { "channel_id": 5 } },
+            "author_id": 2, "author_name": "u", "author_rank": 0,
+            "author_level": "Everyone", "created": 0, "active": true
+        }"#;
+        let task: StandingTask = serde_json::from_str(json).expect("old task loads");
+        assert_eq!(task.scope, TaskScope::Origin);
+    }
+}
+
 pub fn schedule_due(now: i64, last_run: i64, minute: u32, days: &[u8], every_minutes: u32) -> bool {
     use chrono::{Datelike, Local, TimeZone};
     let Some(local) = Local.timestamp_millis_opt(now).single() else {
@@ -764,6 +793,18 @@ pub fn next_time_at(now: i64, minute: u32, date: Option<&str>) -> Option<i64> {
     Some(first)
 }
 
+/// Which channels a standing task watches.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub enum TaskScope {
+    /// Just the channel named by the trigger.
+    #[default]
+    Origin,
+    /// A specific list of channels (the trigger channel plus these).
+    Channels(Vec<u64>),
+    /// Every channel in the server.
+    Global,
+}
+
 /// A duty someone gave an agent that it keeps doing until told to stop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StandingTask {
@@ -787,6 +828,9 @@ pub struct StandingTask {
     /// Where it was set up (problems are reported there).
     #[serde(default)]
     pub origin_channel: u64,
+    /// Which channels the trigger watches (default: just its own).
+    #[serde(default)]
+    pub scope: TaskScope,
 }
 
 /// How much the agents may do without a human clicking a confirmation
@@ -826,6 +870,9 @@ pub struct GuildKnowledge {
     pub quiet: Vec<QuietRule>,
     /// Channels the agents never chat in.
     pub no_chat: Vec<NoChatRule>,
+    /// Channels where the agents stay chill (extra brief, self-pruning).
+    #[serde(default)]
+    pub chill: Vec<ChillRule>,
     /// Slash commands agents made here.
     pub commands: Vec<ServerCommand>,
     /// Built-in commands turned off in this server.
@@ -1398,6 +1445,10 @@ pub struct ChannelArchive {
     pub channel_id: u64,
     pub guild_id: u64,
     pub name: String,
+    /// Messages at or below this id were already folded by chill mode
+    /// (so a burst is never compacted twice).
+    #[serde(default)]
+    pub chill_upto: u64,
     /// Rolling summary of everything up to `summary_upto`.
     pub summary: String,
     pub summary_upto: u64,

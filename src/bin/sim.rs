@@ -480,6 +480,170 @@ async fn scenario_misheard(core: &Arc<AgentCore>) -> Result<String, String> {
     ))
 }
 
+// --- Scenarios: AAv2 features ------------------------------------------------------
+
+async fn scenario_catch_up_toggle(core: &Arc<AgentCore>) -> Result<String, String> {
+    use axis_agents::memory::{StandingTask, TaskScope, TaskTrigger};
+    core.hive.knowledge.guild_mut(GUILD, |k| {
+        k.tasks.push(StandingTask {
+            id: 1,
+            agent_id: core.id.clone(),
+            instruction: "report the news".to_owned(),
+            trigger: TaskTrigger::Schedule {
+                channel_id: CHANNEL,
+                every_minutes: 60,
+                at_minute: None,
+                days: vec![],
+            },
+            author_id: ADMIN,
+            author_name: "simadmin".to_owned(),
+            author_rank: 0,
+            author_level: axis_agents::config::AccessLevel::Owner,
+            created: now_ms() - 10 * 3600_000,
+            active: true,
+            runs: 0,
+            last_run: now_ms() - 10 * 3600_000,
+            last_result: String::new(),
+            origin_channel: CHANNEL,
+            scope: TaskScope::Origin,
+        });
+    });
+    let now = now_ms();
+    // The catch-up skip: what the scheduler does on start with the toggle
+    // off — every missed schedule counts *now* as its last run.
+    core.hive.knowledge.guild_mut(GUILD, |k| {
+        for task in k
+            .tasks
+            .iter_mut()
+            .filter(|t| matches!(t.trigger, TaskTrigger::Schedule { .. }))
+        {
+            task.last_run = now;
+        }
+    });
+    let still_due = core.hive.knowledge.guild(GUILD, |k| {
+        k.tasks.iter().any(|t| matches!(&t.trigger, TaskTrigger::Schedule { every_minutes, .. } if now - t.last_run >= *every_minutes as i64 * 60_000))
+    });
+    core.hive.knowledge.guild_mut(GUILD, |k| k.tasks.clear());
+    if still_due {
+        Err("the overdue schedule would still fire after the skip".to_owned())
+    } else {
+        Ok("catch-up skip: the 10-hour-old schedule tick is treated as run".to_owned())
+    }
+}
+
+async fn scenario_chill_cleanup(core: &Arc<AgentCore>) -> Result<String, String> {
+    core.hive.knowledge.guild_mut(GUILD, |k| {
+        k.chill.push(axis_agents::memory::ChillRule {
+            channel_id: CHANNEL,
+            agent_id: Some(core.id.clone()),
+            setter_id: ADMIN,
+            setter_name: "simadmin".to_owned(),
+        });
+    });
+    let old = now_ms() - 10 * 60_000;
+    let mut ids = Vec::new();
+    core.hive.knowledge.channel_mut(CHANNEL, |archive| {
+        for i in 0..5u64 {
+            let id = 500 + i;
+            ids.push(id);
+            archive.push(axis_agents::memory::StoredMessage {
+                id,
+                author_id: BOT,
+                author: "Magi".to_owned(),
+                author_bot: true,
+                content: format!("chatter number {i}"),
+                ts: old,
+                reply_to: None,
+                reply_author: None,
+                reply_snippet: None,
+                attachments: vec![],
+                deleted: false,
+                edited: false,
+                reactions: vec![],
+            });
+        }
+        archive.push(axis_agents::memory::StoredMessage {
+            id: 600,
+            author_id: PLEB,
+            author: "simmember".to_owned(),
+            author_bot: false,
+            content: "human says hi".to_owned(),
+            ts: old,
+            reply_to: None,
+            reply_author: None,
+            reply_snippet: None,
+            attachments: vec![],
+            deleted: false,
+            edited: false,
+            reactions: vec![],
+        });
+    });
+    set_script(vec![
+        json!({ "role": "assistant", "content": "{\"keep\": [504], \"summary\": \"posted the answer, human said hi\"}" }),
+    ]);
+    axis_agents::runtime::chill::tick(core).await;
+    let deleted_ids: Vec<u64> = discord_calls("DELETE")
+        .iter()
+        .filter_map(|(p, _)| p.rsplit('/').next().and_then(|id| id.parse().ok()))
+        .collect();
+    if deleted_ids.contains(&600) {
+        return Err("a HUMAN message (600) was deleted".to_owned());
+    }
+    if !ids
+        .iter()
+        .filter(|id| **id != 504)
+        .all(|id| deleted_ids.contains(id))
+    {
+        return Err(format!(
+            "low-value own messages not all deleted: {deleted_ids:?}"
+        ));
+    }
+    let patched = discord_calls("PATCH");
+    if !patched.iter().any(|(p, _)| p.contains("messages/504")) {
+        return Err(format!(
+            "the kept message was not summarized (patches: {patched:?})"
+        ));
+    }
+    core.hive.knowledge.guild_mut(GUILD, |k| k.chill.clear());
+    Ok(
+        "chill cleanup: 4 own messages deleted, human kept, summary edited onto the one kept"
+            .to_owned(),
+    )
+}
+
+async fn scenario_chill_channel_silent(core: &Arc<AgentCore>) -> Result<String, String> {
+    core.hive.knowledge.guild_mut(GUILD, |k| {
+        k.chill.push(axis_agents::memory::ChillRule {
+            channel_id: CHANNEL,
+            agent_id: None,
+            setter_id: ADMIN,
+            setter_name: "simadmin".to_owned(),
+        });
+    });
+    let ambient: axis::model::Message = serde_json::from_value(json!({
+        "id": "700", "channel_id": CHANNEL.to_string(),
+        "author": { "id": PLEB.to_string(), "username": "simmember", "discriminator": "0" },
+        "content": "haha look at this video guys", "guild_id": GUILD.to_string(),
+        "timestamp": "2026-01-01T00:00:00.000000+00:00",
+        "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+        "attachments": [], "embeds": [], "pinned": false, "type": 0
+    }))
+    .unwrap();
+    let reason = axis_agents::runtime::agent::classify(core, &ambient);
+    core.hive.knowledge.guild_mut(GUILD, |k| k.chill.clear());
+    match reason {
+        None => Ok("chill channel: ambient chatter gets no reply reason (silent)".to_owned()),
+        Some(reason) => Err(format!("ambient message would still trigger: {reason:?}")),
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 // --- Main --------------------------------------------------------------------------
 
 fn main() {
@@ -522,6 +686,15 @@ async fn sim_main(scratch: &std::path::Path) {
         ("misheard voice transcripts", |c| {
             Box::pin(scenario_misheard(c))
         }),
+        ("startup catch-up toggle", |c| {
+            Box::pin(scenario_catch_up_toggle(c))
+        }),
+        ("chill channel stays silent", |c| {
+            Box::pin(scenario_chill_channel_silent(c))
+        }),
+        ("chill cleanup prunes own chatter", |c| {
+            Box::pin(scenario_chill_cleanup(c))
+        }),
     ];
 
     println!("Axis Agents simulation — real pipeline, mocked Discord + LLM\n");
@@ -536,9 +709,9 @@ async fn sim_main(scratch: &std::path::Path) {
             Err(error) => println!("  FAIL  {name}: {error}"),
         }
     }
-    println!("\n{passed}/5 scenarios passed.");
+    println!("\n{passed}/8 scenarios passed.");
     let _ = std::fs::remove_dir_all(scratch);
-    if passed < 5 {
+    if passed < 8 {
         std::process::exit(1);
     }
 }

@@ -602,6 +602,11 @@ pub fn classify(core: &Arc<AgentCore>, message: &Message) -> Option<Reason> {
     if core.in_conversation(channel_id, author, window) && !addresses_someone_else(core, message) {
         return Some(Reason::Conversation);
     }
+    if chilled(core, guild_id, channel_id) {
+        // Chill channels: no chiming in. If it got here without a direct
+        // address, stay quiet.
+        return None;
+    }
     if profile.behavior.chattiness > 0 && message.content.split_whitespace().count() >= 3 {
         let mut chance = profile.behavior.chattiness as f32 / 100.0;
         if message.content.contains('?') {
@@ -1388,9 +1393,89 @@ pub fn task_channel_matches(trigger: &TaskTrigger, channel_id: u64, parent: Opti
     }
 }
 
+/// Whether a task's trigger fires in this channel, honoring its scope:
+/// Origin = just the trigger channel (or its threads), Channels = the
+/// listed channels (plus the trigger channel and their threads), Global =
+/// anywhere in the server.
+pub fn task_in_scope(
+    task: &crate::memory::StandingTask,
+    channel_id: u64,
+    parent: Option<u64>,
+) -> bool {
+    match &task.scope {
+        crate::memory::TaskScope::Origin => task_channel_matches(&task.trigger, channel_id, parent),
+        crate::memory::TaskScope::Channels(extra) => {
+            let watched = task.trigger.channel_id();
+            extra.contains(&channel_id)
+                || (parent.is_some_and(|p| extra.contains(&p)))
+                || watched == channel_id
+                || parent == Some(watched)
+        }
+        crate::memory::TaskScope::Global => matches!(
+            task.trigger,
+            crate::memory::TaskTrigger::NewMessage { .. }
+                | crate::memory::TaskTrigger::NewPost { .. }
+        ),
+    }
+}
+
+/// Is this channel chill for this agent (extra brief, self-pruning)?
+pub fn chilled(core: &Arc<AgentCore>, guild_id: u64, channel_id: u64) -> bool {
+    let parent = core
+        .world
+        .channel(guild_id, channel_id)
+        .and_then(|c| c.parent_id.map(|p| p.get()));
+    core.hive.knowledge.guild(guild_id, |k| {
+        k.chill.iter().any(|rule| {
+            rule.agent_id.as_deref().is_none_or(|a| a == core.id)
+                && (rule.channel_id == channel_id || Some(rule.channel_id) == parent)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_scope_matching() {
+        use crate::memory::{StandingTask, TaskScope, TaskTrigger};
+        let base = |scope: TaskScope, trigger: TaskTrigger| StandingTask {
+            id: 1,
+            agent_id: "a".to_owned(),
+            instruction: String::new(),
+            trigger,
+            author_id: 1,
+            author_name: "u".to_owned(),
+            author_rank: 0,
+            author_level: crate::config::AccessLevel::Everyone,
+            created: 0,
+            active: true,
+            runs: 0,
+            last_run: 0,
+            last_result: String::new(),
+            origin_channel: 0,
+            scope,
+        };
+        let watch = |channel: u64| TaskTrigger::NewMessage {
+            channel_id: channel,
+        };
+        // Origin: only its own channel (and threads of it).
+        let t = base(TaskScope::Origin, watch(10));
+        assert!(task_in_scope(&t, 10, None));
+        assert!(task_in_scope(&t, 11, Some(10)));
+        assert!(!task_in_scope(&t, 12, None));
+        // Channels: the listed ones plus the trigger channel.
+        let t = base(TaskScope::Channels(vec![20, 21]), watch(10));
+        assert!(task_in_scope(&t, 10, None));
+        assert!(task_in_scope(&t, 20, None));
+        assert!(task_in_scope(&t, 30, Some(21)));
+        assert!(!task_in_scope(&t, 22, None));
+        // Global: anywhere.
+        let t = base(TaskScope::Global, watch(10));
+        assert!(task_in_scope(&t, 99, None));
+        assert!(task_in_scope(&t, 98, Some(97)));
+    }
 
     #[test]
     fn whole_word_name_matching() {

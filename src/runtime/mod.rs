@@ -7,6 +7,7 @@ pub mod activity;
 pub mod agent;
 pub mod authority;
 pub mod brain;
+pub mod chill;
 pub mod commands;
 pub mod community;
 pub mod confirm;

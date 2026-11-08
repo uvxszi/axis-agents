@@ -1586,6 +1586,12 @@ fn behavior(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
                 ui.add(egui::Slider::new(&mut b.chattiness, 0..=100).suffix("%"));
             },
         );
+        toggle_row(
+            ui,
+            &mut b.catch_up_on_start,
+            "Catch up on start",
+            "When turned on, it works through what piled up while it was off (missed schedule ticks, new GitHub releases). Turn it off to start fresh from the moment it connects.",
+        );
         form_row(
             ui,
             "Conversation window",

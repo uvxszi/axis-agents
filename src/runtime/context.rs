@@ -458,6 +458,16 @@ pub fn build(
             ));
         }
         if let Some(guild_id) = job.guild_id {
+            // Chill channels: extra brief, no filler, and the app prunes
+            // its own chatter afterwards.
+            if super::agent::chilled(core, guild_id, job.channel_id) {
+                system.push_str(
+                    "
+## This channel is CHILL
+Stay minimal: one short sentence when a sentence is enough, a few words when a few words are enough. No filler, no follow-up questions, no extras — the answer, the result, done. If a short reaction emoji or nothing at all says it, reply exactly NO_REPLY.
+",
+                );
+            }
             let barred: Vec<String> = core
                 .hive
                 .knowledge
