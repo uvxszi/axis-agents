@@ -22,6 +22,7 @@ pub mod mcp;
 pub mod power;
 pub mod rankcard;
 pub mod reach;
+pub mod scratch;
 pub mod users;
 pub mod web;
 
@@ -646,7 +647,7 @@ fn build_catalog() -> Vec<ToolDef> {
             required: []),
         tool!("write_file", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["file", "write", "make a file", "create a file", "save", "document", "txt", "csv", "json", "generate", "repeated", "1mb", "mb file"],
-            "Write a file into this channel's file sandbox. For a SIZE-targeted or repetitive file (\"a 1MB file of the word legion\") this is the right tool: pass `repeat`, `until_bytes` (or `size`) for the exact byte count, and `join` for the separator — join: \" \") puts a space between repeats, the default is a newline. The app hits the exact size every time and you write none of the bytes yourself. For normal content pass `content` (an exact size pads/trims it too). Max 25 MB. Attach the result with attach_file.",
+            "Write a file into this channel's file sandbox. For a SIZE-targeted or repetitive file (\"a 1MB file of the word legion\") this is the right tool: pass `repeat`, `until_bytes` (or `size`) for the exact byte count, and `join` for the separator — join: \" \") puts a space between repeats, the default is a newline. The app hits the exact size every time and you write none of the bytes yourself. For normal content pass `content` (a size target only ever TRIMS it — content is never padded up, so keep writing until the target). YOUR upload limit is 25 MB (26 214 400 bytes) — never say 8 MB or 10 MB, those are human limits. If the person named a size in their message you may omit until_bytes; the app knows the ask. For copy-pasting a document to a size, write it once then duplicate_file.",
             { "name": ("string", "File name, e.g. legion.txt"), "content": ("string", "The file's text content (omit when using repeat)"), "repeat": ("string", "A short pattern to repeat (e.g. a word or line)"), "times": ("number", "Repeat count (with repeat)"), "until_bytes": ("number", "EXACT target size in bytes — the file will be exactly this many bytes"), "size": ("number", "Alias for until_bytes"), "join": ("string", "Separator between repeats: a space \" \") for readable columns, \"\n\" or omit for lines") }, required: ["name"]),
         tool!("write_section", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["chapter", "story", "essay", "write", "section", "novel", "long", "continue writing", "part", "scene", "article", "guide", "document"],
@@ -658,8 +659,18 @@ fn build_catalog() -> Vec<ToolDef> {
             { "code": ("string", "Python source to run") }, required: ["code"]),
         tool!("attach_file", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["attach", "upload", "send file", "here's the file", "file below"],
-            "Attach a file from this channel's sandbox to your reply (it appears below the message).",
+            "Attach a file from this channel's sandbox to your reply (it appears below the message). Your upload limit is 25 MB per file (26 214 400 bytes) — bots get 25 MB, never claim 8 MB or 10 MB.",
             { "name": ("string", "File name from write_file/run_script/list_files") }, required: ["name"]),
+        tool!("duplicate_file", Utilities, Conversational, none, guild: false, core: true,
+            keywords: ["copy", "paste", "duplicate", "repeat", "copy-paste", "copies", "fill", "expand", "over and over", "again and again", "multiple times", "x times"],
+            "Copy-paste a sandbox file's content until it reaches a size (or an exact copy count) — instant and exact, done in code, and the parts are attached to your reply automatically. Use it whenever someone asks to repeat/duplicate/copy-paste a file or its text to a size: never write the copies out by hand, never script it. If the person named a size in their message you can even omit until_bytes — the app knows the ask.",
+            { "name": ("string", "The file to duplicate"), "until_bytes": ("number", "Target size in bytes for the WHOLE resulting file"), "size": ("number", "Alias for until_bytes"), "times": ("number", "Exact number of copies instead of a size"), "to": ("string", "Write the result to this file name instead (default: same file)"), "join": ("string", "Separator between copies (default: a blank line)") },
+            required: ["name"]),
+        tool!("recall_scratch", Utilities, Conversational, none, guild: false, core: true,
+            keywords: ["what did i", "earlier result", "previous result", "scratch", "last result", "remember", "what was the", "did i write", "what happened", "temporary storage", "reference"],
+            "Look back through the scratchpad: every tool result this conversation produced is recorded verbatim. Pull it back instead of redoing work or copying from memory.",
+            { "query": ("string", "Words to filter by (omit for the most recent results)") },
+            required: []),
         tool!("convert_file", Utilities, Conversational, none, guild: false, core: false,
             keywords: ["convert", "png", "jpeg", "jpg", "webp", "format", "re-encode"],
             "Convert a sandbox file between formats: images (png, jpeg, webp) or re-encode text as UTF-8 (txt).",
@@ -699,6 +710,9 @@ pub struct ToolCtx {
     /// the reply ("write X and attach it") — write_file then attaches as
     /// soon as it writes; the model never has to chain a second call.
     pub wants_file_attached: bool,
+    /// The request was a copy-paste/fill-to-size ask — write_file finishes
+    /// the whole job itself (writes, fills by copying, attaches).
+    pub copy_fill_asked: bool,
     /// Images around the conversation (on the message being answered,
     /// the one it replies to, recent ones), by name.
     pub inputs: Vec<crate::runtime::vision::ImageSource>,
@@ -947,6 +961,14 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
         Ok(result) => result,
         Err(_) => Err("the tool timed out".to_owned()),
     };
+    // Everything flows through the scratchpad: the model can pull any
+    // earlier result back verbatim instead of redoing the work.
+    if !matches!(def.name, "recall_scratch" | "list_files" | "read_messages") {
+        match &result {
+            Ok(text) => scratch::record(ctx.channel_id, def.name, text),
+            Err(error) => scratch::record(ctx.channel_id, def.name, &format!("(failed) {error}")),
+        }
+    }
     // From a DM: log it in the servers where the requester has the rank
     // that let them ask.
     if let (Ok(text), None) = (&result, ctx.guild_id) {
@@ -1127,6 +1149,7 @@ pub async fn run_confirmed(
         replies_here: true,
         media: Arc::default(),
         wants_file_attached: false,
+        copy_fill_asked: false,
         inputs: Vec::new(),
     };
     let run = dispatch(&ctx, name, &args);
@@ -1136,7 +1159,7 @@ pub async fn run_confirmed(
     }
 }
 
-async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<String, String> {
+pub(crate) async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<String, String> {
     use discord as d;
     match name {
         "get_server_info" => d::get_server_info(ctx).await,
@@ -1238,6 +1261,8 @@ async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<String, Str
         "run_script" => files::run_script(ctx, args).await,
         "write_section" => longform::write_section(ctx, args).await,
         "attach_file" => files::attach_file(ctx, args).await,
+        "duplicate_file" => files::duplicate_file(ctx, args).await,
+        "recall_scratch" => scratch::recall(ctx, args).await,
         "convert_file" => files::convert_file(ctx, args).await,
         "list_files" => files::list_files(ctx, args).await,
         "find_in_document" => docs::find(
@@ -1640,6 +1665,7 @@ pub fn step_label(name: &str, args: &Value) -> String {
         "list_roles" => "looking at the roles".to_owned(),
         "react" => format!("reacting {}", get("emoji")),
         "send_message" => format!("posting in {}", get("channel")),
+        "duplicate_file" => format!("copy-pasting {}", get("name")),
         "send_dm" => format!("DMing {}", get("user")),
         "create_poll" => "setting up a poll".to_owned(),
         "create_thread" => format!("opening a thread “{}”", get("name")),

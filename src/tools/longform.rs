@@ -53,6 +53,14 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
     if section.trim().is_empty() {
         return Err("the section is empty".to_owned());
     }
+    // This channel's file already reached the size the person asked for
+    // (usually via duplicate_file): no more sections — reply instead.
+    if let Some(want) = super::files::already_satisfied_pub(ctx.channel_id) {
+        return Ok(format!(
+            "the file for this channel is already at the {want} asked for. Nothing to do: answer the person now.",
+            want = super::files::size_label(want)
+        ));
+    }
     let done = args
         .get("finished")
         .and_then(Value::as_bool)
@@ -163,7 +171,7 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
         )
     };
 
-    let (current_label, target_label, short) = {
+    let (current_label, target_label, short, pace_hint) = {
         let map = docs().lock().expect("longform poisoned");
         let len = map.get(&ctx.channel_id).map(|d| d.text.len()).unwrap_or(0);
         let current = super::files::size_label(len);
@@ -174,7 +182,18 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
         if let Some(t) = doc_target {
             super::files::note_shortfall(ctx.channel_id, &name, len, t);
         }
-        (current, want, short)
+        // At this pace the target is unreachable by writing alone — a
+        // 500 KB ask is not 170 sections of prose. Say it HERE, in the
+        // result the model reads, before its rounds run out.
+        let pace_hint = match doc_target {
+            Some(t) if t > len && t - len > section.len().max(2000) * 4 => format!(
+                " AT THIS PACE YOU WILL NOT REACH {want} before your tool steps run out — call duplicate_file (name: \"{name}\") NOW: one call fills the rest exactly (copy-paste is what \"fill to size\" means).",
+                want = want,
+                name = name,
+            ),
+            _ => String::new(),
+        };
+        (current, want, short, pace_hint)
     };
     if done && short {
         return Err(format!(
@@ -219,7 +238,7 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
         String::new()
     };
     Ok(format!(
-        "Section {sections_before} kept.{progress}
+        "Section {sections_before} kept.{progress}{pace_hint}
 YOUR PRIVATE NOTES (the user never sees these; do not repeat them as text):
 {summary}
 The document currently ends with:

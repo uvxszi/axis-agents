@@ -25,7 +25,7 @@ use std::{
 
 use serde_json::Value;
 
-use super::{ToolCtx, images};
+use super::{ToolCtx, images, number};
 use crate::paths;
 
 pub(crate) const MAX_FILE: usize = 25 * 1024 * 1024;
@@ -115,19 +115,41 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             .ok_or("give the file a name")?,
     )?;
     let dir = sandbox_dir(ctx.channel_id);
+    // Finished work stays finished: this file already reached the size
+    // the person asked for — rewriting it would undo that (the classic
+    // loop: write 1 KB, duplicate to 1 MB, write 1 KB again…).
+    if let Some(want) = already_satisfied(ctx.channel_id, &name) {
+        return Err(format!(
+            "{name} is already {} — exactly the {} asked for. Do NOT rewrite or add to it. The work is done: reply to the person now, nothing else.",
+            size_label(
+                std::fs::metadata(dir.join(&name))
+                    .map(|m| m.len() as usize)
+                    .unwrap_or(0)
+            ),
+            size_label(want)
+        ));
+    }
     // `size` is an alias for `until_bytes`: an EXACT byte target the app
     // guarantees in code, so "a 1MB file" is 1048576 bytes, never ~900KB.
     // A target set on an earlier call for this same file sticks — a model
-    // that drops the arg on a retry must not get to finish small.
+    // that drops the arg on a retry must not get to finish small. Last
+    // fallback: the size the person asked for in their message ("a 25 MB
+    // file"), so even a sloppy first write lands on the right target.
     let target: Option<usize> = {
         let given = args
             .get("until_bytes")
             .or_else(|| args.get("size"))
             .and_then(Value::as_u64)
             .map(|bytes| (bytes as usize).min(MAX_FILE));
-        given.or_else(|| {
-            peek_shortfall(ctx.channel_id).and_then(|(n, _, want)| (n == name).then_some(want))
-        })
+        // A target never shrinks: the sticky target for this file wins
+        // over a smaller one the model passes on a retry.
+        let sticky =
+            peek_shortfall(ctx.channel_id).and_then(|(n, _, want)| (n == name).then_some(want));
+        match (given, sticky) {
+            (Some(g), Some(s)) => Some(g.max(s)),
+            (given, sticky) => given.or(sticky),
+        }
+        .or_else(|| take_requested_target(ctx.channel_id))
     };
     let bytes: Vec<u8> = if let Some(pattern) = args.get("repeat").and_then(Value::as_str) {
         // Pattern expansion: fast, deterministic, zero model tokens — for
@@ -138,7 +160,7 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             && pattern.split_whitespace().count() > 40;
         if looks_like_prose {
             return Err(
-                "repeat is for generated data (ids, logs, test data), not prose — a document grows with write_section, section by section"
+                "repeat is for generated data (ids, logs, test data), not prose. To copy-paste a document to a size, write the text once with content, then call duplicate_file on it — one call, instant and exact"
                     .to_owned(),
             );
         }
@@ -178,7 +200,7 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     }
     if bytes.len() > MAX_FILE {
         return Err(format!(
-            "that's {} MB — over the {} MB upload limit; split the work into several files",
+            "that's {} MB — over the {} MB upload limit. For copy-paste to a big size, write the text once and call duplicate_file on it: it fills to the exact size and splits into uploadable parts by itself",
             bytes.len() / 1024 / 1024,
             MAX_FILE / 1024 / 1024
         ));
@@ -191,7 +213,7 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             format!(" exactly the requested {}", size_label(want))
         }
         Some(want) => format!(
-            " WARNING: only {}, not the {} asked for — and write_file cannot continue a file, so do not call it again with the same content. Keep going with write_section (name: \"{name}\"): it picks up this file and appends section by section until the target.",
+            " WARNING: only {}, not the {} asked for — and write_file cannot continue a file, so do not call it again. Fill the rest with ONE call: duplicate_file (name: \"{name}\") if copies/repeats are acceptable (that is what \"copy-paste/fill to size\" means), or write_section to keep writing new prose.",
             size_label(bytes.len()),
             size_label(want)
         ),
@@ -205,9 +227,20 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     if let Some(want) = target {
         note_shortfall(ctx.channel_id, &name, bytes.len(), want);
     }
+    // The app finishes size work itself when the ask was copy-paste, or
+    // when the model has rewritten the same short file twice (the
+    // observed flail: 7 rewrites of 3 KB, never a duplicate call).
+    let still_short = peek_shortfall(ctx.channel_id).is_some_and(|(n, _, _)| n == name);
+    if still_short && (ctx.copy_fill_asked || count_rewrite(ctx.channel_id, &name) >= 2) {
+        let filled = duplicate_file(ctx, &serde_json::json!({ "name": name })).await?;
+        return Ok(format!(
+            "The app finished the size work for you (copied up to the target in code): {filled} Reply to the person now — nothing else to do."
+        ));
+    }
     // The request asked for the file attached: done in the same breath —
-    // no second tool call for the model to fumble.
-    if ctx.wants_file_attached {
+    // no second tool call for the model to fumble. (Not while the file is
+    // still short of its target — the finished version is what ships.)
+    if ctx.wants_file_attached && !still_short {
         ctx.media
             .lock()
             .expect("media poisoned")
@@ -336,6 +369,29 @@ pub fn size_label(bytes: usize) -> String {
     }
 }
 
+/// Consecutive rewrites of a still-short file (channel, name) — after a
+/// couple, the app stops waiting and finishes the fill itself.
+fn rewrites() -> &'static std::sync::Mutex<std::collections::HashMap<(u64, String), u32>> {
+    static REWRITES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(u64, String), u32>>,
+    > = std::sync::OnceLock::new();
+    REWRITES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn count_rewrite(channel_id: u64, name: &str) -> u32 {
+    let mut map = rewrites().lock().expect("rewrites poisoned");
+    let count = map.entry((channel_id, name.to_owned())).or_insert(0);
+    *count += 1;
+    *count
+}
+
+fn clear_rewrites(channel_id: u64, name: &str) {
+    rewrites()
+        .lock()
+        .expect("rewrites poisoned")
+        .remove(&(channel_id, name.to_owned()));
+}
+
 /// The channel's open size shortfall (file name, bytes so far, target):
 /// set when a file with a size target comes out short, cleared when it
 /// reaches the target. The brain turns it into a "not finished" nudge so
@@ -354,12 +410,63 @@ pub(crate) fn note_shortfall(channel_id: u64, name: &str, have: usize, want: usi
             .lock()
             .expect("shortfalls poisoned")
             .remove(&channel_id);
+        met_targets()
+            .lock()
+            .expect("targets poisoned")
+            .insert(channel_id, (name.to_owned(), want));
+        clear_rewrites(channel_id, name);
     } else {
         shortfalls()
             .lock()
             .expect("shortfalls poisoned")
             .insert(channel_id, (name.to_owned(), have, want));
+        met_targets()
+            .lock()
+            .expect("targets poisoned")
+            .remove(&channel_id);
     }
+}
+
+/// The file that already reached its size target in this channel — so a
+/// rewrite is refused instead of undoing finished work (a small model
+/// will happily write_file the finished 1 MB file back down to 1 KB).
+fn met_targets() -> &'static std::sync::Mutex<std::collections::HashMap<u64, (String, usize)>> {
+    static MET: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, (String, usize)>>,
+    > = std::sync::OnceLock::new();
+    MET.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Is this file already at its met target (and still that size on disk)?
+fn already_satisfied(channel_id: u64, name: &str) -> Option<usize> {
+    let (met_name, want) = met_targets()
+        .lock()
+        .expect("targets poisoned")
+        .get(&channel_id)?
+        .clone();
+    if met_name != name {
+        return None;
+    }
+    satisfied_on_disk(channel_id, &met_name, want)
+}
+
+fn satisfied_on_disk(channel_id: u64, name: &str, want: usize) -> Option<usize> {
+    let on_disk = std::fs::metadata(sandbox_dir(channel_id).join(name))
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
+    (on_disk >= want).then_some(want)
+}
+
+/// The met target for this channel regardless of file name (longform's
+/// docs are per-channel): Some(want) when the satisfied file still holds
+/// that size on disk.
+pub(crate) fn already_satisfied_pub(channel_id: u64) -> Option<usize> {
+    let (met_name, want) = met_targets()
+        .lock()
+        .expect("targets poisoned")
+        .get(&channel_id)?
+        .clone();
+    satisfied_on_disk(channel_id, &met_name, want)
 }
 
 pub(crate) fn peek_shortfall(channel_id: u64) -> Option<(String, usize, usize)> {
@@ -375,6 +482,27 @@ pub(crate) fn clear_shortfall(channel_id: u64) {
         .lock()
         .expect("shortfalls poisoned")
         .remove(&channel_id);
+}
+
+/// File-work state is per JOB: a leftover requested target or "met"
+/// marker from an earlier job would hijack the next one's files.
+pub(crate) fn reset_channel_state(channel_id: u64) {
+    shortfalls()
+        .lock()
+        .expect("shortfalls poisoned")
+        .remove(&channel_id);
+    requested_targets()
+        .lock()
+        .expect("targets poisoned")
+        .remove(&channel_id);
+    met_targets()
+        .lock()
+        .expect("targets poisoned")
+        .remove(&channel_id);
+    rewrites()
+        .lock()
+        .expect("rewrites poisoned")
+        .retain(|(channel, _), _| *channel != channel_id);
 }
 
 /// Bracket-style attachment markers a small model sometimes writes instead
@@ -458,6 +586,288 @@ fn snapshot_files(dir: &Path) -> Vec<(String, usize)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Duplicate a sandbox file's content until a target size (or an exact
+/// copy count) — "write a story and copy-paste it until the file is 25 MB"
+/// as ONE deterministic tool call instead of hundreds of model rounds.
+pub async fn duplicate_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
+    let name = sanitize_name(
+        args.get("name")
+            .and_then(Value::as_str)
+            .ok_or("which file? (see list_files)")?,
+    )?;
+    let dir = sandbox_dir(ctx.channel_id);
+    let path = dir.join(&name);
+    let content = std::fs::read(&path)
+        .map_err(|_| format!("{name} isn't in the file sandbox — check list_files"))?;
+    if content.is_empty() {
+        return Err(format!("{name} is empty — nothing to copy"));
+    }
+    let target_name = match args.get("to").and_then(Value::as_str) {
+        Some(to) => sanitize_name(to)?,
+        None => name.clone(),
+    };
+    let join = args
+        .get("join")
+        .and_then(Value::as_str)
+        .unwrap_or("\n\n")
+        .as_bytes()
+        .to_vec();
+    let times = number(args, "times");
+    // Target precedence: the call's own target, then the sticky shortfall
+    // for this file, then a size the person asked for in their message
+    // (consumed on first use). The model never does size arithmetic.
+    let target: Option<usize> = args
+        .get("until_bytes")
+        .or_else(|| args.get("size"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .or_else(|| {
+            peek_shortfall(ctx.channel_id).and_then(|(n, _, want)| (n == name).then_some(want))
+        })
+        .or_else(|| take_requested_target(ctx.channel_id));
+    if times.is_none() && target.is_none() {
+        return Err(
+            "give `times` (how many copies) or `until_bytes`/`size` (target size for the WHOLE file)"
+                .to_owned(),
+        );
+    }
+    // Already at the asked size: no-op duplicates just burn rounds.
+    if let Some(want) = already_satisfied(ctx.channel_id, &name) {
+        return Ok(format!(
+            "{name} is already {} — exactly the {} asked for, attached below your earlier reply. Nothing to do: answer the person now.",
+            size_label(content.len()),
+            size_label(want)
+        ));
+    }
+    let (mut bytes, copies) = match (times, target) {
+        // Both given: the size is the ask (times ignored). Duplicate to
+        // the FULL target (up to 10 upload parts); splitting comes next.
+        (_, Some(until)) => duplicate_until(&content, &join, until.min(MAX_PART * 10)),
+        (Some(times), None) => {
+            let times = times.clamp(1, 10_000_000) as usize;
+            let mut out = Vec::with_capacity(content.len().saturating_mul(times));
+            for _ in 0..times {
+                out.extend_from_slice(&content);
+                out.extend_from_slice(&join);
+            }
+            (out, times)
+        }
+        // Unreachable: both missing was rejected above.
+        (None, None) => return Err("give `times` or `until_bytes`".to_owned()),
+    };
+    if bytes.len() > MAX_PART * 10 {
+        bytes.truncate(MAX_PART * 10);
+    }
+
+    // Discord caps one upload at 25 MB: a bigger whole becomes numbered
+    // parts, each an uploadable file.
+    let want_total = target;
+    let parts = split_parts(&bytes, want_total);
+    let mut written: Vec<String> = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        let part_name = if parts.len() == 1 {
+            target_name.clone()
+        } else {
+            numbered_part(&target_name, index + 1, parts.len())
+        };
+        paths::write_atomic(&dir.join(&part_name), part)?;
+        written.push(part_name);
+    }
+    enforce_caps(&dir);
+    // Deliver: attach every part with the reply (up to 10 per message).
+    let attached = written.len() <= 10;
+    if attached {
+        let mut media = ctx.media.lock().expect("media poisoned");
+        for part_name in &written {
+            if let Ok(part) = std::fs::read(dir.join(part_name)) {
+                media.add_file(part_name, part);
+            }
+        }
+    }
+    if let Some(want) = want_total {
+        let total: usize = parts.iter().map(|p| p.len()).sum();
+        note_shortfall(ctx.channel_id, &target_name, total, want);
+    }
+    let listing = written
+        .iter()
+        .map(|n| {
+            format!(
+                "{n} ({})",
+                size_label(
+                    std::fs::metadata(dir.join(n))
+                        .map(|m| m.len() as usize)
+                        .unwrap_or(0)
+                )
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "duplicated {name}: {copies} copies — {}{}.{}",
+        listing,
+        if written.len() == 1 {
+            String::new()
+        } else {
+            format!(" ({} parts for the upload limit)", written.len())
+        },
+        if attached {
+            " Everything is attached below your reply — just confirm, nothing else to do."
+        } else {
+            " Too many parts to attach at once — attach them with attach_file, a few per reply."
+        },
+    ))
+}
+
+/// The biggest single upload Discord allows a bot.
+pub(crate) const MAX_PART: usize = MAX_FILE;
+
+/// Cut a byte string into upload-sized parts when the whole exceeds the
+/// upload cap (always at a line break when one is nearby).
+pub(crate) fn split_parts(bytes: &[u8], want_total: Option<usize>) -> Vec<Vec<u8>> {
+    if bytes.len() <= MAX_PART {
+        return vec![bytes.to_vec()];
+    }
+    let mut parts = Vec::new();
+    let mut rest = bytes;
+    while rest.len() > MAX_PART {
+        let cut = rest[..MAX_PART]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|at| at + 1)
+            .unwrap_or(MAX_PART);
+        parts.push(rest[..cut].to_vec());
+        rest = &rest[cut..];
+    }
+    if !rest.is_empty() {
+        parts.push(rest.to_vec());
+    }
+    let _ = want_total;
+    parts
+}
+
+/// story.md + part 2 of 3 → story_part2of3.md
+fn numbered_part(name: &str, index: usize, total: usize) -> String {
+    let (stem, ext) = name
+        .rsplit_once('.')
+        .map(|(stem, ext)| (stem, format!(".{ext}")))
+        .unwrap_or((name, String::new()));
+    format!("{stem}_part{index}of{total}{ext}")
+}
+
+/// The size the person asked for in their message, parsed once by the
+/// brain at job start ("a 25 MB file") — applied to the first file work
+/// that doesn't name its own target.
+fn requested_targets() -> &'static std::sync::Mutex<std::collections::HashMap<u64, usize>> {
+    static TARGETS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, usize>>> =
+        std::sync::OnceLock::new();
+    TARGETS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn note_requested_target(channel_id: u64, bytes: usize) {
+    // A new ask supersedes an earlier satisfied file ("now make it 2 MB").
+    met_targets()
+        .lock()
+        .expect("targets poisoned")
+        .remove(&channel_id);
+    requested_targets()
+        .lock()
+        .expect("targets poisoned")
+        .insert(channel_id, bytes);
+}
+
+pub(crate) fn take_requested_target(channel_id: u64) -> Option<usize> {
+    requested_targets()
+        .lock()
+        .expect("targets poisoned")
+        .remove(&channel_id)
+}
+
+/// The pending requested target WITHOUT consuming it — the brain uses
+/// this to notice that promised file work never happened.
+pub(crate) fn peek_requested_target(channel_id: u64) -> Option<usize> {
+    requested_targets()
+        .lock()
+        .expect("targets poisoned")
+        .get(&channel_id)
+        .copied()
+}
+
+/// Pull a file-size ask out of a message: "a 25 MB file", "1mb",
+/// "500 KB of notes", "100000 bytes". The LAST mention wins (that is the
+/// ask). Sizes are binary (MB = 1024²) — matching the upload cap.
+pub(crate) fn parse_requested_size(text: &str) -> Option<usize> {
+    let unit_of = |word: &str| -> Option<u64> {
+        match word.trim_matches(|c: char| !c.is_ascii_alphanumeric()) {
+            "kb" | "kilobyte" | "kilobytes" => Some(1024),
+            "mb" | "megabyte" | "megabytes" => Some(1024 * 1024),
+            "gb" | "gigabyte" | "gigabytes" => Some(1024 * 1024 * 1024),
+            "bytes" | "byte" => Some(1),
+            _ => None,
+        }
+    };
+    let mut found: Option<usize> = None;
+    let mut pending: Option<f64> = None;
+    for word in text.to_lowercase().split_whitespace() {
+        let cleaned = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
+        // Fused form: "25mb".
+        if let Some(at) = cleaned.find(|c: char| c.is_ascii_alphabetic()) {
+            let (num, unit) = cleaned.split_at(at);
+            if let (Ok(n), Some(mult)) = (num.trim().parse::<f64>(), unit_of(unit)) {
+                found = Some((n * mult as f64) as usize);
+                pending = None;
+                continue;
+            }
+        }
+        if let Ok(n) = cleaned.parse::<f64>() {
+            pending = Some(n);
+        } else if let (Some(n), Some(mult)) = (pending, unit_of(cleaned)) {
+            found = Some((n * mult as f64) as usize);
+            pending = None;
+        } else {
+            pending = None;
+        }
+    }
+    found.filter(|&bytes| bytes > 0)
+}
+
+/// Repeat `content` (joined by `join`) until reaching `until` bytes, cut
+/// at the last line break so a text file never ends mid-word. Returns the
+/// bytes and how many copies fit.
+pub(crate) fn duplicate_until(content: &[u8], join: &[u8], until: usize) -> (Vec<u8>, usize) {
+    let mut unit = content.to_vec();
+    unit.extend_from_slice(join);
+    if unit.is_empty() {
+        unit = b" ".to_vec();
+    }
+    let mut out = Vec::with_capacity(until.min(MAX_FILE));
+    let mut copies = 0usize;
+    while out.len() < until {
+        out.extend_from_slice(&unit);
+        copies += 1;
+        if copies > 10_000_000 {
+            break;
+        }
+    }
+    if out.len() > until {
+        // Prefer cutting at the last newline inside the budget — but only
+        // when it barely loses anything: until_bytes is an EXACT target,
+        // and a paragraph-length cut short of it (1023 KB of "1 MB")
+        // never registers as met and the work loops.
+        let newline = out[..until]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|at| at + 1)
+            .unwrap_or(until);
+        let cut = if until - newline <= 64 {
+            newline
+        } else {
+            until
+        };
+        out.truncate(cut.max(content.len().min(until)));
+    }
+    (out, copies.max(1))
 }
 
 pub async fn attach_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
@@ -627,6 +1037,68 @@ pub(crate) fn exact_size(mut bytes: Vec<u8>, want: usize, pad: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_size_parses_from_message_text() {
+        assert_eq!(
+            parse_requested_size("write a story and copy it until the file is 25 MB"),
+            Some(25 * 1024 * 1024)
+        );
+        assert_eq!(parse_requested_size("make a 1mb file"), Some(1024 * 1024));
+        assert_eq!(
+            parse_requested_size("about 500 KB of notes"),
+            Some(500 * 1024)
+        );
+        assert_eq!(parse_requested_size("100000 bytes please"), Some(100_000));
+        assert_eq!(parse_requested_size("no size mentioned here"), None);
+        assert_eq!(
+            parse_requested_size("first a 1 MB draft then finish at 2 MB"),
+            Some(2 * 1024 * 1024),
+            "the last mention is the ask"
+        );
+    }
+
+    #[test]
+    fn duplicate_until_cuts_at_a_line_break() {
+        let story = b"line one\nline two\n".to_vec();
+        let (out, copies) = duplicate_until(&story, b"\n\n", 25);
+        assert!(out.len() <= 25, "never over the target");
+        assert!(
+            out.ends_with(b"\n"),
+            "cut at a line break, not mid-word: {:?}",
+            out
+        );
+        assert!(copies >= 1);
+        assert!(
+            out.windows(8).any(|w| w == b"line one"),
+            "the story is in there"
+        );
+    }
+
+    #[test]
+    fn duplicate_until_single_copy_over_target_truncates() {
+        let story = b"abcdefghijklmnopqrstuvwxyz".to_vec();
+        let (out, copies) = duplicate_until(&story, b"", 10);
+        assert_eq!(out.len(), 10);
+        assert_eq!(copies, 1);
+        assert_eq!(&out, b"abcdefghij");
+    }
+
+    #[test]
+    fn duplicate_until_is_exact_when_a_line_break_is_far() {
+        // until_bytes is EXACT: a far-away newline must not shrink it.
+        let story = vec![b'x'; 1000];
+        let (out, _) = duplicate_until(&story, b"\n\n", 1500);
+        assert_eq!(out.len(), 1500, "exact target, not a paragraph short");
+    }
+
+    #[test]
+    fn duplicate_until_exact_fit_is_untouched() {
+        let story = b"0123456789".to_vec();
+        let (out, copies) = duplicate_until(&story, b"", 10);
+        assert_eq!(out, story);
+        assert_eq!(copies, 1);
+    }
 
     #[test]
     fn names_are_sanitized() {

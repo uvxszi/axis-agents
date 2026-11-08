@@ -190,6 +190,10 @@ pub struct Live {
     /// shows the live one; this is the full history the operator can
     /// scroll back through.
     journal: Mutex<Vec<ProcessEntry>>,
+    /// The exact content last pushed to each Discord message, by id. An
+    /// edit that would not change the text is skipped: Discord tags a
+    /// re-edited message "(edited)" even when nothing changed.
+    sent_content: Mutex<HashMap<u64, String>>,
     pub playground: Mutex<HashMap<String, Playground>>,
     pub probes: Mutex<HashMap<String, Probe>>,
     pub mcp: Mutex<HashMap<String, McpStatus>>,
@@ -292,6 +296,36 @@ impl Live {
 
     pub fn clear_feed(&self) {
         self.feed.lock().expect("live poisoned").clear();
+    }
+
+    /// Record what a message now shows, after a successful create or edit.
+    pub fn remember_sent(&self, message_id: u64, content: &str) {
+        let mut sent = self.sent_content.lock().expect("live poisoned");
+        if sent.len() > 512 && !sent.contains_key(&message_id) {
+            // Bounded: drop the oldest quarter when full.
+            let ids: Vec<u64> = sent.keys().copied().take(128).collect();
+            for id in ids {
+                sent.remove(&id);
+            }
+        }
+        sent.insert(message_id, content.to_owned());
+    }
+
+    /// True when this exact content is already what the message shows —
+    /// editing again would only earn it an "(edited)" tag.
+    pub fn already_sent(&self, message_id: u64, content: &str) -> bool {
+        self.sent_content
+            .lock()
+            .expect("live poisoned")
+            .get(&message_id)
+            .is_some_and(|sent| sent == content)
+    }
+
+    pub fn forget_sent(&self, message_id: u64) {
+        self.sent_content
+            .lock()
+            .expect("live poisoned")
+            .remove(&message_id);
     }
 
     pub fn begin_thought(&self, agent: &str, channel: String, about: String) -> u64 {

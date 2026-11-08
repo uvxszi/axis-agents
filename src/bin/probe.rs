@@ -508,7 +508,23 @@ fn main() {
     let model = std::env::args().nth(1).unwrap_or_else(|| {
         "qwen3.5-9b-the-defiant-fable-uncensored-heretic-neo-imatrix-max-mtp@q4_k_m".to_owned()
     });
-    println!("Axis probe -- REAL model {model} (only Discord is mocked)\n");
+    // Optional: run only some scenarios by number ("probe <model> 7,8").
+    let only: Vec<u8> = std::env::args()
+        .nth(2)
+        .map(|list| {
+            list.split([',', ' '])
+                .filter_map(|n| n.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    println!(
+        "Axis probe -- REAL model {model} (only Discord is mocked){}\n",
+        if only.is_empty() {
+            String::new()
+        } else {
+            format!(" -- scenarios {only:?}")
+        }
+    );
 
     let discord = TcpListener::bind("127.0.0.1:0").unwrap();
     let discord_base = format!("http://127.0.0.1:{}", discord.local_addr().unwrap().port());
@@ -527,7 +543,7 @@ fn main() {
         .enable_all()
         .build()
         .expect("probe runtime")
-        .block_on(probe_main(&scratch, discord_base, llm_base, &model));
+        .block_on(probe_main(&scratch, discord_base, llm_base, &model, &only));
 }
 
 async fn probe_main(
@@ -535,6 +551,7 @@ async fn probe_main(
     discord_base: String,
     llm_base: String,
     model: &str,
+    only: &[u8],
 ) {
     let core = build(discord_base, llm_base, model.to_owned());
 
@@ -569,7 +586,7 @@ async fn probe_main(
     });
 
     let mut leak_hits: Vec<String> = Vec::new();
-    let scenarios: Vec<(&str, &str)> = vec![
+    let mut scenarios: Vec<(&str, &str)> = vec![
         (
             "1. read-above",
             "read what I said above and tell me what you think",
@@ -597,7 +614,23 @@ async fn probe_main(
             "6. quiet-misfire",
             "this channel is getting noisy, settle down a bit",
         ),
+        (
+            // The copy-paste flow: write once, duplicate in code. "1 MB" in
+            // the message is the requested target — even if the model
+            // forgets until_bytes, the app knows the ask. Must be FAST.
+            "7. copy-paste",
+            "write a one-paragraph story into tale.md then copy-paste it until the file is 1 MB",
+        ),
+        (
+            // "I'll make it" and then nothing: the follow-through nudge
+            // must bounce the promise and make the tool run.
+            "8. promise",
+            "make a 500 KB file called notes2.md full of chess tips",
+        ),
     ];
+    if !only.is_empty() {
+        scenarios.retain(|(label, _)| only.iter().any(|n| label.starts_with(&format!("{n}."))));
+    }
 
     for (label, question) in scenarios {
         println!("== {label}: {question}");
@@ -605,9 +638,10 @@ async fn probe_main(
         print_result(&result);
         print_llm_log(label);
         leak_hits.extend(status_lines_in_prompts());
-        // For the long-form scenario: what did the file actually turn out
-        // to be? Real continuous prose, or repeat-padded filler?
-        if label.starts_with("4.") {
+        // For the file scenarios: what did the file actually turn out to
+        // be? Real continuous prose, repeat-padded filler, or the exact
+        // size asked for?
+        if label.starts_with("4.") || label.starts_with("7.") || label.starts_with("8.") {
             let dir = axis_agents::tools::files::sandbox_dir_pub(GENERAL);
             let biggest = std::fs::read_dir(&dir)
                 .ok()

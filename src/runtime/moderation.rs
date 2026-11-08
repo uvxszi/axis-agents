@@ -291,6 +291,7 @@ async fn act(core: &Arc<AgentCore>, guild_id: u64, message: &Message, action: &s
         replies_here: false,
         media: Default::default(),
         wants_file_attached: false,
+        copy_fill_asked: false,
         inputs: Vec::new(),
     };
     let Ok(target) = tools::discord::resolve_member(&ctx, &message.author.id.to_string()).await

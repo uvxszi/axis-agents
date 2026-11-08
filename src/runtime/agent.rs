@@ -876,13 +876,16 @@ fn early_thinking(core: &Arc<AgentCore>, channel_id: u64) {
         if let Ok(message) = core
             .http
             .create_message(ChannelId::new(channel_id))
-            .content(text)
+            .content(text.clone())
             .allowed_mentions(AllowedMentions::none())
             // No SUPPRESS_NOTIFICATIONS: the icon alone mentions nobody,
             // and leaving the flag off lets the final edit-in-place
             // (which adds the answer and its mentions) push-notify.
             .await
         {
+            // What this message shows, so later no-op edits of the same
+            // icon text can be skipped (no pointless "(edited)" tag).
+            core.live().remember_sent(message.id.get(), &text);
             *guard = Some(message.id);
         }
         drop(guard);
@@ -901,6 +904,7 @@ fn early_thinking(core: &Arc<AgentCore>, channel_id: u64) {
                     .http
                     .delete_message(ChannelId::new(channel_id), id)
                     .await;
+                core.live().forget_sent(id.get());
             }
         }
     });

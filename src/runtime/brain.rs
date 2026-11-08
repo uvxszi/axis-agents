@@ -437,6 +437,7 @@ async fn present(
                     .allowed_mentions(AllowedMentions::none());
                 match request.await {
                     Ok(message) => {
+                        core.live().remember_sent(message.id.get(), &rendered);
                         placeholder = Some(message.id);
                         shown_version = version;
                         last_edit = Instant::now();
@@ -453,20 +454,28 @@ async fn present(
                         | ThinkingStyle::Placeholder
                 )
                 && last_edit.elapsed() >= Duration::from_millis(1400)
-                && (version != shown_version
-                    || style == ThinkingStyle::Placeholder
-                        && last_edit.elapsed() >= Duration::from_secs(5))
+                && version != shown_version
             {
+                // Edit only on real change: a re-edit with identical text
+                // just earns the message an "(edited)" tag.
                 if let Some(id) = placeholder {
-                    let _ = core
-                        .http
-                        .edit_message(channel, id)
-                        .content(rendered.clone())
-                        .allowed_mentions(AllowedMentions::none())
-                        .await;
+                    if core.live().already_sent(id.get(), &rendered) {
+                        shown_version = version;
+                        last_edit = Instant::now();
+                    } else {
+                        let result = core
+                            .http
+                            .edit_message(channel, id)
+                            .content(rendered.clone())
+                            .allowed_mentions(AllowedMentions::none())
+                            .await;
+                        if result.is_ok() {
+                            core.live().remember_sent(id.get(), &rendered);
+                        }
+                        shown_version = version;
+                        last_edit = Instant::now();
+                    }
                 }
-                shown_version = version;
-                last_edit = Instant::now();
             }
             // Keep "… is typing" showing for the whole time the agent works.
             if (revealed || placeholder.is_some())
@@ -575,9 +584,17 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
     }
     let media: Arc<Mutex<tools::images::Media>> = Arc::default();
     let mut convo: Vec<Msg> = Vec::new();
-    // A size shortfall belongs to ONE job: a leftover from an earlier job
-    // would hijack this one's replies.
-    tools::files::clear_shortfall(job.channel_id);
+    // File-work state (shortfall, requested target, met markers, rewrite
+    // counts) belongs to ONE job: a leftover from an earlier job would
+    // hijack this one's files.
+    tools::files::reset_channel_state(job.channel_id);
+    // "a 25 MB file" in the request: the app owns the size arithmetic.
+    // The first file work without its own target picks this up.
+    if let Some(text) = request_text(job) {
+        if let Some(bytes) = tools::files::parse_requested_size(&text) {
+            tools::files::note_requested_target(job.channel_id, bytes);
+        }
+    }
     let ctx = ToolCtx {
         core: Arc::clone(core),
         guild_id: job.guild_id,
@@ -594,6 +611,21 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                 let t = t.to_lowercase();
                 (t.contains("attach") || t.contains("send it") || t.contains("send the file"))
                     && !t.contains("don't attach")
+            })
+            .unwrap_or(false),
+        // "copy-paste it until / repeat it until / fill to a size": the
+        // app performs the copying itself the moment the file is written.
+        copy_fill_asked: request_text(job)
+            .map(|t| {
+                let t = t.to_lowercase();
+                (t.contains("copy") && t.contains("paste"))
+                    || t.contains("copy-paste")
+                    || t.contains("duplicate")
+                    || t.contains("repeat it")
+                    || t.contains("repeat the")
+                    || t.contains("fill it to")
+                    || t.contains("fill to")
+                    || t.contains("over and over")
             })
             .unwrap_or(false),
         inputs: super::vision::sources(core, &job.triggers),
@@ -626,6 +658,8 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
     let mut count_nudges = 0u32;
     // Pushbacks for a file still short of its size target.
     let mut size_nudges = 0u32;
+    // Pushbacks for promised file work that never ran a tool.
+    let mut follow_through_nudges = 0u32;
     // Calls that worked, per tool (what counted jobs count).
     let mut ok_uses: HashMap<String, u32> = HashMap::new();
     // Tools the agent loaded mid-job (load_tools).
@@ -1060,19 +1094,58 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             }
         }
         // A file with a size target that came out short: the model may not
-        // just answer and walk away — keep writing until the target.
-        if calls.is_empty() && !last_round && size_nudges < 2 {
+        // just answer and walk away — keep going until the target.
+        if calls.is_empty() && !last_round && size_nudges < 3 {
             if let Some((name, have, want)) = tools::files::peek_shortfall(job.channel_id) {
+                // Third strike: the model had two pushes and still won't
+                // fill it — the app finishes the job itself so the person
+                // is never left with a "195 chapters" that is 7 KB.
+                if size_nudges >= 2 {
+                    let filled = tools::dispatch(
+                        &ctx,
+                        "duplicate_file",
+                        &serde_json::json!({ "name": name }),
+                    )
+                    .await
+                    .ok();
+                    if let Some(filled) = filled {
+                        size_nudges += 1;
+                        convo.push(Msg::assistant(content.clone()));
+                        convo.push(Msg::user(format!(
+                            "The app filled {name} to the target itself: {filled} Confirm this to the person in your own words — one short message, no more tools."
+                        )));
+                        round += 1;
+                        continue;
+                    }
+                }
                 size_nudges += 1;
                 convo.push(Msg::assistant(content.clone()));
                 convo.push(Msg::user(format!(
-                    "Not finished: {name} is {} of the {} asked for. Continue it now with write_section (it appends and tracks the target) — real prose, never padding, never repeating yourself. Only if it truly cannot be done, say exactly how far you got.",
+                    "Not finished: {name} is {} of the {} asked for — and filling it is NOT your problem to write by hand. Call a tool NOW: duplicate_file (name: \"{name}\") fills any size instantly when the person asked for copies/repeats; write_section keeps writing prose section by section. Never refuse, never mention upload caps (yours is 25 MB), never say it 'would require repeating' — the app does the repeating in code. Only if it truly cannot be done, say exactly how far you got.",
                     tools::files::size_label(have),
                     tools::files::size_label(want)
                 )));
                 round += 1;
                 continue;
             }
+        }
+        // "I'll make the file" and then… nothing: the person's message
+        // asked for a file (its size is still pending — no file tool ever
+        // ran) but the reply is only a promise. Don't send it; make the
+        // work happen while the status message keeps showing progress.
+        if calls.is_empty()
+            && tools_used == 0
+            && !last_round
+            && follow_through_nudges < 2
+            && tools::files::peek_requested_target(job.channel_id).is_some()
+        {
+            follow_through_nudges += 1;
+            convo.push(Msg::assistant(content.clone()));
+            convo.push(Msg::user(
+                "You said you would make the file, but no tool has run — a promise is not the file. Do the work NOW with tools: write_file (content, or repeat + until_bytes), write_section for long prose, duplicate_file to copy-paste to a size. Never mention upload caps — your limit is 25 MB and the app handles sizes in code. Only if you genuinely need information from the person first, ask for exactly that.",
+            ));
+            round += 1;
+            continue;
         }
         if calls.is_empty() || last_round {
             // Pushed to act and still only claimed it: don't pass that on.
@@ -2681,6 +2754,7 @@ async fn deliver(
         if !just_set {
             if let Some(id) = placeholder {
                 let _ = core.http.delete_message(channel, id).await;
+                core.live().forget_sent(id.get());
             }
             core.feed(
                 FeedKind::System,
@@ -2696,6 +2770,7 @@ async fn deliver(
     let Some(text) = text else {
         if let Some(id) = placeholder {
             let _ = core.http.delete_message(channel, id).await;
+            core.live().forget_sent(id.get());
         }
         match &outcome.error {
             Some(error) => {
@@ -2780,36 +2855,47 @@ async fn deliver(
     let mut first_id: Option<axis::prelude::MessageId> = None;
     let mut edited_in_place = false;
     if let (true, Some(id)) = (edit_in_place, placeholder) {
-        let mut request = core
-            .http
-            .edit_message(channel, id)
-            .content(chunks[0].clone())
-            .allowed_mentions(mentions.clone());
-        for (name, bytes) in &outcome.files {
-            request = request.file(name.clone(), bytes.clone());
-        }
-        match request.await {
-            Ok(edited) => {
-                edited_in_place = true;
-                first_id = Some(edited.id);
+        // The answer always differs from the status text it replaces, so
+        // this edit is real — but track it like every other edit so a
+        // later content-only edit of the same text is skipped. (With files
+        // to upload the edit must happen even for identical text.)
+        if outcome.files.is_empty() && core.live().already_sent(id.get(), &chunks[0]) {
+            edited_in_place = true;
+            first_id = Some(id);
+        } else {
+            let mut request = core
+                .http
+                .edit_message(channel, id)
+                .content(chunks[0].clone())
+                .allowed_mentions(mentions.clone());
+            for (name, bytes) in &outcome.files {
+                request = request.file(name.clone(), bytes.clone());
             }
-            Err(error) => {
-                // Fall through to the fresh-message flow; the placeholder
-                // is deleted there.
-                core.feed(
-                    FeedKind::Error,
-                    format!(
-                        "could not edit the answer into place ({}); sending a new message",
-                        tools::discord_error(error)
-                    ),
-                    Some(label.clone()),
-                );
+            match request.await {
+                Ok(edited) => {
+                    core.live().remember_sent(edited.id.get(), &chunks[0]);
+                    edited_in_place = true;
+                    first_id = Some(edited.id);
+                }
+                Err(error) => {
+                    // Fall through to the fresh-message flow; the placeholder
+                    // is deleted there.
+                    core.feed(
+                        FeedKind::Error,
+                        format!(
+                            "could not edit the answer into place ({}); sending a new message",
+                            tools::discord_error(error)
+                        ),
+                        Some(label.clone()),
+                    );
+                }
             }
         }
     }
     if !edited_in_place {
         if let Some(id) = placeholder {
             let _ = core.http.delete_message(channel, id).await;
+            core.live().forget_sent(id.get());
         }
     }
     // Long answers: pages with buttons — unless they asked for it all at
