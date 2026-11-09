@@ -11,6 +11,16 @@ pub fn data_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
+    // Everything lives on the N: drive — nothing of this app belongs on
+    // C:. If N: exists the data dir is N:\AxisAgents; %APPDATA% is only
+    // a last-resort fallback (no N: drive).
+    #[cfg(windows)]
+    if std::path::Path::new("N:/").exists() {
+        let dir = PathBuf::from("N:/AxisAgents");
+        let _ = std::fs::create_dir_all(&dir);
+        migrate_off_c(&dir);
+        return dir;
+    }
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else {
@@ -36,6 +46,42 @@ pub fn agent_dir(agent_id: &str) -> PathBuf {
 
 pub fn shared_dir() -> PathBuf {
     data_dir().join("shared")
+}
+
+/// One-time move: if an older install kept data on C: (%APPDATA%) and
+/// the N: home is fresh, carry everything over (config, tokens, agents,
+/// memories, skills, sandbox) so nothing is lost by the switch.
+fn migrate_off_c(new_dir: &std::path::Path) {
+    let marker = new_dir.join("config.json");
+    if marker.exists() {
+        return;
+    }
+    let Some(appdata) = std::env::var_os("APPDATA") else {
+        return;
+    };
+    let old = std::path::PathBuf::from(appdata).join("AxisAgents");
+    if !old.join("config.json").exists() {
+        return;
+    }
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        let _ = std::fs::create_dir_all(to);
+        if let Ok(entries) = std::fs::read_dir(from) {
+            for entry in entries.flatten() {
+                let target = to.join(entry.file_name());
+                if entry.path().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    let _ = std::fs::copy(entry.path(), target);
+                }
+            }
+        }
+    }
+    copy_tree(&old, new_dir);
+    tracing::info!(
+        from = %old.display(),
+        to = %new_dir.display(),
+        "moved app data off C: to N:"
+    );
 }
 
 fn sanitize(name: &str) -> String {
