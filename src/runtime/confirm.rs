@@ -143,6 +143,95 @@ impl Confirmations {
         });
     }
 
+    /// Handle an `axis_poll:` button (host-only end-poll). Stateless:
+    /// the channel, message, and host all live in the custom_id, so the
+    /// button keeps working across restarts.
+    pub async fn on_poll_component(core: &Arc<AgentCore>, interaction: &Interaction) -> bool {
+        let Some(InteractionData::MessageComponent(data)) = &interaction.data else {
+            return false;
+        };
+        let Some(rest) = data.custom_id.strip_prefix("axis_poll:") else {
+            return false;
+        };
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() != 3 {
+            return false;
+        }
+        let (Ok(channel_id), Ok(message_id), Ok(host_id)) = (
+            parts[0].parse::<u64>(),
+            parts[1].parse::<u64>(),
+            parts[2].parse::<u64>(),
+        ) else {
+            return false;
+        };
+        let respond = |kind: u8, content: String| {
+            let core = Arc::clone(core);
+            let interaction = interaction.clone();
+            async move {
+                let _ = core
+                    .http
+                    .raw(
+                        "POST",
+                        &format!(
+                            "/interactions/{}/{}/callback",
+                            interaction.id, interaction.token
+                        ),
+                        Some(json!({ "type": kind, "data": { "content": content, "flags": 64, "allowed_mentions": { "parse": [] } } })),
+                        None,
+                    )
+                    .await;
+            }
+        };
+        let Some(user) = interaction
+            .member
+            .as_ref()
+            .and_then(|m| m.user.as_ref())
+            .or(interaction.user.as_ref())
+        else {
+            respond(4, "Could not tell who clicked.".to_owned()).await;
+            return true;
+        };
+        let clicker = core.principal_for(interaction.guild_id.map(|g| g.get()), user);
+        let is_host = user.id.get() == host_id;
+        let is_mod = clicker.level >= AccessLevel::Moderator;
+        if !is_host && !is_mod {
+            respond(
+                4,
+                "Only the poll's host (or a moderator) can end it.".to_owned(),
+            )
+            .await;
+            return true;
+        }
+        // Expire the poll — Discord freezes and displays the final counts
+        // on the poll message itself.
+        let expired = core
+            .http
+            .raw(
+                "POST",
+                &format!("/channels/{channel_id}/polls/{message_id}/expire"),
+                None,
+                None,
+            )
+            .await;
+        match expired {
+            Ok(_) => {
+                tracing::info!(agent = %core.id, channel = channel_id, message = message_id, "poll ended by host button");
+                respond(
+                    4,
+                    "Poll ended — the final results are on the poll above.".to_owned(),
+                )
+                .await;
+                true
+            }
+            Err(error) => {
+                let why = crate::tools::discord_error(error);
+                tracing::warn!(agent = %core.id, error = %why, "poll end button failed");
+                respond(4, format!("Couldn't end it: {why}")).await;
+                true
+            }
+        }
+    }
+
     /// Handle an `axis_confirm:` button. Returns true when consumed.
     pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> bool {
         let Some(InteractionData::MessageComponent(data)) = &interaction.data else {

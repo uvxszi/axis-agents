@@ -2084,6 +2084,13 @@ pub fn claims_action(text: &str) -> bool {
         "right now —",
         "right now!",
         "seal the deal",
+        // "Done — leveling will just say your username" with ZERO tools run
+        // is a claim; the gates around this list only run it when nothing
+        // was executed, so the generic closers are safe here.
+        "done \u{2014}",
+        "done!",
+        "done.",
+        "on it",
         "i'll remind",
         "reminder set",
         "i've set",

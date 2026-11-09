@@ -78,7 +78,7 @@ fn load_all() -> Vec<Skill> {
             if entry.path().extension().is_some_and(|e| e == "md") {
                 if let Ok(text) = std::fs::read_to_string(entry.path()) {
                     if let Some(skill) = parse_skill(&text, "unknown".to_owned(), 0) {
-                        skills.push(skill);
+                        skills.push(skill.clone());
                     }
                 }
             }
@@ -150,17 +150,29 @@ pub fn learn(name: &str, description: &str, body: &str, author: &str) -> Result<
     };
     let _ = std::fs::create_dir_all(dir());
     crate::paths::write_atomic(&path_for(&name), dump_skill(&skill).as_bytes())?;
-    let replaced = store()
+    let old_body = store()
         .lock()
         .expect("skills poisoned")
         .iter()
-        .any(|s| s.name == name);
+        .find(|s| s.name == name)
+        .map(|s| s.body.clone());
+    let replaced = old_body.is_some();
     let mut skills = store().lock().expect("skills poisoned");
     skills.retain(|s| s.name != name);
-    skills.push(skill);
+    skills.push(skill.clone());
     skills.sort_by(|a, b| a.name.cmp(&b.name));
+    // Changed values up front: what the method now opens with.
+    let preview: String = skill.body.chars().take(90).collect();
+    let change = match &old_body {
+        Some(old) if old != &skill.body => format!(
+            "changed — was: {:?} → now: {preview:?}…",
+            crate::llm::truncate(old, 70)
+        ),
+        Some(_) => "unchanged".to_owned(),
+        None => format!("new — starts: {preview:?}…"),
+    };
     Ok(format!(
-        "{} the skill {name:?} — it is in your skills list from now on and you can load_skill it any time (survives restarts).",
+        "{} the skill {name:?} ({change}). It is in your skills list and load_skill reads it any time (survives restarts). Show the user the change if they asked for it.",
         if replaced { "updated" } else { "learned" }
     ))
 }

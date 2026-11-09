@@ -1028,6 +1028,9 @@ async fn run_custom(
 
 pub async fn handle(core: &Arc<AgentCore>, interaction: Interaction) {
     // Approve/Cancel buttons on dangerous actions (AAv2).
+    if super::confirm::Confirmations::on_poll_component(core, &interaction).await {
+        return;
+    }
     if super::confirm::Confirmations::on_component(core, &interaction).await {
         return;
     }

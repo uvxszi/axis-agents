@@ -52,10 +52,97 @@ fn message_json(message: &Msg) -> Value {
     value
 }
 
+/// Repair a conversation before it ships: some servers (GLM, Flint,
+/// strict OpenAI) 400 when an assistant message carrying tool_calls is
+/// followed by anything but tool results, or a tool result arrives
+/// orphaned. Rules: strip tool_calls whose results never come; drop
+/// orphaned tool messages; merge back-to-back assistant texts.
+pub fn sanitize_history(messages: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    for message in messages {
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let has_calls = message
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .is_some_and(|c| !c.is_empty());
+        match (role, has_calls) {
+            ("assistant", true) => out.push(message),
+            ("tool", _) => {
+                let prev_has_calls = out
+                    .iter()
+                    .rev()
+                    .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+                    .and_then(|m| m.get("tool_calls"))
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|c| !c.is_empty());
+                if prev_has_calls {
+                    out.push(message);
+                } else {
+                    tracing::debug!("history repair: dropped an orphaned tool result");
+                }
+            }
+            ("assistant", false) => {
+                // Merge consecutive assistant texts into one turn.
+                let prev_is_plain_assistant = out.last().is_some_and(|m| {
+                    m.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                        && m.get("tool_calls").is_none()
+                });
+                if prev_is_plain_assistant {
+                    if let Some(last) = out.last_mut() {
+                        let merged = format!(
+                            "{}\n{}",
+                            last.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                            message
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                        );
+                        last["content"] = json!(merged);
+                    }
+                } else {
+                    out.push(message);
+                }
+            }
+            _ => out.push(message),
+        }
+    }
+    // Second pass: an assistant turn with tool_calls must be followed by
+    // tool results. When it isn't (history was rearranged by a nudge or
+    // retry), strip the calls — the tool results were already dropped or
+    // never existed.
+    let mut clean: Vec<Value> = Vec::with_capacity(out.len());
+    for (n, message) in out.iter().enumerate() {
+        let calls = message.get("tool_calls").and_then(|v| v.as_array());
+        if message.get("role").and_then(|v| v.as_str()) == Some("assistant")
+            && calls.is_some_and(|c| !c.is_empty())
+        {
+            let followed_by_tool = out
+                .get(n + 1)
+                .is_some_and(|m| m.get("role").and_then(|v| v.as_str()) == Some("tool"));
+            if !followed_by_tool {
+                let mut stripped = message.clone();
+                stripped.as_object_mut().unwrap().remove("tool_calls");
+                tracing::debug!("history repair: stripped tool_calls with no results after");
+                clean.push(stripped);
+                continue;
+            }
+        }
+        clean.push(message.clone());
+    }
+    clean
+}
+
 pub fn build_body(endpoint: &Endpoint, request: &ChatRequest<'_>, quirks: Quirks) -> Value {
+    let messages = sanitize_history(
+        request
+            .messages
+            .iter()
+            .map(message_json)
+            .collect::<Vec<_>>(),
+    );
     let mut body = json!({
         "model": request.model,
-        "messages": request.messages.iter().map(message_json).collect::<Vec<_>>(),
+        "messages": messages,
         "stream": request.stream,
     });
     if !quirks.no_temperature {

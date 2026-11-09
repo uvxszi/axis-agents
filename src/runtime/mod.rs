@@ -342,10 +342,70 @@ impl Supervisor {
 
     pub fn update_settings(&self, settings: GlobalSettings) {
         let mcp_changed = self.hive.settings().mcp_servers != settings.mcp_servers;
+        // LM Studio: unload anything no longer selected by any agent.
+        self.unload_unused_models(&settings);
         *self.hive.settings.write().expect("settings poisoned") = settings.clone();
         if mcp_changed {
             self.sync_mcp(settings);
         }
+    }
+
+    /// Keep LM Studio clean: when a model is changed in the app, unload
+    /// every loaded model no agent references (main/vision/background/
+    /// embedding). Best-effort — other providers are skipped.
+    pub fn unload_unused_models(&self, settings: &GlobalSettings) {
+        let _ = settings;
+        // The agent profiles live in the app config; reach them through
+        // the running cores instead (they always mirror the config).
+        let profiles: Vec<crate::config::AgentProfile> = {
+            let running = self.running.lock().expect("running poisoned");
+            running.values().map(|r| r.core.profile()).collect()
+        };
+        let mut tasks = Vec::new();
+        for profile in profiles {
+            if profile.model.provider != crate::llm::ProviderKind::LmStudio {
+                continue;
+            }
+            let keep = [
+                profile.model.model.trim().to_owned(),
+                profile.model.vision_model.trim().to_owned(),
+                profile.model.background_model.trim().to_owned(),
+                profile.model.embedding_model.trim().to_owned(),
+            ];
+            let base = profile.model.base_url.trim_end_matches('/').to_owned();
+            tasks.push((base, keep));
+        }
+        if tasks.is_empty() {
+            return;
+        }
+        self.runtime.spawn(async move {
+            for (base, keep) in tasks {
+                let Ok(list) = reqwest::get(format!("{base}/v1/models")).await else {
+                    continue;
+                };
+                let Ok(json) = list.json::<serde_json::Value>().await else {
+                    continue;
+                };
+                for id in json
+                    .pointer("/data")
+                    .and_then(|d| d.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+                {
+                    if !keep.iter().any(|k| k == id) {
+                        let client = reqwest::Client::new();
+                        let result = client
+                            .post(format!("{base}/api/v1/models/unload"))
+                            .json(&serde_json::json!({ "model": id }))
+                            .send()
+                            .await;
+                        tracing::info!(model = %id, unloaded = result.is_ok(), "LM Studio: unloaded unused model");
+                    }
+                }
+            }
+        });
     }
 
     pub fn sync_mcp(&self, settings: GlobalSettings) {
