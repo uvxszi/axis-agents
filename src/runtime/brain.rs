@@ -661,6 +661,14 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         copy_fill_asked: intent.copy_fill,
         inputs: super::vision::sources(core, &job.triggers),
     };
+    // 🔑 first in the tool belt: this request runs on the operator's
+    // bypass list (the bot's own permissions).
+    if ctx.requester_bypassed() {
+        view.lock()
+            .expect("view poisoned")
+            .tools
+            .push("bypass".to_owned());
+    }
     let mut max_rounds = profile.behavior.max_tool_rounds.clamp(1, 24);
     // A plan for big jobs: steps done one at a time; finished steps shrink
     // to their result so long jobs fit the context.

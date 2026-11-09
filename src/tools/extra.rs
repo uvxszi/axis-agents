@@ -1505,6 +1505,25 @@ fn allow_chatting_in(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     Ok(out.trim().to_owned())
 }
 
+pub async fn set_logging(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
+    let guild_id = ctx.require_guild()?;
+    let staff = ctx.requester.kind == crate::runtime::authority::PrincipalKind::Operator
+        || ctx.requester.level >= crate::config::AccessLevel::Admin;
+    if !staff {
+        return Err("only admins can turn my activity logging on or off".to_owned());
+    }
+    let on = args.get("on").and_then(Value::as_bool).unwrap_or(true);
+    {
+        let mut settings = ctx.core.hive.settings.write().expect("settings poisoned");
+        settings.log_agent_activity = on;
+    }
+    let _ = guild_id;
+    Ok(format!(
+        "activity logging is now {}. It stays that way until told otherwise.",
+        if on { "ON" } else { "OFF" }
+    ))
+}
+
 fn go_quiet(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     let minutes = number(args, "minutes").unwrap_or(60).clamp(1, 10_080);
     let channel_scope = arg(args, "scope").is_some_and(|s| s.eq_ignore_ascii_case("channel"));

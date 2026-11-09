@@ -666,6 +666,10 @@ fn build_catalog() -> Vec<ToolDef> {
             "Copy-paste a sandbox file's content until it reaches a size (or an exact copy count) — instant and exact, done in code, and the parts are attached to your reply automatically. Use it whenever someone asks to repeat/duplicate/copy-paste a file or its text to a size: never write the copies out by hand, never script it. If the person named a size in their message you can even omit until_bytes — the app knows the ask.",
             { "name": ("string", "The file to duplicate"), "until_bytes": ("number", "Target size in bytes for the WHOLE resulting file"), "size": ("number", "Alias for until_bytes"), "times": ("number", "Exact number of copies instead of a size"), "to": ("string", "Write the result to this file name instead (default: same file)"), "join": ("string", "Separator between copies (default: a blank line)") },
             required: ["name"]),
+        tool!("set_logging", Utilities, Conversational, none, guild: true, core: false,
+            keywords: ["logging", "logs", "activity log", "stop logging", "turn off logging", "log activity", "audit"],
+            "Turn the agent activity log (the servers' activity channels and the audit trail) on or off. Admins only.",
+            { "on": ("boolean", "true to enable, false to disable") }, required: ["on"]),
         tool!("recall_scratch", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["what did i", "earlier result", "previous result", "scratch", "last result", "remember", "what was the", "did i write", "what happened", "temporary storage", "reference"],
             "Look back through the scratchpad: every tool result this conversation produced is recorded verbatim. Pull it back instead of redoing work or copying from memory.",
@@ -724,10 +728,55 @@ impl ToolCtx {
             .ok_or_else(|| "that only works inside a server, not in DMs".to_owned())
     }
 
-    /// The requester's permissions in a channel.
+    /// The bot's own permissions in a channel (what bypassed users get).
+    fn bot_permissions_in(&self, channel_id: u64) -> Permissions {
+        let guild = self.guild_id.or_else(|| {
+            self.core.world.guild_ids().into_iter().find(|g| {
+                self.core
+                    .world
+                    .with_guild(*g, |k| k.channels.contains_key(&channel_id))
+                    .unwrap_or(false)
+            })
+        });
+        guild
+            .and_then(|g| {
+                self.core.world.with_guild(g, |state| {
+                    let roles: Vec<u64> = state
+                        .members
+                        .get(&self.core.world.my_id())
+                        .map(|m| m.roles.clone())
+                        .unwrap_or_default();
+                    crate::runtime::authority::channel_permissions(
+                        state,
+                        self.core.world.my_id(),
+                        &roles,
+                        channel_id,
+                    )
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Is this requester on the operator's bypass list — acting with the
+    /// bot's own permissions instead of their own?
+    pub fn requester_bypassed(&self) -> bool {
+        self.requester.kind != PrincipalKind::Operator
+            && self
+                .core
+                .hive
+                .settings()
+                .bypass_user_ids
+                .contains(&self.requester.user_id)
+    }
+
     pub fn requester_permissions_in(&self, channel_id: u64) -> Permissions {
         if self.requester.kind == PrincipalKind::Operator {
             return Permissions::all();
+        }
+        // Bypass list: the trusted operator acts with the bot's own
+        // permissions in that channel.
+        if self.requester_bypassed() {
+            return self.bot_permissions_in(channel_id);
         }
         match self.guild_id {
             // A channel outside this server grants nothing: permissions
@@ -962,8 +1011,9 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
         Err(_) => Err("the tool timed out".to_owned()),
     };
     // The audit trail: what ran, with what, and what came back. Args and
-    // results are truncated — file contents never bloat the log.
-    {
+    // results are truncated — file contents never bloat the log. It can
+    // be switched off by the operator or by the bot when told.
+    if ctx.core.hive.settings().log_agent_activity {
         let args = crate::llm::truncate(&call.arguments.to_string(), 400);
         match &result {
             Ok(text) => tracing::info!(
@@ -1036,19 +1086,25 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
             && def.name != "send_to_server"
         {
             let place = ctx.core.channel_label(Some(guild_id), ctx.channel_id);
+            // Human summary only: what ran, who asked, where. Tool
+            // RESULTS are model-facing (progress notes, nudges) and never
+            // belong in the activity feed.
             crate::runtime::activity::log(
                 &ctx.core,
                 guild_id,
                 &format!(
-                    "{} — asked by {} in {place}{}: {}",
+                    "{}{} — asked by {} in {place}",
                     step_label(def.name, &call.arguments),
+                    if ctx.requester_bypassed() {
+                        " 🔑"
+                    } else {
+                        ""
+                    },
                     if ctx.acting_as_agent() {
                         "itself".to_owned()
                     } else {
                         ctx.requester.name.clone()
-                    },
-                    "",
-                    crate::llm::truncate(text, 160)
+                    }
                 ),
             );
         }
@@ -1297,6 +1353,7 @@ pub(crate) async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<
         "attach_file" => files::attach_file(ctx, args).await,
         "duplicate_file" => files::duplicate_file(ctx, args).await,
         "recall_scratch" => scratch::recall(ctx, args).await,
+        "set_logging" => extra::set_logging(ctx, args).await,
         "convert_file" => files::convert_file(ctx, args).await,
         "list_files" => files::list_files(ctx, args).await,
         "find_in_document" => docs::find(

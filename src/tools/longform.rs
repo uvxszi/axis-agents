@@ -27,6 +27,8 @@ struct Doc {
     /// The model's private running summary (never shown to the user).
     summary: String,
     sections: u32,
+    /// The file name this document will be published under.
+    name: String,
     /// The size target for the WHOLE document, remembered from the first
     /// call that set it — finishing early is not the model's call.
     target: Option<usize>,
@@ -106,6 +108,7 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
     let (summary_before, sections_before, doc_target) = {
         let mut map = docs().lock().expect("longform poisoned");
         let doc = map.entry(ctx.channel_id).or_default();
+        doc.name = name.clone();
         // The target sticks once set: a model that drops until_bytes on a
         // later call must not get to finish early.
         if target.is_some() {
@@ -249,6 +252,33 @@ The document currently ends with:
 Write the next section now — continue seamlessly from that ending. Same voice, no recap, never a summary in place of prose.",
         tail = tail_after,
     ))
+}
+
+/// Publish the in-progress document to the sandbox NOW (without ending
+/// it): duplicate_file uses this when the sandbox file is missing or
+/// smaller than what the sections built — the doc is the truth. Returns
+/// (name, bytes) when there is anything worth publishing.
+pub fn publish_doc(channel_id: u64) -> Option<(String, usize)> {
+    let map = docs().lock().expect("longform poisoned");
+    let doc = map.get(&channel_id)?;
+    if doc.text.trim().is_empty() {
+        return None;
+    }
+    let name = doc.name.clone();
+    let len = doc.text.len();
+    let text = doc.text.clone();
+    drop(map);
+    let dir = super::files::sandbox_dir_pub(channel_id);
+    if let Ok(sanitized) = super::files::sanitize_name_pub(&name) {
+        let path = dir.join(&sanitized);
+        let on_disk = std::fs::metadata(&path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        if len > on_disk {
+            let _ = crate::paths::write_atomic(&path, text.as_bytes());
+        }
+    }
+    Some((name, len))
 }
 
 /// Peek at the current document (used by tests and the dashboard).

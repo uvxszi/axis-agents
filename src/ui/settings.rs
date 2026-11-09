@@ -246,6 +246,47 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         *tun = crate::config::Tunables::default();
                     }
                 });
+            egui::CollapsingHeader::new("🔑 Permission bypass & activity log")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "User IDs on the bypass list act with the BOT'S OWN permissions instead of their own — trusted operators. Their actions show 🔑 in the tool belt."
+                        )
+                        .size(12.0)
+                        .color(WEAK),
+                    );
+                    let mut ids = settings
+                        .bypass_user_ids
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    form_row(ui, "Bypass list", "Comma-separated Discord user IDs.", |ui| {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut ids)
+                                .desired_width(ui.available_width() - 90.0),
+                        );
+                        if response.changed() {
+                            settings.bypass_user_ids = ids
+                                .split([',', ' '])
+                                .filter_map(|id| id.trim().parse::<u64>().ok())
+                                .collect();
+                        }
+                    });
+                    form_row(
+                        ui,
+                        "Activity log",
+                        "Post agent activity to the servers' activity channels and keep the audit trail. The bot can also turn this off when an admin tells it to (set_logging).",
+                        |ui| {
+                            if ui
+                                .checkbox(&mut settings.log_agent_activity, "enabled")
+                                .changed()
+                            {
+                            }
+                        },
+                    );
+                });
             egui::CollapsingHeader::new("🧰 Tool emojis")
                 .default_open(false)
                 .show(ui, |ui| {

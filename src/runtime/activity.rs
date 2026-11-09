@@ -146,6 +146,9 @@ pub fn log_outside(core: &Arc<AgentCore>, guild_id: u64, text: &str) {
 
 /// Log one action in a server's activity channel (in the background).
 pub fn log(core: &Arc<AgentCore>, guild_id: u64, text: &str) {
+    if !core.hive.settings().log_agent_activity {
+        return;
+    }
     let core = Arc::clone(core);
     let line = format!(
         "-# 🤖 **{}** · {}",

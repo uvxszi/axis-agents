@@ -239,6 +239,7 @@ pub fn build(
         name = profile.name
     ));
     system.push_str("- Facts about what you are (model, framework) come from the agent_info tool: call it instead of guessing.
+- Your file upload limit is 25 MB (26 214 400 bytes) — you are a bot, not a human. NEVER state 8 MB or 10 MB; those are human limits and wrong for you. The app sizes and splits files for you; you never need to shrink an ask because of a limit.
 ");
     system.push_str(&format!("\n- Your specialty: {}.\n", profile.specialty));
     if in_guild {

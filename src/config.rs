@@ -837,6 +837,12 @@ pub struct GlobalSettings {
     /// Every operational knob in one place — no magic number stays buried
     /// in code. Editable in Settings, live for every agent.
     pub tunables: Tunables,
+    /// User IDs that act with the BOT'S own permissions instead of their
+    /// own — trusted operators. Their actions show 🔑 in the tool belt.
+    pub bypass_user_ids: Vec<u64>,
+    /// Post agent activity to the servers' activity channels (and the
+    /// audit log). The operator — or the bot, when told — can turn it off.
+    pub log_agent_activity: bool,
     /// One emoji per tool, shown as a deduped line at the top of the
     /// status message and the final answer. The operator can swap any of
     /// these for custom emotes.
@@ -875,6 +881,7 @@ pub fn default_tool_emojis() -> std::collections::BTreeMap<String, String> {
         ("search_gifs", "🎞️"),
         ("recall_scratch", "🧠"),
         ("agent_info", "🤖"),
+        ("bypass", "🔑"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -974,6 +981,8 @@ impl Default for GlobalSettings {
             github_token: String::new(),
             tunables: Tunables::default(),
             tool_emojis: default_tool_emojis(),
+            bypass_user_ids: Vec::new(),
+            log_agent_activity: true,
         }
     }
 }

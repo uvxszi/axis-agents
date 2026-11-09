@@ -1010,6 +1010,17 @@ pub async fn attach_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
             .ok_or("which file? (see list_files)")?,
     )?;
     let path = resolve_file(ctx, &name);
+    // Don't ship half-done work: if this file has an open size target it
+    // hasn't reached, the attachment would betray the ask.
+    if let Some((short_name, have, want)) = peek_shortfall(ctx.channel_id) {
+        if short_name == name {
+            return Err(format!(
+                "{name} is only {} of the {} asked for — attaching it now would ship half-done work. Call duplicate_file on it to fill it to the target in one call, then attach.",
+                size_label(have),
+                size_label(want)
+            ));
+        }
+    }
     let bytes = std::fs::read(&path)
         .map_err(|_| format!("{name} isn't in the file sandbox — check list_files"))?;
     if bytes.len() > tunables(ctx).upload_limit_bytes {
