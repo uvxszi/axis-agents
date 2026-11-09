@@ -117,6 +117,9 @@ fn is_reading_tool(name: &str) -> bool {
 struct View {
     started: Instant,
     steps: Vec<Step>,
+    /// Every tool used so far, once each, in order — rendered as the
+    /// emoji line at the top of the status and the final answer.
+    tools: Vec<String>,
     reasoning: String,
     answer: String,
     version: u64,
@@ -140,6 +143,17 @@ impl View {
             }
         }
     }
+}
+
+fn tool_line(view: &View, map: &std::collections::BTreeMap<String, String>) -> String {
+    if view.tools.is_empty() {
+        return String::new();
+    }
+    view.tools
+        .iter()
+        .map(|tool| crate::config::tool_emoji(map, tool))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn render_view(
@@ -199,6 +213,9 @@ fn render_view(
 }
 
 pub struct Outcome {
+    /// Every tool used, once each — the emoji line rides the final
+    /// message too.
+    pub tools: Vec<String>,
     pub text: Option<String>,
     pub error: Option<String>,
     pub tools_used: u32,
@@ -276,6 +293,7 @@ pub async fn run(core: &Arc<AgentCore>, job: Job) -> bool {
     let view = Arc::new(Mutex::new(View {
         started: Instant::now(),
         steps: Vec::new(),
+        tools: Vec::new(),
         reasoning: String::new(),
         answer: String::new(),
         version: 0,
@@ -410,7 +428,16 @@ async fn present(
             (
                 {
                     let behavior = core.profile().behavior;
-                    render_view(&view, style, &behavior.emojis, behavior.small_thinking)
+                    let mut rendered =
+                        render_view(&view, style, &behavior.emojis, behavior.small_thinking);
+                    let line = tool_line(&view, &core.hive.settings().tool_emojis);
+                    if !line.is_empty() {
+                        rendered = format!(
+                            "{line}
+{rendered}"
+                        );
+                    }
+                    rendered
                 },
                 view.version,
                 view.revealed,
@@ -686,6 +713,7 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                 }),
                 error: None,
                 tools_used,
+                tools: view.lock().expect("view poisoned").tools.clone(),
                 last_tool,
                 files: media.lock().expect("media poisoned").files(),
             };
@@ -864,6 +892,7 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                     text: None,
                     error: Some(error.to_string()),
                     tools_used,
+                    tools: view.lock().expect("view poisoned").tools.clone(),
                     last_tool,
                     files: media.lock().expect("media poisoned").files(),
                 };
@@ -1162,10 +1191,12 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             // Hand-recomposed jump links ("…/Probe Server/general/303")
             // become the canonical URL the app showed the model.
             let content = tools::discord::repair_links(&content);
+            let tools_used_list = view.lock().expect("view poisoned").tools.clone();
             return Outcome {
                 text: Some(content),
                 error: None,
                 tools_used,
+                tools: tools_used_list,
                 last_tool,
                 files: media.lock().expect("media poisoned").files(),
             };
@@ -1188,6 +1219,14 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                 *entry += 1;
                 *entry
             };
+            {
+                // The tool emoji line: once per tool, in use order.
+                let mut v = view.lock().expect("view poisoned");
+                if !v.tools.contains(&call.name) {
+                    v.tools.push(call.name.clone());
+                    v.touch();
+                }
+            }
             let label = match call.name.as_str() {
                 "make_plan" | "step_done" => {
                     let next = plan
@@ -1709,6 +1748,7 @@ pub async fn think_only(core: &Arc<AgentCore>, job: &Job) -> (Outcome, Vec<Strin
     let view = Arc::new(Mutex::new(View {
         started: Instant::now(),
         steps: Vec::new(),
+        tools: Vec::new(),
         reasoning: String::new(),
         answer: String::new(),
         version: 0,
@@ -2796,6 +2836,21 @@ async fn deliver(
     // config toggle stays (ignored) so old configs keep loading.
     let _ = (profile.behavior.show_footer, style, elapsed);
     let mut final_text = text.clone();
+    // The tool emoji line rides the finished message too — the same row
+    // the status showed while working (once per tool, never repeated).
+    if !outcome.tools.is_empty() {
+        let map = &core.hive.settings().tool_emojis;
+        let line: String = outcome
+            .tools
+            .iter()
+            .map(|tool| crate::config::tool_emoji(map, tool))
+            .collect::<Vec<_>>()
+            .join(" ");
+        final_text = format!(
+            "{line}
+{final_text}"
+        );
+    }
     if let Some(guild_id) = job.guild_id {
         final_text = link_mentions(core, guild_id, &final_text);
     }
@@ -3437,6 +3492,7 @@ Ohhh right! My bad - pure legion density, not readability.
         let mut view = View {
             started: Instant::now(),
             steps: Vec::new(),
+            tools: Vec::new(),
             reasoning: String::new(),
             answer: "NO_RE".to_owned(),
             version: 0,

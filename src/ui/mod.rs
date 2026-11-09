@@ -7,6 +7,7 @@
 
 mod agent_page;
 mod dashboard;
+mod eyes;
 mod knowledge;
 mod settings;
 pub mod theme;
@@ -30,6 +31,7 @@ use widgets::{avatar, status_color, status_dot};
 pub enum Page {
     Dashboard,
     Agent(String),
+    Eyes,
     Knowledge,
     Settings,
 }
@@ -78,6 +80,13 @@ pub struct App {
     toasts: Vec<Toast>,
     pub show_token: bool,
     pub console_input: String,
+    pub emoji_new_tool: String,
+    /// Bot's-eyes page state.
+    pub eyes_agent: Option<String>,
+    pub eyes_guild: Option<u64>,
+    pub eyes_channel: Option<u64>,
+    pub eyes_reply_to: Option<u64>,
+    pub eyes_input: String,
     pub memory_query: String,
     pub new_memory: String,
     pub buffers: HashMap<String, String>,
@@ -128,6 +137,12 @@ impl App {
             toasts: Vec::new(),
             show_token: false,
             console_input: String::new(),
+            emoji_new_tool: String::new(),
+            eyes_agent: None,
+            eyes_guild: None,
+            eyes_channel: None,
+            eyes_reply_to: None,
+            eyes_input: String::new(),
             memory_query: String::new(),
             new_memory: String::new(),
             buffers: HashMap::new(),
@@ -399,6 +414,9 @@ impl App {
                     if nav_item(ui, "⚙  Settings", self.page == Page::Settings) {
                         self.page = Page::Settings;
                     }
+                    if nav_item(ui, "👁  Bot's eyes", self.page == Page::Eyes) {
+                        self.page = Page::Eyes;
+                    }
                     if nav_item(ui, "📚  Knowledge", self.page == Page::Knowledge) {
                         self.page = Page::Knowledge;
                     }
@@ -474,6 +492,7 @@ impl eframe::App for App {
                         self.page = Page::Dashboard;
                     }
                 }
+                Page::Eyes => eyes::show(self, ui),
                 Page::Knowledge => knowledge::show(self, ui),
                 Page::Settings => settings::show(self, ui),
             });

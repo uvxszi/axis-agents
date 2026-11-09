@@ -516,6 +516,11 @@ impl Supervisor {
 
     /// Chat with an agent locally. Uses the running agent when there is
     /// one (so it shares memory state), else an offline copy.
+    /// Run something on the agents' runtime (UI-initiated bot actions).
+    pub fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(future);
+    }
+
     pub fn console_send(&self, profile: &AgentProfile, text: String) {
         let core = match self.core(&profile.id) {
             Some(core) => core,

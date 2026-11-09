@@ -837,6 +837,53 @@ pub struct GlobalSettings {
     /// Every operational knob in one place — no magic number stays buried
     /// in code. Editable in Settings, live for every agent.
     pub tunables: Tunables,
+    /// One emoji per tool, shown as a deduped line at the top of the
+    /// status message and the final answer. The operator can swap any of
+    /// these for custom emotes.
+    pub tool_emojis: std::collections::BTreeMap<String, String>,
+}
+
+/// Sensible default emoji per tool (the operator replaces these with
+/// custom emotes in Settings). Unknown tools fall back to 🔧.
+pub fn default_tool_emojis() -> std::collections::BTreeMap<String, String> {
+    [
+        ("read_messages", "👀"),
+        ("search_messages", "🔍"),
+        ("send_message", "💬"),
+        ("send_dm", "📩"),
+        ("react", "❤️"),
+        ("write_file", "📝"),
+        ("write_section", "✍️"),
+        ("duplicate_file", "🔁"),
+        ("attach_file", "📎"),
+        ("attach_image", "🖼️"),
+        ("convert_file", "🔄"),
+        ("list_files", "🗂️"),
+        ("run_script", "🐍"),
+        ("web_search", "🌐"),
+        ("fetch_url", "🔗"),
+        ("find_users", "👥"),
+        ("pick_users", "🧾"),
+        ("list_channels", "📋"),
+        ("list_members", "👥"),
+        ("get_member", "👤"),
+        ("create_poll", "📊"),
+        ("join_voice", "🎧"),
+        ("leave_voice", "🔇"),
+        ("say_in_voice", "🗣️"),
+        ("make_plan", "🗺️"),
+        ("search_gifs", "🎞️"),
+        ("recall_scratch", "🧠"),
+        ("agent_info", "🤖"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
+/// The emoji for a tool (🔧 when unmapped).
+pub fn tool_emoji(map: &std::collections::BTreeMap<String, String>, tool: &str) -> String {
+    map.get(tool).cloned().unwrap_or_else(|| "🔧".to_owned())
 }
 
 /// The knobs. Defaults match Discord's real limits and the behavior the
@@ -926,6 +973,7 @@ impl Default for GlobalSettings {
             ui_scale: 1.0,
             github_token: String::new(),
             tunables: Tunables::default(),
+            tool_emojis: default_tool_emojis(),
         }
     }
 }

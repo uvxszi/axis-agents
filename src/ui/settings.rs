@@ -246,6 +246,42 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         *tun = crate::config::Tunables::default();
                     }
                 });
+            egui::CollapsingHeader::new("🧰 Tool emojis")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "One emoji per tool — shown as a line at the top of the status message and the final answer (once per tool). Paste custom emotes like :thonk: or a Discord emote string; anything you type is sent verbatim."
+                        )
+                        .size(12.0)
+                        .color(WEAK),
+                    );
+                    let names: Vec<String> = settings.tool_emojis.keys().cloned().collect();
+                    for name in names {
+                        let emoji = settings.tool_emojis.get_mut(&name).unwrap();
+                        form_row(ui, &name, "", |ui| {
+                            ui.add(egui::TextEdit::singleline(emoji).desired_width(120.0));
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("add tool:");
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut app.emoji_new_tool).desired_width(160.0),
+                        );
+                        if resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            && !app.emoji_new_tool.trim().is_empty()
+                        {
+                            settings
+                                .tool_emojis
+                                .insert(app.emoji_new_tool.trim().to_owned(), "🔧".to_owned());
+                            app.emoji_new_tool.clear();
+                        }
+                    });
+                    if ui.small_button("restore default emojis").clicked() {
+                        settings.tool_emojis = crate::config::default_tool_emojis();
+                    }
+                });
         });
 
         if settings != app.config.settings {
