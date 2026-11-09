@@ -1,19 +1,21 @@
 //! The bot's eyes: everything the agents actually know, straight from
-//! the app's own state — guilds, channels, messages, reactions — never a
-//! fresh Discord API fetch. What you see here is exactly what the bot
-//! sees. And you can act AS the bot from here: react, reply, type, send.
+//! the app's own state — never a fresh Discord API fetch. Laid out like
+//! Discord: a server rail, a channel sidebar, and the chat view with a
+//! composer — and you act AS the bot from here.
 
-use eframe::egui::{RichText, Ui};
+use eframe::egui::{Align, Color32, Layout, RichText, Ui};
 use std::sync::Arc;
 
+use super::App;
+use super::theme::*;
+use super::widgets;
 use crate::runtime::agent::AgentCore;
 use crate::runtime::live::AgentStatus;
 
-use super::theme::*;
-use super::{App, widgets};
+const CHAT_BG: Color32 = Color32::from_rgb(16, 18, 25);
+const MESSAGE_OWN: Color32 = Color32::from_rgb(29, 33, 47);
 
 pub fn show(app: &mut App, ui: &mut Ui) {
-    // Which agent's eyes? The first online one, else the first at all.
     if app.eyes_agent.is_none()
         || !app
             .config
@@ -30,127 +32,271 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let Some(profile) = app.config.agents.iter().find(|a| a.id == agent_id).cloned() else {
         return;
     };
-    let core = app.sup.core(&agent_id);
 
-    ui.horizontal(|ui| {
-        widgets::section(
-            ui,
-            "👁 Through the bot's eyes",
-            "Exactly what the bot knows — no Discord API fetch. React, reply, and send as the bot.",
-        );
-    });
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("agent:").size(12.0).color(WEAK));
-        egui::ComboBox::from_id_salt("eyes_agent")
-            .selected_text(profile.name.clone())
-            .width(180.0)
-            .show_ui(ui, |ui| {
-                for agent in &app.config.agents {
-                    if ui
-                        .selectable_label(Some(&agent.id) == app.eyes_agent.as_ref(), &agent.name)
-                        .clicked()
-                    {
-                        app.eyes_agent = Some(agent.id.clone());
-                        app.eyes_guild = None;
-                        app.eyes_channel = None;
+    // --- top bar: agent picker + status -------------------------------------
+    egui::TopBottomPanel::top("eyes_top").show_inside(ui, |ui| {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("👁 Through the bot's eyes")
+                    .strong()
+                    .color(TEXT),
+            );
+            ui.separator();
+            egui::ComboBox::from_id_salt("eyes_agent")
+                .selected_text(profile.name.clone())
+                .width(170.0)
+                .show_ui(ui, |ui| {
+                    for agent in &app.config.agents {
+                        if ui
+                            .selectable_label(
+                                Some(&agent.id) == app.eyes_agent.as_ref(),
+                                &agent.name,
+                            )
+                            .clicked()
+                        {
+                            app.eyes_agent = Some(agent.id.clone());
+                            app.eyes_guild = None;
+                            app.eyes_channel = None;
+                            app.eyes_reply_to = None;
+                        }
                     }
+                });
+            let status = app.sup.live.snapshot(&agent_id).status;
+            match status {
+                AgentStatus::Online => ui.label(RichText::new("● online").color(GREEN)),
+                other => ui.label(
+                    RichText::new(format!("● {other:?} — start the agent to act as it"))
+                        .color(YELLOW),
+                ),
+            };
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new("what the bot knows · act as the bot — no API fetch")
+                        .size(11.5)
+                        .color(FAINT),
+                );
+            });
+        });
+        ui.add_space(4.0);
+    });
+
+    let core = app.sup.core(&agent_id);
+    let Some(core) = core else {
+        ui.centered_and_justified(|ui| {
+            ui.label(
+                RichText::new("This agent isn't running — start it to see through its eyes.")
+                    .color(FAINT),
+            );
+        });
+        return;
+    };
+
+    // --- Discord layout: server rail → channel sidebar → chat ---------------
+    egui::SidePanel::left("eyes_guilds")
+        .exact_width(64.0)
+        .frame(egui::Frame::new().fill(SIDEBAR))
+        .show_inside(ui, |ui| {
+            guild_rail(app, ui, &core);
+        });
+    egui::SidePanel::left("eyes_channels")
+        .exact_width(190.0)
+        .frame(egui::Frame::new().fill(PANEL))
+        .show_inside(ui, |ui| {
+            channel_list(app, ui, &core);
+        });
+    egui::CentralPanel::default()
+        .frame(egui::Frame::new().fill(CHAT_BG))
+        .show_inside(ui, |ui| {
+            chat(app, ui, &core);
+        });
+}
+
+/// The Discord server rail: one rounded icon per guild the bot knows.
+fn guild_rail(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
+    ui.add_space(6.0);
+    ui.vertical_centered(|ui| {
+        let guilds: Vec<(u64, String)> = core
+            .world
+            .guild_ids()
+            .into_iter()
+            .filter_map(|g| core.world.with_guild(g, |s| (g, s.name.clone())))
+            .collect();
+        if guilds.is_empty() {
+            ui.label(RichText::new("no\nservers").size(11.0).color(FAINT));
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("eyes_guild_scroll")
+            .show(ui, |ui| {
+                for (guild_id, name) in guilds {
+                    let selected = app.eyes_guild == Some(guild_id);
+                    // Discord-style: the selected server gets the accent.
+                    let color = if selected { ACCENT } else { dim(BLUE, 60) };
+                    let response = widgets::avatar(ui, &name, color, 42.0);
+                    if response.clicked() {
+                        app.eyes_guild = Some(guild_id);
+                        app.eyes_channel = None;
+                        app.eyes_reply_to = None;
+                    }
+                    response.on_hover_text(&name);
+                    ui.add_space(6.0);
                 }
             });
-        let online = app.sup.live.snapshot(&agent_id).status;
-        match online {
-            AgentStatus::Online => ui.label(RichText::new("● online").color(GREEN)),
-            _ => ui.label(
-                RichText::new(format!("● {online:?} (actions need the agent online)"))
-                    .color(YELLOW),
-            ),
-        };
     });
-    ui.add_space(6.0);
+}
 
-    let Some(core) = core else {
+/// The channel sidebar for the selected guild.
+fn channel_list(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
+    let Some(guild_id) = app.eyes_guild else {
+        ui.add_space(10.0);
         ui.label(
-            RichText::new("This agent isn't running — start it to see through its eyes.")
+            RichText::new("Pick a server on the rail — only servers the bot is in appear.")
+                .size(12.0)
                 .color(FAINT),
         );
         return;
     };
-
-    ui.horizontal(|ui| {
-        ui.set_min_height(ui.available_height() - 8.0);
-        channels_panel(app, ui, &core);
-        ui.separator();
-        messages_panel(app, ui, &core);
-    });
-}
-
-/// Left: every guild + channel the bot knows, from its world cache.
-fn channels_panel(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
+    let Some(guild) = core.world.with_guild(guild_id, |s| {
+        (
+            s.name.clone(),
+            s.channels
+                .values()
+                .map(|c| (c.id.get(), c.name.clone().unwrap_or_default(), c.is_voice()))
+                .collect::<Vec<_>>(),
+        )
+    }) else {
+        return;
+    };
+    ui.add_space(8.0);
+    ui.label(RichText::new(guild.0).strong().color(TEXT));
+    ui.add_space(4.0);
+    let text: Vec<_> = guild.1.iter().filter(|(_, _, v)| !v).cloned().collect();
+    let voice: Vec<_> = guild.1.iter().filter(|(_, _, v)| *v).cloned().collect();
     egui::ScrollArea::vertical()
-        .id_salt("eyes_channels")
-        .max_width(220.0)
+        .id_salt("eyes_channel_scroll")
         .show(ui, |ui| {
-            let guilds: Vec<(u64, String, Vec<(u64, String, bool)>)> = core
-                .world
-                .guild_ids()
-                .into_iter()
-                .filter_map(|g| {
-                    core.world.with_guild(g, |state| {
-                        (
-                            g,
-                            state.name.clone(),
-                            state
-                                .channels
-                                .values()
-                                .map(|c| {
-                                    (c.id.get(), c.name.clone().unwrap_or_default(), c.is_voice())
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                })
-                .collect();
-            if guilds.is_empty() {
-                ui.label(RichText::new("No servers known yet.").color(FAINT));
-            }
-            for (guild_id, guild_name, channels) in guilds {
-                ui.label(RichText::new(guild_name).strong().color(TEXT));
-                for (channel_id, channel_name, is_voice) in channels {
-                    let mark = if is_voice { "🔊 " } else { "# " };
-                    let selected = app.eyes_channel == Some(channel_id);
-                    if ui
-                        .selectable_label(selected, format!("{mark}{channel_name}"))
-                        .clicked()
-                    {
-                        app.eyes_guild = Some(guild_id);
-                        app.eyes_channel = Some(channel_id);
-                        app.eyes_reply_to = None;
-                    }
+            if !text.is_empty() {
+                ui.label(RichText::new("TEXT CHANNELS").size(10.5).color(FAINT));
+                for (channel_id, name, _) in &text {
+                    channel_row(app, ui, *channel_id, name, false);
                 }
                 ui.add_space(6.0);
+            }
+            if !voice.is_empty() {
+                ui.label(RichText::new("VOICE CHANNELS").size(10.5).color(FAINT));
+                for (channel_id, name, _) in &voice {
+                    channel_row(app, ui, *channel_id, name, true);
+                }
+            }
+            if text.is_empty() && voice.is_empty() {
+                ui.label(RichText::new("No channels known.").size(12.0).color(FAINT));
             }
         });
 }
 
-/// Right: the messages the bot has archived for the selected channel —
-/// authors, content, reactions — plus the composer to act as the bot.
-fn messages_panel(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
+fn channel_row(app: &mut App, ui: &mut Ui, channel_id: u64, name: &str, voice: bool) {
+    let selected = app.eyes_channel == Some(channel_id);
+    let frame = if selected {
+        egui::Frame::new()
+            .fill(CARD_HOVER)
+            .corner_radius(egui::CornerRadius::same(6))
+    } else {
+        egui::Frame::new()
+    };
+    let mark = if voice { "🔊" } else { "#" };
+    let response = frame
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(mark)
+                        .size(13.0)
+                        .color(if selected { TEXT } else { FAINT }),
+                );
+                ui.label(
+                    RichText::new(name)
+                        .size(13.0)
+                        .color(if selected { TEXT } else { WEAK }),
+                );
+            })
+        })
+        .response;
+    if response.clicked() {
+        app.eyes_channel = Some(channel_id);
+        app.eyes_reply_to = None;
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!("#{name}"));
+}
+
+/// The chat: message history (the bot's own archive) + composer.
+fn chat(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
     let Some(channel_id) = app.eyes_channel else {
-        ui.label(
-            RichText::new(
-                "Pick a channel on the left — what you'll see is the bot's own archive of it.",
-            )
-            .color(FAINT),
-        );
+        ui.centered_and_justified(|ui| {
+            ui.label(
+                RichText::new(
+                    "Pick a channel — you'll see exactly the messages the bot has archived, nothing fetched fresh.",
+                )
+                .color(FAINT),
+            );
+        });
         return;
     };
+    let channel_name = app
+        .eyes_guild
+        .and_then(|g| {
+            core.world.with_guild(g, |s| {
+                s.channels
+                    .get(&channel_id)
+                    .and_then(|c| c.name.clone())
+                    .unwrap_or_default()
+            })
+        })
+        .unwrap_or_default();
+
+    // composer pinned to the bottom, Discord-style
+    egui::TopBottomPanel::bottom("eyes_composer")
+        .frame(
+            egui::Frame::new()
+                .fill(CHAT_BG)
+                .inner_margin(egui::Margin::symmetric(12, 8)),
+        )
+        .show_inside(ui, |ui| composer(app, ui, core, channel_id));
+
+    egui::TopBottomPanel::top("eyes_chat_head")
+        .frame(
+            egui::Frame::new()
+                .fill(CHAT_BG)
+                .inner_margin(egui::Margin::symmetric(12, 6)),
+        )
+        .show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("# {channel_name}"))
+                        .strong()
+                        .color(TEXT),
+                );
+                if let Some(id) = app.eyes_reply_to {
+                    ui.label(
+                        RichText::new(format!("· replying to {id}"))
+                            .size(11.5)
+                            .color(BLUE),
+                    );
+                    if ui.small_button("✕").clicked() {
+                        app.eyes_reply_to = None;
+                    }
+                }
+            });
+            ui.separator();
+        });
+
     let messages = core.hive.knowledge.channel(channel_id, |archive| {
         archive
             .messages
             .iter()
             .filter(|m| !m.deleted)
             .rev()
-            .take(80)
+            .take(60)
             .map(|m| {
                 (
                     m.id,
@@ -162,166 +308,152 @@ fn messages_panel(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
                         .iter()
                         .map(|a| a.name.clone())
                         .collect::<Vec<_>>(),
+                    m.ts,
                 )
             })
             .collect::<Vec<_>>()
     });
     let my_id = core.world.my_id();
 
-    let reply_to = app.eyes_reply_to;
-    let agent_id = app.eyes_agent.clone().unwrap_or_default();
-
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("{} messages", messages.len()))
-                .size(12.0)
-                .color(WEAK),
-        );
-        if let Some(id) = reply_to {
-            ui.label(
-                RichText::new(format!("replying to {id}"))
-                    .size(12.0)
-                    .color(BLUE),
-            );
-            if ui.small_button("cancel reply").clicked() {
-                app.eyes_reply_to = None;
-            }
-        }
-    });
-    ui.separator();
-
     egui::ScrollArea::vertical()
-        .id_salt("eyes_messages")
+        .id_salt("eyes_chat_scroll")
+        .stick_to_bottom(true)
         .show(ui, |ui| {
+            ui.add_space(4.0);
             if messages.is_empty() {
                 ui.label(RichText::new("The bot hasn't seen any messages here yet.").color(FAINT));
             }
-            for (id, author, author_id, content, reactions, attachments) in messages.iter().rev() {
-                let mine = *author_id == my_id;
-                egui::Frame::new()
-                    .fill(if mine {
-                        egui::Color32::from_rgb(38, 42, 54)
-                    } else {
-                        egui::Color32::from_rgb(30, 33, 43)
-                    })
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(10, 6))
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{author}{}",
-                                    if mine { " (you)" } else { "" }
-                                ))
-                                .strong()
-                                .color(if mine {
-                                    BLUE
-                                } else {
-                                    TEXT
-                                }),
-                            );
-                            ui.label(RichText::new(format!("· {id}")).size(11.0).color(FAINT));
-                        });
-                        if !content.trim().is_empty() {
-                            ui.label(RichText::new(content).color(TEXT));
-                        }
-                        for file in attachments {
-                            ui.label(RichText::new(format!("📎 {file}")).size(12.0).color(WEAK));
-                        }
-                        // Act as the bot, on this message.
-                        ui.horizontal(|ui| {
-                            for emoji in ["👍", "❤️", "😂", "🎉"] {
-                                if ui
-                                    .small_button(format!("{emoji}"))
-                                    .on_hover_text("react as the bot")
-                                    .clicked()
-                                {
-                                    react_as_bot(app, core, channel_id, *id, emoji);
-                                }
-                            }
-                            let more = if app.eyes_react_for == Some(*id) {
-                                "▾ any emoji"
-                            } else {
-                                "▸ any emoji"
-                            };
-                            if ui.small_button(more).clicked() {
-                                app.eyes_react_for = if app.eyes_react_for == Some(*id) {
-                                    None
-                                } else {
-                                    Some(*id)
-                                };
-                            }
-                            if ui.small_button("↩ reply").clicked() {
-                                app.eyes_reply_to = Some(*id);
-                            }
-                        });
-                        if app.eyes_react_for == Some(*id) {
-                            react_picker(app, ui, core, channel_id, *id);
-                        }
-                        if !reactions.is_empty() {
-                            ui.horizontal(|ui| {
-                                for (emoji, count) in reactions {
-                                    ui.label(
-                                        RichText::new(format!("{emoji} {count}"))
-                                            .size(12.5)
-                                            .color(WEAK),
-                                    );
-                                }
-                            });
-                        }
-                    });
-                ui.add_space(2.0);
+            // oldest first (the archive gave newest first)
+            for (id, author, author_id, content, reactions, attachments, ts) in
+                messages.iter().rev()
+            {
+                message_row(
+                    app,
+                    ui,
+                    core,
+                    channel_id,
+                    my_id,
+                    (
+                        *id,
+                        author,
+                        *author_id,
+                        content,
+                        reactions,
+                        attachments,
+                        *ts,
+                    ),
+                );
             }
+            ui.add_space(4.0);
         });
+}
 
-    ui.separator();
-    // The composer: speak as the bot in this channel.
-    ui.horizontal(|ui| {
-        let hint = if app.eyes_reply_to.is_some() {
-            "Reply as the bot…"
-        } else {
-            "Send as the bot…"
-        };
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut app.eyes_input)
-                .hint_text(hint)
-                .desired_width(ui.available_width() - 200.0),
-        );
-        let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let _ = &agent_id;
-        if (widgets::primary_button(ui, "Send").clicked() || enter)
-            && !app.eyes_input.trim().is_empty()
-        {
-            send_as_bot(app, core, channel_id, app.eyes_input.trim().to_owned());
-            app.eyes_input.clear();
-            app.eyes_reply_to = None;
-            response.request_focus();
+#[allow(clippy::too_many_arguments)]
+fn message_row(
+    app: &mut App,
+    ui: &mut Ui,
+    core: &Arc<AgentCore>,
+    channel: u64,
+    my_id: u64,
+    message: (u64, &str, u64, &str, &[(String, u32)], &[String], i64),
+) {
+    let (id, author, author_id, content, reactions, attachments, ts) = message;
+    let mine = author_id == my_id;
+    let frame = if mine {
+        egui::Frame::new()
+            .fill(MESSAGE_OWN)
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+    } else {
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6))
+    };
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            // avatar + name + time (Discord message header)
+            widgets::avatar(ui, author, if mine { ACCENT } else { dim(BLUE, 60) }, 26.0);
+            ui.label(
+                RichText::new(author)
+                    .strong()
+                    .color(if mine { ACCENT } else { TEXT }),
+            );
+            let time = crate::memory::now_ms() - ts;
+            let ago = if time < 60_000 {
+                "just now".to_owned()
+            } else if time < 3_600_000 {
+                format!("{}m ago", time / 60_000)
+            } else {
+                format!("{}h ago", time / 3_600_000)
+            };
+            ui.label(RichText::new(ago).size(11.0).color(FAINT));
+            // actions on the right: react / reply
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .small_button("↩")
+                    .on_hover_text("reply to this as the bot")
+                    .clicked()
+                {
+                    app.eyes_reply_to = Some(id);
+                }
+                let picker_open = app.eyes_react_for == Some(id);
+                if ui
+                    .small_button(if picker_open { "😀▾" } else { "😀" })
+                    .on_hover_text("react with any emoji or server emote")
+                    .clicked()
+                {
+                    app.eyes_react_for = if picker_open { None } else { Some(id) };
+                }
+            });
+        });
+        if !content.trim().is_empty() {
+            ui.label(RichText::new(content).color(TEXT));
         }
-        if ui
-            .button("Typing…")
-            .on_hover_text("show the bot typing here")
-            .clicked()
-        {
-            type_as_bot(app, core, channel_id);
+        for file in attachments {
+            ui.label(RichText::new(format!("📎 {file}")).size(12.0).color(WEAK));
         }
+        if !reactions.is_empty() {
+            ui.horizontal(|ui| {
+                for (emoji, count) in reactions {
+                    egui::Frame::new()
+                        .fill(CARD)
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!("{emoji} {count}"))
+                                    .size(12.0)
+                                    .color(WEAK),
+                            );
+                        });
+                }
+            });
+        }
+        if app.eyes_react_for == Some(id) {
+            react_picker(app, ui, core, channel, id);
+        }
+        ui.add_space(2.0);
     });
 }
 
-/// Any-emoji picker: free text (unicode or `<:name:id>` / `name:id` emote
-/// strings) plus every server emote the bot actually knows — its own
-/// custom emotes show here as soon as it shares a server with them.
+/// Any-emoji picker: free text (unicode or `<:name:id>` emote strings)
+/// plus every server emote the bot actually knows.
 fn react_picker(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64, message: u64) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgb(24, 26, 35))
+        .fill(INPUT)
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("react:").size(12.0).color(WEAK));
+                for emoji in ["👍", "❤️", "😂", "🎉", "😮", "😢"] {
+                    if ui.small_button(emoji).clicked() {
+                        react_as_bot(app, core, channel, message, emoji);
+                        app.eyes_react_for = None;
+                    }
+                }
+                ui.separator();
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut app.eyes_emoji_input)
-                        .hint_text("any emoji, or <:name:id> / name:id")
-                        .desired_width(220.0),
+                        .hint_text("any emoji or <:name:id>")
+                        .desired_width(170.0),
                 );
                 let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let fire = (enter || ui.small_button("react").clicked())
@@ -333,8 +465,7 @@ fn react_picker(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64,
                     app.eyes_react_for = None;
                 }
             });
-            // Server emotes the bot knows (every guild it's in).
-            let emotes: Vec<(String, String, bool)> = core
+            let emotes: Vec<(String, String)> = core
                 .world
                 .guild_ids()
                 .into_iter()
@@ -347,12 +478,14 @@ fn react_picker(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64,
                                 let name = e.name.clone()?;
                                 let id = e.id?;
                                 let animated = e.animated.unwrap_or(false);
-                                let wire = format!(
-                                    "{}:{name}:{}",
-                                    if animated { "a" } else { "" },
-                                    id.get()
-                                );
-                                Some((format!(":{name}:"), format!("<{wire}>"), animated))
+                                Some((
+                                    format!(":{name}:"),
+                                    format!(
+                                        "<{}:{name}:{}>",
+                                        if animated { "a" } else { "" },
+                                        id.get()
+                                    ),
+                                ))
                             })
                             .collect::<Vec<_>>()
                     })
@@ -362,11 +495,11 @@ fn react_picker(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64,
             if !emotes.is_empty() {
                 ui.label(
                     RichText::new("server emotes the bot knows:")
-                        .size(11.5)
+                        .size(11.0)
                         .color(FAINT),
                 );
                 ui.horizontal_wrapped(|ui| {
-                    for (label, wire, _animated) in emotes.iter().take(60) {
+                    for (label, wire) in emotes.iter().take(60) {
                         if ui.small_button(label).on_hover_text(wire).clicked() {
                             react_as_bot(app, core, channel, message, wire);
                             app.eyes_react_for = None;
@@ -375,6 +508,37 @@ fn react_picker(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64,
                 });
             }
         });
+}
+
+fn composer(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64) {
+    ui.horizontal(|ui| {
+        let hint = if app.eyes_reply_to.is_some() {
+            "Reply as the bot…  (Enter to send)"
+        } else {
+            "Message as the bot…  (Enter to send)"
+        };
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut app.eyes_input)
+                .hint_text(hint)
+                .desired_width(ui.available_width() - 220.0),
+        );
+        let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (widgets::primary_button(ui, "Send").clicked() || enter)
+            && !app.eyes_input.trim().is_empty()
+        {
+            send_as_bot(app, core, channel, app.eyes_input.trim().to_owned());
+            app.eyes_input.clear();
+            app.eyes_reply_to = None;
+            response.request_focus();
+        }
+        if ui
+            .button("⌨ typing")
+            .on_hover_text("show the bot typing in this channel")
+            .clicked()
+        {
+            type_as_bot(app, core, channel);
+        }
+    });
 }
 
 fn react_as_bot(app: &mut App, core: &Arc<AgentCore>, channel: u64, message: u64, emoji: &str) {
@@ -415,8 +579,8 @@ fn send_as_bot(app: &mut App, core: &Arc<AgentCore>, channel: u64, text: String)
         }
         match request.await {
             Ok(sent) => {
-                // The bot's own words go into its archive like any gateway
-                // message would — the eyes view stays truthful.
+                // The bot's own words enter its archive — the eyes view
+                // stays truthful.
                 core.hive.knowledge.channel_mut(channel.get(), |archive| {
                     archive.push(crate::memory::StoredMessage {
                         id: sent.id.get(),
