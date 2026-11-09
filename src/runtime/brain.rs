@@ -619,10 +619,26 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
     tools::files::reset_channel_state(job.channel_id);
     // What the message asks for, read ONCE — sizes, attachments,
     // copy-paste intent, file names. Every consumer consults the same
-    // parse; no scattered keyword matching.
-    let intent = request_text(job)
-        .map(|t| super::intent::parse(&t))
-        .unwrap_or_default();
+    // parse; no scattered keyword matching. A reply ("try it again")
+    // carries the ask in the message it answers, so that text is read
+    // too.
+    let intent_text = {
+        let own = request_text(job).unwrap_or_default();
+        match job
+            .triggers
+            .last()
+            .and_then(|m| m.referenced_message.as_deref())
+            .map(|r| r.content.trim())
+            .filter(|referenced| !referenced.is_empty())
+        {
+            Some(referenced) => format!(
+                "{own}
+{referenced}"
+            ),
+            None => own,
+        }
+    };
+    let intent = super::intent::parse(&intent_text);
     // "a 25 MB file" in the request: the app owns the size arithmetic.
     // The first file work without its own target picks this up.
     if let Some(bytes) = intent.final_size {
@@ -1955,6 +1971,30 @@ pub fn claims_action(text: &str) -> bool {
         "i left",
         "joining",
         "i'll join",
+        // "Got it! Making that 25MB chronicle right now" — a promise in
+        // progress with zero tools run is still just a promise.
+        "i'm making",
+        "making that",
+        "making the",
+        "making a ",
+        "i'll make",
+        "i'm going to make",
+        "generating",
+        "i'm creating",
+        "creating the",
+        "i'll create",
+        "building the",
+        "i'm building",
+        "fetching",
+        "grabbing",
+        "pulling up",
+        "starting on",
+        "on it now",
+        "queuing",
+        "queueing",
+        "right now —",
+        "right now!",
+        "seal the deal",
         "i'll remind",
         "reminder set",
         "i've set",
@@ -3605,6 +3645,9 @@ Ohhh right! My bad - pure legion density, not readability.
         ));
         assert!(!asks_for_details("The latest is v0.0.6."));
         assert!(!claims_action("Not much! Just hanging out here."));
+        assert!(claims_action(
+            "Got it! Making that 25MB friendship chronicle right now — and here's the shuffle-attack GIF to seal the deal!"
+        ));
         assert!(claims_action(
             "Got it, uvx. Won't chat in scratchpad3 or c-md."
         ));
