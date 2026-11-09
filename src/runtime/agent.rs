@@ -54,6 +54,9 @@ pub struct AgentCore {
     pub text_tools: AtomicBool,
     /// The model rejected images.
     pub no_vision: AtomicBool,
+    /// Set by the app's Stop button: every brain loop checks it and wraps
+    /// up immediately — in-flight jobs don't keep going after Stop.
+    pub halted: AtomicBool,
     pub application_id: AtomicU64,
     /// Per-guild: (user → recent message fingerprints) for spam checks.
     pub recent_by_user: Mutex<HashMap<(u64, u64), Vec<(i64, u64)>>>,
@@ -167,6 +170,7 @@ impl AgentCore {
             model_info: RwLock::new(ModelInfo::default()),
             text_tools: AtomicBool::new(false),
             no_vision: AtomicBool::new(false),
+            halted: AtomicBool::new(false),
             application_id: AtomicU64::new(0),
             recent_by_user: Mutex::new(HashMap::new()),
             commands: Mutex::new(None),
@@ -1066,6 +1070,7 @@ pub fn intents() -> GatewayIntents {
 
 /// Connect and run until `shutdown` flips. Updates live status.
 pub async fn run(core: Arc<AgentCore>, token: String, mut shutdown: watch::Receiver<bool>) {
+    core.halted.store(false, Ordering::Relaxed);
     let profile = core.profile();
     let live = Arc::clone(&core.hive.live);
     let run_id = fastrand::u64(1..);

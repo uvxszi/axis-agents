@@ -51,7 +51,7 @@ pub fn definitions() -> Vec<ToolDef> {
             { "memory_id": ("integer", "The memory's ID (from recall)") }, required: ["memory_id"]),
         def!("note_about_person", Memory, Conversational, guild: true, core: false,
             keywords: ["is a", "works on", "likes", "they are", "she is", "he is"],
-            "Update the shared notes all agents see about a person (personality, interests, how to talk to them). Replaces the old notes; keep it under 60 words.",
+            "Update the shared notes all agents see about a person (personality, interests, how to talk to them). Replaces the old notes; keep it under 60 words. ONLY for durable facts someone shares about themselves — NEVER mid-game/mid-task (finish the request first; a style preference during a game is not a note), and NEVER twice for the same fact.",
             { "user": ("string", "Who"), "notes": ("string", "The full updated notes") }, required: ["user", "notes"]),
         def!("set_directive", Memory, Conversational, guild: true, core: false,
             keywords: ["from now on", "always", "never", "rule", "don't ever", "stop doing", "make sure you", "you should"],

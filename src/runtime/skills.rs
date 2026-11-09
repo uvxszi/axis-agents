@@ -45,11 +45,14 @@ fn parse_skill(text: &str, author: String, created: i64) -> Option<Skill> {
     let (front, body) = rest.split_once("---")?;
     let mut name = None;
     let mut description = None;
+    let mut author = author;
     for line in front.lines() {
         if let Some(value) = line.strip_prefix("name:") {
             name = Some(value.trim().to_owned());
         } else if let Some(value) = line.strip_prefix("description:") {
             description = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("author:") {
+            author = value.trim().to_owned();
         }
     }
     Some(Skill {
@@ -271,8 +274,12 @@ diagram from the previous one, move by move, and show it.",
                 if existing == dump_skill(&skill) {
                     continue;
                 }
+                // Old seeds on disk carry no author (or "unknown") — they
+                // are built-ins and follow the updated seed. Anything a
+                // person or the agent taught (a real author name) is
+                // never touched.
                 if let Some(parsed) = parse_skill(&existing, String::new(), 0) {
-                    if parsed.author != "built-in" {
+                    if parsed.author != "built-in" && !parsed.author.is_empty() {
                         continue;
                     }
                 }

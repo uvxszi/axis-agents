@@ -718,6 +718,17 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
     let mut retried = 0;
 
     loop {
+        // The app's Stop button: wrap up immediately, nothing further.
+        if core.halted.load(std::sync::atomic::Ordering::Relaxed) {
+            return Outcome {
+                text: Some("Stopped.".to_owned()),
+                error: None,
+                tools_used,
+                tools: view.lock().expect("view poisoned").tools.clone(),
+                last_tool,
+                files: media.lock().expect("media poisoned").files(),
+            };
+        }
         // "Stop" from the person: wrap up with what's done.
         let stopped = core
             .interrupts

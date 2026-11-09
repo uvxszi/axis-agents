@@ -249,6 +249,12 @@ impl Supervisor {
             .expect("running poisoned")
             .remove(agent_id)
         {
+            // Halt in-flight jobs FIRST — the gateway shuts down below,
+            // but brain loops and their replies would keep running.
+            running
+                .core
+                .halted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = running.shutdown.send(true);
             self.hive.update_peer(agent_id, |p| p.online = false);
         }
