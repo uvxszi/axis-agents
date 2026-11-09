@@ -820,6 +820,11 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         {
             let mut v = view.lock().expect("view poisoned");
             v.answer.clear();
+            // Every model call is a FRESH thinking pass. Retries (rate
+            // limit, context shrink, thinking-off) re-reason from scratch;
+            // keeping the old pass made the panel show the same reasoning
+            // stacked twice — the "thinking restarted" effect.
+            v.reasoning.clear();
             v.touch();
         }
         let permit = core.hive.endpoint_permit(&endpoint.limit_key()).await;
