@@ -939,7 +939,7 @@ impl Default for Tunables {
     fn default() -> Self {
         Self {
             upload_limit_bytes: 25 * 1024 * 1024,
-            attach_headroom_bytes: 256 * 1024,
+            attach_headroom_bytes: 1024 * 1024,
             sandbox_limit_bytes: 128 * 1024 * 1024,
             max_duplicate_parts: 10,
             file_rewrite_autofill: 2,

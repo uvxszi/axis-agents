@@ -961,6 +961,27 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
         Ok(result) => result,
         Err(_) => Err("the tool timed out".to_owned()),
     };
+    // The audit trail: what ran, with what, and what came back. Args and
+    // results are truncated — file contents never bloat the log.
+    {
+        let args = crate::llm::truncate(&call.arguments.to_string(), 400);
+        match &result {
+            Ok(text) => tracing::info!(
+                agent = %ctx.core.id,
+                tool = def.name,
+                args = %args,
+                result = %crate::llm::truncate(text, 300),
+                "tool ok"
+            ),
+            Err(error) => tracing::warn!(
+                agent = %ctx.core.id,
+                tool = def.name,
+                args = %args,
+                error = %error,
+                "tool failed"
+            ),
+        }
+    }
     // Everything flows through the scratchpad: the model can pull any
     // earlier result back verbatim instead of redoing the work.
     if !matches!(def.name, "recall_scratch" | "list_files" | "read_messages") {

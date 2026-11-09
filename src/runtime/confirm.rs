@@ -126,6 +126,23 @@ impl Confirmations {
         )
     }
 
+    /// Remove a resolved confirmation message a few seconds later — brief
+    /// enough for everyone to see the outcome, gone before it's clutter.
+    fn delete_soon(core: &Arc<AgentCore>, channel_id: u64, message_id: u64) {
+        let core = Arc::clone(core);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let _ = core
+                .http
+                .delete_message(
+                    axis::prelude::ChannelId::new(channel_id),
+                    axis::prelude::MessageId::new(message_id),
+                )
+                .await;
+            core.live().forget_sent(message_id);
+        });
+    }
+
     /// Handle an `axis_confirm:` button. Returns true when consumed.
     pub async fn on_component(core: &Arc<AgentCore>, interaction: &Interaction) -> bool {
         let Some(InteractionData::MessageComponent(data)) = &interaction.data else {
@@ -244,6 +261,7 @@ impl Confirmations {
                 &format!("~~{label}~~ — cancelled."),
             )
             .await;
+            Self::delete_soon(core, channel_id, confirm_message_id);
             return true;
         }
         if verdict != "yes" {
@@ -259,6 +277,54 @@ impl Confirmations {
             )
             .await;
             return true;
+        }
+        // Re-check at PRESS time: the action runs under the requester's
+        // authority — they must still hold the Discord permission the
+        // tool requires, in this channel, right now (they may have lost
+        // it since asking, or never had it and something slipped by).
+        if let Some(def) = crate::tools::catalog().iter().find(|d| d.name == tool) {
+            let guild = action_guild.or(interaction.guild_id.map(|g| g.get()));
+            let have = guild
+                .and_then(|g| {
+                    core.world.with_guild(g, |state| {
+                        requester.channel_permissions(Some(state), channel_id)
+                    })
+                })
+                .unwrap_or_default();
+            if !def.requires.is_empty() && !have.contains(def.requires) {
+                core.hive
+                    .confirmations
+                    .pending
+                    .lock()
+                    .expect("confirmations poisoned")
+                    .remove(&id);
+                tracing::warn!(
+                    approver = %clicker.name,
+                    requester = %requester.name,
+                    tool = %tool,
+                    "confirmation denied at press: requester lacks the permission"
+                );
+                respond(
+                    4,
+                    format!(
+                        "{} can't do that anymore — the permission it needs was missing when the button was pressed.",
+                        requester.name
+                    ),
+                )
+                .await;
+                edit_message(
+                    core,
+                    channel_id,
+                    confirm_message_id,
+                    &format!(
+                        "~~{label}~~ — not allowed ({} lacks the permission).",
+                        requester.name
+                    ),
+                )
+                .await;
+                Self::delete_soon(core, channel_id, confirm_message_id);
+                return true;
+            }
         }
 
         // Take it out of the map so double-clicks can't run it twice.

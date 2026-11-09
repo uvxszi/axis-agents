@@ -2904,6 +2904,17 @@ async fn deliver(
     let first_bucket = buckets.first().cloned().unwrap_or_default();
     let mut leftover_buckets: Vec<Vec<(String, Vec<u8>)>> =
         buckets.iter().skip(1).cloned().collect();
+    tracing::info!(
+        agent = %core.id,
+        files = ?outcome
+            .files
+            .iter()
+            .map(|(n, b)| format!("{n}={}", b.len()))
+            .collect::<Vec<_>>(),
+        buckets = buckets.len(),
+        budget,
+        "delivering reply with files"
+    );
     // Live-answer flow: when the whole answer fits one message and a
     // status placeholder exists, the placeholder BECOMES the answer —
     // edited in place, files attached to it — instead of a second
@@ -2932,15 +2943,17 @@ async fn deliver(
             }
             match request.await {
                 Ok(edited) => {
+                    tracing::info!(agent = %core.id, files = first_bucket.len(), "answer edited in place with files");
                     core.live().remember_sent(edited.id.get(), &chunks[0]);
                     edited_in_place = true;
                     first_id = Some(edited.id);
                 }
                 Err(error) => {
+                    let why = tools::discord_error(error);
+                    tracing::warn!(agent = %core.id, error = %why, files = ?first_bucket.iter().map(|(n, b)| format!("{n}={}", b.len())).collect::<Vec<_>>(), "edit-in-place with files failed");
                     // 413 or similar with the files: the person still gets
                     // their answer — retry the edit with text only; files
                     // go out separately below.
-                    let why = tools::discord_error(error);
                     let too_big = why.contains("413");
                     if too_big && !first_bucket.is_empty() {
                         match core
@@ -3188,18 +3201,26 @@ async fn deliver(
             request = request.file(name.clone(), bytes.clone());
         }
         if let Err(error) = request.await {
+            let why = tools::discord_error(error);
+            tracing::warn!(
+                agent = %core.id,
+                files = ?bucket.iter().map(|(n, b)| format!("{n}={}", b.len())).collect::<Vec<_>>(),
+                error = %why,
+                "follow-up file message rejected"
+            );
             core.feed(
                 FeedKind::Error,
                 format!(
-                    "could not attach {}: {}",
+                    "could not attach {}: {why}",
                     bucket
                         .first()
                         .map(|(name, _)| name.clone())
-                        .unwrap_or_default(),
-                    tools::discord_error(error)
+                        .unwrap_or_default()
                 ),
                 Some(label.clone()),
             );
+        } else {
+            tracing::info!(agent = %core.id, files = bucket.len(), "follow-up files sent");
         }
     }
     // Make sure the archive holds the final text, not "thinking…".
