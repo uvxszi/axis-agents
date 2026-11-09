@@ -711,6 +711,10 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         max_rounds = max_rounds.max((requested * 3 + 6).min(80));
     }
     let mut last_tool: Option<(String, bool, String)> = None;
+    // Consecutive failures per tool: 3 in a row and the tool is refused
+    // for the rest of the job — the model gets told to stop and move on
+    // instead of retrying the same broken call forever.
+    let mut fail_streak: HashMap<String, u32> = HashMap::new();
     let mut retried = 0;
 
     loop {
@@ -1258,6 +1262,14 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         let mut posted_notices: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for call in calls.iter().take(8) {
+            if fail_streak.get(&call.name).is_some_and(|n| *n >= 3) {
+                tracing::warn!(agent = %core.id, tool = %call.name, "circuit breaker: tool failed 3x, refusing");
+                text_results.push(format!(
+                    "{} refused: this failed 3 times in a row in this job — do NOT call it again. Continue without it: answer the person, or use a different approach.",
+                    call.name
+                ));
+                continue;
+            }
             let key = format!("{}|{}", call.name, call.arguments);
             let count = {
                 let entry = repeats.entry(key).or_insert(0);

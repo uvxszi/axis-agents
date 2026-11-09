@@ -237,6 +237,10 @@ fn try_connect(core: &Arc<AgentCore>, guild_id: u64) {
                 let listener =
                     tokio::spawn(listen(Arc::clone(&core), Arc::downgrade(&session), events));
                 session.tasks.lock().expect("voice poisoned").push(listener);
+                reconnect_attempts()
+                    .lock()
+                    .expect("voice poisoned")
+                    .remove(&guild_id);
                 state.sessions.insert(guild_id, session);
                 for waiter in state.waiters.remove(&guild_id).unwrap_or_default() {
                     let _ = waiter.send(Ok(()));
@@ -261,6 +265,13 @@ fn try_connect(core: &Arc<AgentCore>, guild_id: u64) {
 }
 
 // --- actions -------------------------------------------------------------------------
+
+/// Consecutive voice reconnect attempts per guild (reset on a healthy join).
+fn reconnect_attempts() -> &'static std::sync::Mutex<std::collections::HashMap<u64, u32>> {
+    static ATTEMPTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, u32>>> =
+        std::sync::OnceLock::new();
+    ATTEMPTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
 
 /// Join a voice channel (or move there). Resolves once connected;
 /// retries with a fresh voice session when Discord's voice gateway hiccups.
@@ -926,10 +937,34 @@ async fn listen(
                             // 4014: removed from the channel (kicked, or the
                             // channel was deleted) — don't force back in.
                             if code != Some(4014) {
-                                core.feed(FeedKind::System, format!("voice dropped ({reason}); reconnecting"), None);
+                                // Reconnect, but never forever: a voice
+                                // session that keeps dropping (kicked,
+                                // blocked, broken) must give up and stay
+                                // out instead of rejoin-looping every 2s.
+                                let attempts = {
+                                    let mut tries = reconnect_attempts().lock().expect("voice poisoned");
+                                    let count = tries.entry(guild_id).or_insert(0);
+                                    *count += 1;
+                                    *count
+                                };
+                                if attempts > 3 {
+                                    reconnect_attempts()
+                                        .lock()
+                                        .expect("voice poisoned")
+                                        .remove(&guild_id);
+                                    core.voice.state.lock().expect("voice poisoned").sessions.remove(&guild_id);
+                                    publish(&core);
+                                    core.feed(
+                                        FeedKind::Error,
+                                        "voice keeps dropping — staying out of voice. Ask again to rejoin.".to_owned(),
+                                        None,
+                                    );
+                                    break;
+                                }
+                                core.feed(FeedKind::System, format!("voice dropped ({reason}); reconnecting (attempt {attempts}/3)"), None);
                                 let core = Arc::clone(&core);
                                 tokio::spawn(async move {
-                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                    tokio::time::sleep(Duration::from_secs(2 * attempts as u64)).await;
                                     let origin = core.voice.state.lock().expect("voice poisoned").origins.get(&guild_id).copied();
                                     if let Err(error) = join(&core, guild_id, channel_id, origin).await {
                                         core.feed(FeedKind::Error, format!("couldn't rejoin voice: {error}"), None);
