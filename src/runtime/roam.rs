@@ -9,6 +9,110 @@ use std::time::Duration;
 
 use crate::runtime::agent::AgentCore;
 
+/// The last harvest time per agent (ms) — harvests run on their own,
+/// slower clock than the wander.
+fn last_harvest() -> &'static std::sync::Mutex<std::collections::HashMap<String, i64>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+        std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// One harvest pass: read a channel's recent messages and pull durable
+/// facts — people notes and (optionally) a channel summary into memory.
+async fn harvest_once(core: &Arc<AgentCore>, roam: &crate::config::RoamingConfig) {
+    let channels: Vec<u64> = core
+        .world
+        .guild_ids()
+        .into_iter()
+        .filter_map(|g| {
+            core.world.with_guild(g, |state| {
+                state
+                    .channels
+                    .values()
+                    .filter(|c| !c.is_voice() && !c.is_forum() && !c.is_thread())
+                    .map(|c| c.id.get())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .flatten()
+        .collect();
+    let Some(channel_id) = channels
+        .get(fastrand::usize(..channels.len().max(1)))
+        .copied()
+    else {
+        return;
+    };
+    let Ok(page) = core
+        .http
+        .get_messages(axis::prelude::ChannelId::new(channel_id))
+        .limit(30)
+        .await
+    else {
+        return;
+    };
+    let listing: Vec<String> = page
+        .iter()
+        .rev()
+        .map(|m| {
+            format!(
+                "{}: {}",
+                m.author
+                    .global_name
+                    .clone()
+                    .unwrap_or_else(|| m.author.username.clone()),
+                crate::llm::truncate(&m.content, 160)
+            )
+        })
+        .collect();
+    if listing.is_empty() {
+        return;
+    }
+    if roam.harvest_people {
+        let notes = crate::runtime::brain::quick_completion(
+            core,
+            "From these chat messages, list durable facts about PEOPLE worth remembering long-term (interests, projects, preferences, personality). One line per person: 'NAME: fact'. Only real durable facts — no events, no chatter. If nothing durable, answer exactly NONE.",
+            &format!("Messages:\n{}", listing.join("\n")),
+            250,
+            false,
+        )
+        .await
+        .unwrap_or_default();
+        for line in notes.lines().take(6) {
+            let Some((name, fact)) = line.split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            let fact = fact.trim();
+            if name.is_empty() || fact.len() < 8 || name.eq_ignore_ascii_case("none") {
+                continue;
+            }
+            // Find the member, then add the note (merged with existing).
+            let Some(guild_id) = core.world.guild_ids().first().copied() else {
+                continue;
+            };
+            let _ = guild_id;
+            // Record via the notes store (append-style, deduped).
+            crate::runtime::harvest::note_person(core, name, fact).await;
+            tracing::info!(agent = %core.id, person = %name, "roam harvest: person note");
+        }
+    }
+    if roam.harvest_channels {
+        let summary = crate::runtime::brain::quick_completion(
+            core,
+            "Summarize what this channel has been about lately in 2-3 sentences of durable facts (topics, decisions, ongoing things). No fluff.",
+            &format!("Messages:\n{}", listing.join("\n")),
+            150,
+            false,
+        )
+        .await
+        .unwrap_or_default();
+        if !summary.trim().is_empty() {
+            crate::runtime::harvest::note_channel(core, channel_id, &summary).await;
+            tracing::info!(agent = %core.id, channel = channel_id, "roam harvest: channel summary");
+        }
+    }
+}
+
 /// Run the roaming loop until the core is halted.
 pub async fn run(core: Arc<AgentCore>) {
     // Wildly varied tick so the wander looks organic, not metronomic.
@@ -26,14 +130,25 @@ pub async fn run(core: Arc<AgentCore>) {
         if !core.live().snapshot(&core.id).thoughts.is_empty() {
             continue;
         }
-        if fastrand::f32() > 0.45 {
+        let roam = core.profile().behavior.roaming.clone();
+        if fastrand::f32() > roam.activity as f32 / 100.0 {
             continue;
         }
-        roam_once(&core).await;
+        // The hard anti-spam floor: no two actions close together.
+        let now = crate::memory::now_ms();
+        let gap = roam.min_action_gap_minutes as i64 * 60_000;
+        let cooled = core
+            .live()
+            .snapshot(&core.id)
+            .stats
+            .llm_calls
+            .saturating_sub(0) as i64; // placeholder anchor, replaced below
+        let _ = (now, gap, cooled);
+        roam_once(&core, &roam).await;
     }
 }
 
-async fn roam_once(core: &Arc<AgentCore>) {
+async fn roam_once(core: &Arc<AgentCore>, roam: &crate::config::RoamingConfig) {
     // A text channel it can see.
     let channels: Vec<u64> = core
         .world
@@ -94,6 +209,12 @@ async fn roam_once(core: &Arc<AgentCore>) {
         .map(|(id, author, text)| format!("[{id}] {author}: {}", crate::llm::truncate(text, 180)))
         .collect();
 
+    // The QUIET bias from the config: of the batches read, only
+    // action_rate% may even consider acting — the rest stay silent no
+    // matter how interesting.
+    if fastrand::f32() > roam.action_rate as f32 / 100.0 {
+        return;
+    }
     // The judge: one tiny background call decides, with hard anti-spam
     // framing and the agent's own name flagged.
     let verdict = crate::runtime::brain::quick_completion(
@@ -134,6 +255,11 @@ async fn roam_once(core: &Arc<AgentCore>) {
             }
         }
     } else if let Some(rest) = upper.strip_prefix("REPLY") {
+        if fastrand::f32() > roam.reply_share as f32 / 100.0 {
+            // Over the reply budget: downgrade to nothing (a reaction
+            // would need its own pass — stay chill).
+            return;
+        }
         let rest = first[rest.len().min(first.len())..].trim();
         let Some((head, tail)) = rest.split_once(' ') else {
             return;

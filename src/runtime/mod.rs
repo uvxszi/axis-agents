@@ -13,6 +13,7 @@ pub mod community;
 pub mod confirm;
 pub mod context;
 pub mod github;
+pub mod harvest;
 pub mod hive;
 pub mod hq;
 pub mod intent;

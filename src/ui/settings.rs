@@ -208,21 +208,35 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         .color(WEAK),
                     );
                     let tun = &mut settings.tunables;
-                    let mb = |bytes: usize| format!("{} MB", bytes / 1024 / 1024);
-                    form_row(ui, "Upload limit", "One file upload (Discord's bot cap is 25 MB).", |ui| {
-                        ui.label(RichText::new(mb(tun.upload_limit_bytes)).strong());
-                        if ui.small_button("reset 25 MB").clicked() {
-                            tun.upload_limit_bytes = 25 * 1024 * 1024;
-                        }
-                    });
-                    form_row(ui, "Attach headroom", "Kept under the upload limit because Discord caps the WHOLE message (all files + text). A '25 MB' ask fills to the largest total that actually sends.", |ui| {
+                    form_row(ui, "Upload limit (MB)", "One file upload (Discord's bot cap is 25). Type a number or use the arrows.", |ui| {
+                        let mut mb = (tun.upload_limit_bytes / 1024 / 1024).max(1) as i32;
                         ui.add(
-                            egui::Slider::new(&mut tun.attach_headroom_bytes, 16 * 1024..=2048 * 1024usize)
-                                .custom_formatter(|v, _| format!("{} KB", (v as usize) / 1024)),
+                            egui::DragValue::new(&mut mb)
+                                .range(1..=100)
+                                .suffix(" MB"),
                         );
+                        if ui.small_button("reset 25").clicked() {
+                            mb = 25;
+                        }
+                        tun.upload_limit_bytes = mb as usize * 1024 * 1024;
                     });
-                    form_row(ui, "Sandbox per channel", "Total file storage per channel before pruning.", |ui| {
-                        ui.add(egui::Slider::new(&mut tun.sandbox_limit_bytes, 16..=1024u64 * 1024 * 1024).custom_formatter(|v, _| format!("{} MB", (v as u64) / 1024 / 1024)));
+                    form_row(ui, "Attach headroom (KB)", "Kept under the upload limit because Discord caps the WHOLE message (all files + text).", |ui| {
+                        let mut kb = (tun.attach_headroom_bytes / 1024).max(16) as i32;
+                        ui.add(
+                            egui::DragValue::new(&mut kb)
+                                .range(16..=4096)
+                                .suffix(" KB"),
+                        );
+                        tun.attach_headroom_bytes = kb as usize * 1024;
+                    });
+                    form_row(ui, "Sandbox per channel (MB)", "Total file storage per channel before pruning.", |ui| {
+                        let mut mb = (tun.sandbox_limit_bytes / 1024 / 1024).max(16) as i32;
+                        ui.add(
+                            egui::DragValue::new(&mut mb)
+                                .range(16..=4096)
+                                .suffix(" MB"),
+                        );
+                        tun.sandbox_limit_bytes = mb as u64 * 1024 * 1024;
                     });
                     form_row(ui, "Split parts", "Most parts an oversized duplicate becomes.", |ui| {
                         ui.add(egui::Slider::new(&mut tun.max_duplicate_parts, 1..=10));

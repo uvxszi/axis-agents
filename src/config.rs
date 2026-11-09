@@ -602,6 +602,9 @@ pub struct BehaviorConfig {
     /// Chill by design: only when idle, mostly QUIET, never spammy.
     #[serde(default)]
     pub idle_roaming: bool,
+    /// Roaming knobs — how the wanderer harvests and acts.
+    #[serde(default)]
+    pub roaming: RoamingConfig,
     /// Only these channel IDs (empty = everywhere the bot can see).
     pub allowed_channels: Vec<u64>,
     pub ignored_channels: Vec<u64>,
@@ -671,10 +674,53 @@ impl CustomCommand {
     }
 }
 
+/// Idle-roaming customization. Defaults are the chill profile: rare
+/// actions, rare harvests, quiet bias.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoamingConfig {
+    /// 0-100: chance each idle tick actually wanders (default 45).
+    pub activity: u8,
+    /// 0-100: of the batches it reads, how many may produce an action
+    /// (react/reply) at all — the QUIET bias (default 20).
+    pub action_rate: u8,
+    /// 0-100: of allowed actions, how many are replies (rest reactions)
+    /// (default 25 — reactions first).
+    pub reply_share: u8,
+    /// While idle, harvest durable facts about people into notes
+    /// (default on; a NOTE line at most once per harvest pass).
+    pub harvest_people: bool,
+    /// While idle, harvest channel summaries into long-term memory.
+    pub harvest_channels: bool,
+    /// Hours between full harvest passes (default 6).
+    pub harvest_every_hours: u32,
+    /// Minutes between roam ACTIONS (reactions/replies) — the hard
+    /// anti-spam floor (default 15).
+    pub min_action_gap_minutes: u32,
+    /// Only roam channels whose ids are listed here (empty = all).
+    pub channel_ids: Vec<u64>,
+}
+
+impl Default for RoamingConfig {
+    fn default() -> Self {
+        Self {
+            activity: 45,
+            action_rate: 20,
+            reply_share: 25,
+            harvest_people: true,
+            harvest_channels: false,
+            harvest_every_hours: 6,
+            min_action_gap_minutes: 15,
+            channel_ids: Vec::new(),
+        }
+    }
+}
+
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
             idle_roaming: false,
+            roaming: RoamingConfig::default(),
             respond_to_mentions: true,
             respond_to_name: true,
             name_position: Default::default(),

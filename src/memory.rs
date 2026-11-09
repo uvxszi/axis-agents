@@ -1549,6 +1549,22 @@ fn channel_path(channel_id: u64) -> PathBuf {
 
 impl Knowledge {
     /// Read or modify a guild's knowledge (loaded lazily from disk).
+    /// Read every guild's knowledge (roaming harvest).
+    pub fn all_guilds(&self, f: impl Fn(&GuildKnowledge)) {
+        let store = self.guilds.lock().expect("knowledge poisoned");
+        for knowledge in store.values() {
+            f(knowledge);
+        }
+    }
+
+    /// Mutate every guild's knowledge (roaming harvest).
+    pub fn all_guilds_mut(&self, f: impl Fn(&mut GuildKnowledge)) {
+        let mut store = self.guilds.lock().expect("knowledge poisoned");
+        for knowledge in store.values_mut() {
+            f(knowledge);
+        }
+    }
+
     pub fn guild<R>(&self, guild_id: u64, f: impl FnOnce(&mut GuildKnowledge) -> R) -> R {
         let mut guilds = self.guilds.lock().expect("knowledge poisoned");
         let entry = guilds.entry(guild_id).or_insert_with(|| {
