@@ -1492,6 +1492,14 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                 }
                 outcome
             };
+            // Circuit breaker bookkeeping: 3 consecutive failures of one
+            // tool (including repeat-guard refusals) and it's refused for
+            // the rest of the job; any success resets it.
+            if outcome.ok {
+                fail_streak.remove(&call.name);
+            } else {
+                *fail_streak.entry(call.name.clone()).or_insert(0) += 1;
+            }
             last_tool = Some((label.clone(), outcome.ok, outcome.text.clone()));
             tools_used += 1;
             {
