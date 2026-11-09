@@ -847,6 +847,13 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             }
             v.touch();
         };
+        tracing::info!(
+            agent = %core.id,
+            model = %request.model,
+            round,
+            messages = convo.len() + 1,
+            "llm call"
+        );
         let result = endpoint.chat(&request, &mut on_event).await;
         drop(permit);
         core.live().stat(&core.id, |s| s.llm_calls += 1);
@@ -3490,6 +3497,7 @@ pub async fn quick_completion(
     };
     let endpoint = core.endpoint();
     let messages = [Msg::system(system), Msg::user(user)];
+    tracing::info!(agent = %core.id, model = %model, "llm call (background)");
     let request = ChatRequest {
         thinking_budget: None,
         model: &model,
