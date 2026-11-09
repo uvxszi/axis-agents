@@ -215,6 +215,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                             tun.upload_limit_bytes = 25 * 1024 * 1024;
                         }
                     });
+                    form_row(ui, "Attach headroom", "Kept under the upload limit because Discord caps the WHOLE message (all files + text). A '25 MB' ask fills to the largest total that actually sends.", |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut tun.attach_headroom_bytes, 16 * 1024..=2048 * 1024usize)
+                                .custom_formatter(|v, _| format!("{} KB", (v as usize) / 1024)),
+                        );
+                    });
                     form_row(ui, "Sandbox per channel", "Total file storage per channel before pruning.", |ui| {
                         ui.add(egui::Slider::new(&mut tun.sandbox_limit_bytes, 16..=1024u64 * 1024 * 1024).custom_formatter(|v, _| format!("{} MB", (v as u64) / 1024 / 1024)));
                     });

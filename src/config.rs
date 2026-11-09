@@ -847,6 +847,11 @@ pub struct Tunables {
     /// One file upload by this bot. 25 MiB is Discord's hard API cap —
     /// the 8/10 MB figures are human limits and must never be used.
     pub upload_limit_bytes: usize,
+    /// Discord's cap applies to the WHOLE request — every file on the
+    /// message plus the message payload together. Files are sized and
+    /// batched to stay this far under the cap, so a "25 MB" ask produces
+    /// the largest file that actually sends.
+    pub attach_headroom_bytes: usize,
     /// Total sandbox size per channel before the oldest files are pruned.
     pub sandbox_limit_bytes: u64,
     /// Most parts an oversized duplicate is split into for uploads.
@@ -887,6 +892,7 @@ impl Default for Tunables {
     fn default() -> Self {
         Self {
             upload_limit_bytes: 25 * 1024 * 1024,
+            attach_headroom_bytes: 256 * 1024,
             sandbox_limit_bytes: 128 * 1024 * 1024,
             max_duplicate_parts: 10,
             file_rewrite_autofill: 2,

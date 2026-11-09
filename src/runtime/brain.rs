@@ -2835,15 +2835,26 @@ async fn deliver(
         AllowedMentions::none()
     }
     .with_replied_user(ping);
+    // Discord's upload cap applies to the WHOLE request — every file on
+    // the message together, plus the message itself. Files are bucketed
+    // so each message stays under it; the first bucket rides the reply,
+    // the rest go as follow-ups. (A 25 MB story + a gif on one message
+    // is a guaranteed 413.)
+    let knobs = core.hive.settings().tunables;
+    let budget = knobs
+        .upload_limit_bytes
+        .saturating_sub(knobs.attach_headroom_bytes);
+    let buckets = tools::files::bucket_files(&outcome.files, budget);
+    let first_bucket = buckets.first().cloned().unwrap_or_default();
+    let mut leftover_buckets: Vec<Vec<(String, Vec<u8>)>> =
+        buckets.iter().skip(1).cloned().collect();
     // Live-answer flow: when the whole answer fits one message and a
     // status placeholder exists, the placeholder BECOMES the answer —
     // edited in place, files attached to it — instead of a second
     // message. Mentions in the content still notify on the edit, and
     // later content-only edits never strip the attachments.
-    let edit_in_place = placeholder.is_some()
-        && matches!(job.outlet, Outlet::Channel)
-        && chunks.len() == 1
-        && outcome.files.len() <= 10;
+    let edit_in_place =
+        placeholder.is_some() && matches!(job.outlet, Outlet::Channel) && chunks.len() == 1;
     let mut first_id: Option<axis::prelude::MessageId> = None;
     let mut edited_in_place = false;
     if let (true, Some(id)) = (edit_in_place, placeholder) {
@@ -2851,7 +2862,7 @@ async fn deliver(
         // this edit is real — but track it like every other edit so a
         // later content-only edit of the same text is skipped. (With files
         // to upload the edit must happen even for identical text.)
-        if outcome.files.is_empty() && core.live().already_sent(id.get(), &chunks[0]) {
+        if first_bucket.is_empty() && core.live().already_sent(id.get(), &chunks[0]) {
             edited_in_place = true;
             first_id = Some(id);
         } else {
@@ -2860,7 +2871,7 @@ async fn deliver(
                 .edit_message(channel, id)
                 .content(chunks[0].clone())
                 .allowed_mentions(mentions.clone());
-            for (name, bytes) in &outcome.files {
+            for (name, bytes) in &first_bucket {
                 request = request.file(name.clone(), bytes.clone());
             }
             match request.await {
@@ -2870,16 +2881,39 @@ async fn deliver(
                     first_id = Some(edited.id);
                 }
                 Err(error) => {
-                    // Fall through to the fresh-message flow; the placeholder
-                    // is deleted there.
-                    core.feed(
-                        FeedKind::Error,
-                        format!(
-                            "could not edit the answer into place ({}); sending a new message",
-                            tools::discord_error(error)
-                        ),
-                        Some(label.clone()),
-                    );
+                    // 413 or similar with the files: the person still gets
+                    // their answer — retry the edit with text only; files
+                    // go out separately below.
+                    let why = tools::discord_error(error);
+                    let too_big = why.contains("413");
+                    if too_big && !first_bucket.is_empty() {
+                        match core
+                            .http
+                            .edit_message(channel, id)
+                            .content(chunks[0].clone())
+                            .allowed_mentions(mentions.clone())
+                            .await
+                        {
+                            Ok(edited) => {
+                                core.live().remember_sent(edited.id.get(), &chunks[0]);
+                                edited_in_place = true;
+                                first_id = Some(edited.id);
+                                leftover_buckets.insert(0, first_bucket.clone());
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    if !edited_in_place {
+                        // Fall through to the fresh-message flow; the
+                        // placeholder is deleted there.
+                        core.feed(
+                            FeedKind::Error,
+                            format!(
+                                "could not edit the answer into place ({why}); sending a new message"
+                            ),
+                            Some(label.clone()),
+                        );
+                    }
                 }
             }
         }
@@ -2912,7 +2946,7 @@ async fn deliver(
                 request = request.reply(reply);
             }
         }
-        for (name, bytes) in &outcome.files {
+        for (name, bytes) in &first_bucket {
             request = request.file(name.clone(), bytes.clone());
         }
         match request.await {
@@ -2926,20 +2960,61 @@ async fn deliver(
             Err(error) => {
                 let permission = tools::is_permission_error(&error);
                 let why = tools::discord_error(error);
-                core.feed(
-                    FeedKind::Error,
-                    format!("could not send reply: {why}"),
-                    Some(label.clone()),
-                );
-                if permission {
-                    super::tasks::report_cant_post(
-                        core,
-                        job,
-                        "I'm missing permission to post there",
-                    )
-                    .await;
+                let too_big = why.contains("413");
+                if too_big && !first_bucket.is_empty() {
+                    // The text goes first; the files follow separately.
+                    leftover_buckets.insert(0, first_bucket.clone());
+                    match core
+                        .http
+                        .create_message(channel)
+                        .content(pages[0].clone())
+                        .allowed_mentions(mentions.clone())
+                        .components(page_buttons(0, pages.len()))
+                        .await
+                    {
+                        Ok(message) => {
+                            first_id = Some(message.id);
+                            core.pages
+                                .lock()
+                                .expect("pages poisoned")
+                                .insert(message.id.get(), pages.clone());
+                        }
+                        Err(retry_error) => {
+                            core.feed(
+                                FeedKind::Error,
+                                format!(
+                                    "could not send reply: {}",
+                                    tools::discord_error(retry_error)
+                                ),
+                                Some(label.clone()),
+                            );
+                            if permission {
+                                super::tasks::report_cant_post(
+                                    core,
+                                    job,
+                                    "I'm missing permission to post there",
+                                )
+                                .await;
+                            }
+                            return;
+                        }
+                    }
+                } else {
+                    core.feed(
+                        FeedKind::Error,
+                        format!("could not send reply: {why}"),
+                        Some(label.clone()),
+                    );
+                    if permission {
+                        super::tasks::report_cant_post(
+                            core,
+                            job,
+                            "I'm missing permission to post there",
+                        )
+                        .await;
+                    }
+                    return;
                 }
-                return;
             }
         }
     }
@@ -2962,8 +3037,8 @@ async fn deliver(
                 }
             }
         }
-        if index == last {
-            for (name, bytes) in &outcome.files {
+        if index == last && !first_bucket.is_empty() {
+            for (name, bytes) in &first_bucket {
                 request = request.file(name.clone(), bytes.clone());
             }
         }
@@ -2975,6 +3050,45 @@ async fn deliver(
             }
             Err(error) => {
                 let permission = tools::is_permission_error(&error);
+                let why = tools::discord_error(error);
+                // With files it may be a 413: the answer itself must still
+                // land — retry without them; the files follow separately.
+                if index == last && !first_bucket.is_empty() && why.contains("413") {
+                    leftover_buckets.insert(0, first_bucket.clone());
+                    match core
+                        .http
+                        .create_message(channel)
+                        .content(chunk.clone())
+                        .allowed_mentions(mentions.clone())
+                        .await
+                    {
+                        Ok(message) => {
+                            if first_id.is_none() {
+                                first_id = Some(message.id);
+                            }
+                            continue;
+                        }
+                        Err(retry_error) => {
+                            core.feed(
+                                FeedKind::Error,
+                                format!(
+                                    "could not send reply: {}",
+                                    tools::discord_error(retry_error)
+                                ),
+                                Some(label.clone()),
+                            );
+                            if permission {
+                                super::tasks::report_cant_post(
+                                    core,
+                                    job,
+                                    "I'm missing permission to post there",
+                                )
+                                .await;
+                            }
+                            return;
+                        }
+                    }
+                }
                 if permission {
                     super::tasks::report_cant_post(
                         core,
@@ -2985,11 +3099,51 @@ async fn deliver(
                 }
                 core.feed(
                     FeedKind::Error,
-                    format!("could not send reply: {}", tools::discord_error(error)),
+                    format!("could not send reply: {why}"),
                     Some(label.clone()),
                 );
                 return;
             }
+        }
+    }
+    // Files that didn't fit on the reply: follow-up messages, each within
+    // the upload budget. The person already has the answer by now.
+    for (n, bucket) in leftover_buckets.iter().enumerate() {
+        let note = if leftover_buckets.len() > 1 {
+            format!(
+                "-# +{} more files ({}/{})",
+                bucket.len(),
+                n + 1,
+                leftover_buckets.len()
+            )
+        } else {
+            format!(
+                "-# +{} more file{}",
+                bucket.len(),
+                if bucket.len() == 1 { "" } else { "s" }
+            )
+        };
+        let mut request = core
+            .http
+            .create_message(channel)
+            .content(note)
+            .allowed_mentions(AllowedMentions::none());
+        for (name, bytes) in bucket {
+            request = request.file(name.clone(), bytes.clone());
+        }
+        if let Err(error) = request.await {
+            core.feed(
+                FeedKind::Error,
+                format!(
+                    "could not attach {}: {}",
+                    bucket
+                        .first()
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_default(),
+                    tools::discord_error(error)
+                ),
+                Some(label.clone()),
+            );
         }
     }
     // Make sure the archive holds the final text, not "thinking…".

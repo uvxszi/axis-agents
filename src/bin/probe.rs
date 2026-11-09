@@ -627,6 +627,14 @@ async fn probe_main(
             "8. promise",
             "make a 500 KB file called notes2.md full of chess tips",
         ),
+        (
+            // The live 413: a "25 MB" file plus anything else on one
+            // message is over Discord's WHOLE-request cap. The file must
+            // fill to the upload-safe budget, attach, and the reply must
+            // land.
+            "9. attach-25mb",
+            "make a 25mb .md file of a story of you and cleo and attach it to the discord message",
+        ),
     ];
     if !only.is_empty() {
         scenarios.retain(|(label, _)| only.iter().any(|n| label.starts_with(&format!("{n}."))));
@@ -641,7 +649,11 @@ async fn probe_main(
         // For the file scenarios: what did the file actually turn out to
         // be? Real continuous prose, repeat-padded filler, or the exact
         // size asked for?
-        if label.starts_with("4.") || label.starts_with("7.") || label.starts_with("8.") {
+        if label.starts_with("4.")
+            || label.starts_with("7.")
+            || label.starts_with("8.")
+            || label.starts_with("9.")
+        {
             let dir = axis_agents::tools::files::sandbox_dir_pub(GENERAL);
             let biggest = std::fs::read_dir(&dir)
                 .ok()

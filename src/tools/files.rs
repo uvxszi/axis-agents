@@ -35,6 +35,72 @@ fn tunables(ctx: &ToolCtx) -> Tunables {
     ctx.core.hive.settings().tunables
 }
 
+/// What one message may carry in files: Discord's cap is on the WHOLE
+/// request (all files + the message payload), so a 25 MB file plus
+/// anything else gets a 413. This is the largest total that actually
+/// sends.
+pub(crate) fn attach_budget(ctx: &ToolCtx) -> usize {
+    let knobs = tunables(ctx);
+    knobs
+        .upload_limit_bytes
+        .saturating_sub(knobs.attach_headroom_bytes)
+}
+
+/// Split files into messages Discord will accept: each bucket's TOTAL
+/// stays under the budget (and under 10 files). A single oversized file
+/// rides alone — the sender reports it if Discord still refuses.
+pub(crate) fn bucket_files(
+    files: &[(String, Vec<u8>)],
+    budget: usize,
+) -> Vec<Vec<(String, Vec<u8>)>> {
+    let mut buckets: Vec<Vec<(String, Vec<u8>)>> = Vec::new();
+    let mut current: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut used = 0usize;
+    for file in files {
+        if !current.is_empty() && (used + file.1.len() > budget || current.len() >= 10) {
+            buckets.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        used += file.1.len();
+        current.push(file.clone());
+    }
+    if !current.is_empty() {
+        buckets.push(current);
+    }
+    buckets
+}
+
+#[cfg(test)]
+mod bucket_tests {
+    use super::bucket_files;
+
+    fn file(name: &str, kb: usize) -> (String, Vec<u8>) {
+        (name.to_owned(), vec![b'x'; kb * 1024])
+    }
+
+    #[test]
+    fn oversized_set_splits_across_messages() {
+        // A 24 MB story and a 2 MB gif: together over the budget, apart fine.
+        let budget = 24 * 1024 * 1024;
+        let buckets = bucket_files(&[file("story.md", 23_000), file("cat.gif", 2_000)], budget);
+        assert_eq!(buckets.len(), 2, "the gif rides a second message");
+        assert!(buckets[0][0].0 == "story.md");
+    }
+
+    #[test]
+    fn small_files_share_one_message() {
+        let buckets = bucket_files(&[file("a.txt", 10), file("b.txt", 5)], 1024 * 1024);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].len(), 2);
+    }
+
+    #[test]
+    fn one_file_over_budget_still_ships_alone() {
+        let buckets = bucket_files(&[file("big.md", 2_000)], 1024);
+        assert_eq!(buckets.len(), 1, "never silently dropped");
+    }
+}
+
 /// Script output shown back to the model (a display cap, not a limit on
 /// what scripts may compute).
 const MAX_SCRIPT_OUTPUT: usize = 2000;
@@ -191,7 +257,7 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             .get("until_bytes")
             .or_else(|| args.get("size"))
             .and_then(Value::as_u64)
-            .map(|bytes| (bytes as usize).min(knobs.upload_limit_bytes));
+            .map(|bytes| (bytes as usize).min(attach_budget(ctx)));
         // A target never shrinks: the sticky target for this file wins
         // over a smaller one the model passes on a retry.
         let sticky =
@@ -706,6 +772,13 @@ pub async fn duplicate_file(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
             peek_shortfall(ctx.channel_id).and_then(|(n, _, want)| (n == name).then_some(want))
         })
         .or_else(|| take_requested_target(ctx.channel_id));
+    // Discord's cap is on the whole request (files + message). Filling a
+    // file to the full 25 MB and then SENDING it is a guaranteed 413 —
+    // fill to the upload-safe budget instead and say so.
+    let (target, capped) = match target {
+        Some(want) if want > attach_budget(ctx) => (Some(attach_budget(ctx)), true),
+        other => (other, false),
+    };
     if times.is_none() && target.is_none() {
         return Err(
             "give `times` (how many copies) or `until_bytes`/`size` (target size for the WHOLE file)"
@@ -794,12 +867,20 @@ pub async fn duplicate_file(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
         .collect::<Vec<_>>()
         .join(", ");
     Ok(format!(
-        "duplicated {name}: {copies} copies — {}{}.{}",
+        "duplicated {name}: {copies} copies — {}{}.{}{}",
         listing,
         if written.len() == 1 {
             String::new()
         } else {
             format!(" ({} parts for the upload limit)", written.len())
+        },
+        if capped {
+            // Honest about the budget: the ask was the full upload limit,
+            // but Discord caps the WHOLE request — this is the most that
+            // actually sends.
+            " (capped just under the upload limit: Discord rejects a message whose files add up past it — this is the largest that goes through)"
+        } else {
+            ""
         },
         if attached {
             " Everything is attached below your reply — just confirm, nothing else to do."

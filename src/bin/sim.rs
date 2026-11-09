@@ -368,6 +368,76 @@ async fn scenario_big_file(core: &Arc<AgentCore>) -> Result<String, String> {
     ))
 }
 
+async fn scenario_story_at_cap(core: &Arc<AgentCore>) -> Result<String, String> {
+    // The live 413: "a 25mb .md story, attach it". The model writes short
+    // twice, refuses to duplicate — the app must fill to the upload-safe
+    // budget itself, attach, and the reply must land (never silence).
+    set_script(vec![
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("write_file", json!({
+                    "name": "magi_cleo_story.md",
+                    "content": "# Magi and Cleo
+
+A story of two agents keeping a server safe."
+                }))] }),
+        json!({ "role": "assistant", "content": "",
+                "tool_calls": [tool_call("write_file", json!({
+                    "name": "magi_cleo_story.md",
+                    "content": "# Magi and Cleo
+
+A longer story of two agents keeping a server safe, through raids and quiet nights both."
+                }))] }),
+        json!({ "role": "assistant", "content": "Done — the story is attached." }),
+    ]);
+    brain::run(
+        core,
+        job(
+            admin_principal(core),
+            "make a 25mb .md file of a story of you and cleo and attach it to the discord message",
+        ),
+    )
+    .await;
+    let budget = core.hive.settings().tunables.upload_limit_bytes
+        - core.hive.settings().tunables.attach_headroom_bytes;
+    let path = axis_agents::paths::data_dir()
+        .join("sandbox")
+        .join(CHANNEL.to_string())
+        .join("magi_cleo_story.md");
+    let size = std::fs::metadata(&path)
+        .map(|m| m.len())
+        .map_err(|e| format!("story file missing: {e}"))?;
+    if (size as i64 - budget as i64).abs() > 1024 {
+        return Err(format!(
+            "file is {size} bytes, expected the upload-safe budget {budget}"
+        ));
+    }
+    let posts = discord_calls("POST");
+    let patches = discord_calls("PATCH");
+    let attached = posts
+        .iter()
+        .chain(patches.iter())
+        .any(|(path, body)| path.contains("/messages") && body.contains("filename="));
+    if !attached {
+        let dump: Vec<String> = posts
+            .iter()
+            .chain(patches.iter())
+            .map(|(p, b)| format!("{p} | {}", &b.chars().take(80).collect::<String>()))
+            .collect();
+        let feed: Vec<String> = core
+            .live()
+            .feed_snapshot(None, 12)
+            .iter()
+            .map(|i| format!("{:?}: {}", i.kind, i.text))
+            .collect();
+        return Err(format!(
+            "no message carried the file. calls: {dump:?}. feed: {feed:?}"
+        ));
+    }
+    Ok(format!(
+        "story filled to the upload-safe budget ({size} bytes) and attached despite the model's flailing"
+    ))
+}
+
 async fn scenario_confirmation(core: &Arc<AgentCore>) -> Result<String, String> {
     set_script(vec![
         json!({ "role": "assistant", "content": "",
@@ -1229,6 +1299,9 @@ async fn sim_main(scratch: &std::path::Path) {
     )> = vec![
         ("big generated file (1MB legion)", |c| {
             Box::pin(scenario_big_file(c))
+        }),
+        ("25mb story + attach survives model flailing", |c| {
+            Box::pin(scenario_story_at_cap(c))
         }),
         ("dangerous action confirmation", |c| {
             Box::pin(scenario_confirmation(c))
