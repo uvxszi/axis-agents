@@ -239,10 +239,25 @@ fn messages_panel(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
                                     react_as_bot(app, core, channel_id, *id, emoji);
                                 }
                             }
+                            let more = if app.eyes_react_for == Some(*id) {
+                                "▾ any emoji"
+                            } else {
+                                "▸ any emoji"
+                            };
+                            if ui.small_button(more).clicked() {
+                                app.eyes_react_for = if app.eyes_react_for == Some(*id) {
+                                    None
+                                } else {
+                                    Some(*id)
+                                };
+                            }
                             if ui.small_button("↩ reply").clicked() {
                                 app.eyes_reply_to = Some(*id);
                             }
                         });
+                        if app.eyes_react_for == Some(*id) {
+                            react_picker(app, ui, core, channel_id, *id);
+                        }
                         if !reactions.is_empty() {
                             ui.horizontal(|ui| {
                                 for (emoji, count) in reactions {
@@ -290,6 +305,76 @@ fn messages_panel(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
             type_as_bot(app, core, channel_id);
         }
     });
+}
+
+/// Any-emoji picker: free text (unicode or `<:name:id>` / `name:id` emote
+/// strings) plus every server emote the bot actually knows — its own
+/// custom emotes show here as soon as it shares a server with them.
+fn react_picker(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64, message: u64) {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(24, 26, 35))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("react:").size(12.0).color(WEAK));
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut app.eyes_emoji_input)
+                        .hint_text("any emoji, or <:name:id> / name:id")
+                        .desired_width(220.0),
+                );
+                let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let fire = (enter || ui.small_button("react").clicked())
+                    && !app.eyes_emoji_input.trim().is_empty();
+                if fire {
+                    let emoji = app.eyes_emoji_input.trim().to_owned();
+                    react_as_bot(app, core, channel, message, &emoji);
+                    app.eyes_emoji_input.clear();
+                    app.eyes_react_for = None;
+                }
+            });
+            // Server emotes the bot knows (every guild it's in).
+            let emotes: Vec<(String, String, bool)> = core
+                .world
+                .guild_ids()
+                .into_iter()
+                .filter_map(|g| {
+                    core.world.with_guild(g, |state| {
+                        state
+                            .emojis
+                            .iter()
+                            .filter_map(|e| {
+                                let name = e.name.clone()?;
+                                let id = e.id?;
+                                let animated = e.animated.unwrap_or(false);
+                                let wire = format!(
+                                    "{}:{name}:{}",
+                                    if animated { "a" } else { "" },
+                                    id.get()
+                                );
+                                Some((format!(":{name}:"), format!("<{wire}>"), animated))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .flatten()
+                .collect();
+            if !emotes.is_empty() {
+                ui.label(
+                    RichText::new("server emotes the bot knows:")
+                        .size(11.5)
+                        .color(FAINT),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    for (label, wire, _animated) in emotes.iter().take(60) {
+                        if ui.small_button(label).on_hover_text(wire).clicked() {
+                            react_as_bot(app, core, channel, message, wire);
+                            app.eyes_react_for = None;
+                        }
+                    }
+                });
+            }
+        });
 }
 
 fn react_as_bot(app: &mut App, core: &Arc<AgentCore>, channel: u64, message: u64, emoji: &str) {

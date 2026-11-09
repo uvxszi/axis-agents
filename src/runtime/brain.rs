@@ -149,11 +149,12 @@ fn tool_line(view: &View, map: &std::collections::BTreeMap<String, String>) -> S
     if view.tools.is_empty() {
         return String::new();
     }
+    // One tight horizontal row — the belt — never one emoji per line.
     view.tools
         .iter()
         .map(|tool| crate::config::tool_emoji(map, tool))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("")
 }
 
 fn render_view(
