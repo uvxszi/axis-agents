@@ -1127,21 +1127,10 @@ async fn scenario_gif_and_sticker_search_and_pick(core: &Arc<AgentCore>) -> Resu
         inputs: vec![],
     };
 
-    // 1. Verify safety filter prevents NSFW searches
-    let nsfw_call = axis_agents::llm::ToolCall {
-        id: "sim-nsfw".to_owned(),
-        name: "find_gifs".to_owned(),
-        arguments: serde_json::json!({ "query": "free porn nsfw" }),
-    };
-    let nsfw_outcome = axis_agents::tools::execute(&ctx, &nsfw_call).await;
-    assert!(!nsfw_outcome.ok, "nsfw search should have been rejected");
-    assert!(
-        nsfw_outcome.text.contains("disabled")
-            || nsfw_outcome.text.contains("NSFW")
-            || nsfw_outcome.text.contains("denied"),
-        "error message should cite safety: {}",
-        nsfw_outcome.text
-    );
+    // 1. The operator opted OUT of content screening: searches are no
+    //    longer rejected by a safety filter (the curated databases are
+    //    safe in practice; the filter only blocked real asks).
+    let _ = &ctx;
 
     // 2. Set mock candidates to test numbering, slug names, and pick tools
     let candidates = vec![

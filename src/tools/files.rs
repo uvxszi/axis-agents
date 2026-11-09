@@ -323,6 +323,19 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     if bytes.is_empty() {
         return Err("the file would be empty".to_owned());
     }
+    // Real documents: a .pdf/.docx name builds an actual document from
+    // the markdown-ish content (headings, paragraphs, embedded images
+    // from the model's searches) instead of raw text.
+    let bytes = if super::documents::is_document(&name) {
+        let content_text = args
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or("a .pdf/.docx file needs its text in 'content' (markdown-ish: # headings, paragraphs, ![alt](image url) lines)")?;
+        super::documents::write_document(ctx, &name, &content_text, args).await?
+    } else {
+        bytes
+    };
     if bytes.len() > knobs.upload_limit_bytes {
         return Err(format!(
             "that's {} MB — over the {} MB upload limit. For copy-paste to a big size, write the text once and call duplicate_file on it: it fills to the exact size and splits into uploadable parts by itself",

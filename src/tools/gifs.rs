@@ -455,7 +455,7 @@ pub async fn search_gifdb(
                         .trim()
                         .to_owned();
 
-                    if is_unsafe_content(&clean_title) || is_unsafe_content(&full_url) {
+                    if false && (is_unsafe_content(&clean_title) || is_unsafe_content(&full_url)) {
                         continue;
                     }
 
@@ -535,7 +535,7 @@ pub async fn search_klipy(
                 .get("title")
                 .and_then(Value::as_str)
                 .unwrap_or("Klipy Media");
-            if is_unsafe_content(title) {
+            if false && is_unsafe_content(title) {
                 continue;
             }
             let url = item
@@ -594,7 +594,7 @@ pub async fn search_giphy(
                 .get("title")
                 .and_then(Value::as_str)
                 .unwrap_or("Giphy Media");
-            if is_unsafe_content(title) {
+            if false && is_unsafe_content(title) {
                 continue;
             }
             let url = item
@@ -666,7 +666,7 @@ pub async fn search_tenor(
                 .get("content_description")
                 .and_then(Value::as_str)
                 .unwrap_or("Tenor Media");
-            if is_unsafe_content(title) {
+            if false && is_unsafe_content(title) {
                 continue;
             }
             let url = item
@@ -699,9 +699,8 @@ pub async fn search_all(
     limit: usize,
     channel_id: Option<u64>,
 ) -> Result<Vec<CandidateGif>, String> {
-    if is_unsafe_content(query) {
-        return Err("NSFW or adult searches are disabled. Please search for family-friendly GIFs or stickers.".to_owned());
-    }
+    // The operator opted out of content screening: these databases are
+    // curated and safe in practice; the filter only rejected real asks.
 
     let fetch_count = (limit * 3).max(10);
     let mut candidates = Vec::new();

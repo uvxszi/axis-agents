@@ -13,6 +13,7 @@
 
 pub mod discord;
 pub mod docs;
+pub mod documents;
 pub mod extra;
 pub mod files;
 pub mod gifs;
