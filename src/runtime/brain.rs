@@ -973,8 +973,22 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
                     .or_else(|| schedule_request(&t))
             })
             .filter(|tool| prompt.text_tools || prompt.tools.iter().any(|t| t.name == *tool));
-        // Small models love "Want me to check X?" instead of checking X.
-        // When it offers something it could just do, make it do it.
+        // Small models love "Want me to check X?" instead of checking X —
+        // or promise "making it right now" and never call a tool. Whether a
+        // draft PROMISES an action is a judgment, not a keyword list: the
+        // background model decides (keywords are only a free fast path),
+        // and the check only arms when the request itself was an action
+        // ask (replies carry their original ask in intent_text).
+        let action_ask = looks_like_request(&intent_text);
+        let mut draft_promises = false;
+        if calls.is_empty()
+            && !pushed_follow_through
+            && tools_used == 0
+            && action_ask
+            && content.chars().count() > 8
+        {
+            draft_promises = promises_action(core, &content).await;
+        }
         if calls.is_empty()
             && !last_round
             && !pushed_follow_through
@@ -987,9 +1001,9 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             // "want me to dig deeper?" is fine.
             && tools_used == 0
             && (offers_instead_of_doing(&content)
-                || claims_action(&content)
+                || draft_promises
                 || rule_tool.is_some()
-                || (asks_for_details(&content) && request_text(job).is_some_and(|t| looks_like_request(&t))))
+                || (asks_for_details(&content) && action_ask))
         {
             pushed_follow_through = true;
             convo.push(Msg::assistant(content.clone()));
@@ -1186,7 +1200,7 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             let content = if calls.is_empty()
                 && pushed_follow_through
                 && tools_used == 0
-                && claims_action(&content)
+                && (draft_promises || claims_action(&content))
             {
                 tracing::warn!(agent = %core.id, draft = %content, "claimed an action without doing it");
                 "Sorry — I didn't actually manage to do that. Can you ask me again?".to_owned()
@@ -1938,6 +1952,29 @@ pub fn looks_like_request(text: &str) -> bool {
 
 /// Does a reply say it's doing (or did) something — which, with no tool
 /// called, it didn't?
+/// Does this draft reply claim or promise an action that needs a tool?
+/// Keywords are a free fast path; anything else is JUDGED by the
+/// background model — phrasings change, the judgment shouldn't be a list
+/// we keep patching.
+async fn promises_action(core: &Arc<AgentCore>, draft: &str) -> bool {
+    if claims_action(draft) {
+        return true;
+    }
+    let verdict = quick_completion(
+        core,
+        "You decide whether a draft chat reply CLAIMS or PROMISES to perform an action (making, sending, creating, deleting, changing, fetching something — including 'right now' promises) that would require calling a tool to actually happen. Questions, offers ('want me to?'), opinions, status chatter, and pure conversation do NOT count. Answer exactly one word: PROMISE or TALK.",
+        &format!("Draft reply:
+\"{}\"", crate::llm::truncate(draft, 600)),
+        6,
+        false,
+    )
+    .await
+    .unwrap_or_default();
+    let says = verdict.trim().to_uppercase().contains("PROMISE");
+    tracing::debug!(agent = %core.id, promises = says, "promise judge");
+    says
+}
+
 pub fn claims_action(text: &str) -> bool {
     let text = text.to_lowercase();
     [
