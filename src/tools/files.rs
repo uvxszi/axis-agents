@@ -13,9 +13,10 @@
 //! - `list_files` shows what exists.
 //!
 //! Files live under `data_dir()/sandbox/{channel}` so a later turn can
-//! attach what an earlier turn made. Everything is capped: 25 MB per file
-//! (Discord's bot upload limit), 64 MB per channel sandbox, files pruned
-//! after an hour.
+//! attach what an earlier turn made. Every cap (upload limit, sandbox
+//! size, pruning, temp lifetime) is a tunable in Settings — nothing is
+//! buried in code. `temp: true` writes go to the channel's `_tmp/`
+//! scratch area, which cleans itself up.
 
 use std::{
     path::{Path, PathBuf},
@@ -26,12 +27,40 @@ use std::{
 use serde_json::Value;
 
 use super::{ToolCtx, images, number};
+use crate::config::Tunables;
 use crate::paths;
 
-pub(crate) const MAX_FILE: usize = 25 * 1024 * 1024;
-const MAX_SANDBOX: u64 = 128 * 1024 * 1024;
-const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The live knobs for this job (settings are editable while the app runs).
+fn tunables(ctx: &ToolCtx) -> Tunables {
+    ctx.core.hive.settings().tunables
+}
+
+/// Script output shown back to the model (a display cap, not a limit on
+/// what scripts may compute).
 const MAX_SCRIPT_OUTPUT: usize = 2000;
+
+/// The channel's temporary scratch area: files written with temp: true
+/// land here and clean themselves up once stale. Working memory the model
+/// doesn't have to manage.
+fn tmp_dir(ctx: &ToolCtx) -> PathBuf {
+    let dir = sandbox_dir(ctx.channel_id).join("_tmp");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Where a file with this name lives: the sandbox, or the temp area.
+pub(crate) fn resolve_file(ctx: &ToolCtx, name: &str) -> PathBuf {
+    let dir = sandbox_dir(ctx.channel_id);
+    let direct = dir.join(name);
+    if direct.exists() {
+        return direct;
+    }
+    let temp = dir.join("_tmp").join(name);
+    if temp.exists() {
+        return temp;
+    }
+    direct
+}
 
 pub fn sandbox_dir_pub(channel_id: u64) -> PathBuf {
     sandbox_dir(channel_id)
@@ -73,7 +102,27 @@ fn sanitize_name(name: &str) -> Result<String, String> {
 }
 
 /// Prune old files and enforce the size cap (oldest first).
-fn enforce_caps(dir: &Path) {
+/// Drop stale files from the `_tmp` scratch area — temporary working
+/// files clean themselves up.
+fn clean_temp(dir: &Path, lifetime_hours: u64) {
+    let tmp = dir.join("_tmp");
+    let cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(lifetime_hours * 3600);
+    if let Ok(entries) = std::fs::read_dir(&tmp) {
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|at| at < cutoff)
+                .unwrap_or(false);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+fn enforce_caps(dir: &Path, sandbox_limit: u64, temp_lifetime_hours: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -96,10 +145,11 @@ fn enforce_caps(dir: &Path) {
             true
         }
     });
+    clean_temp(dir, temp_lifetime_hours);
     let mut total: u64 = files.iter().map(|(_, size, _)| size).sum();
     files.sort_by_key(|(_, _, modified)| *modified);
     for (path, size, _) in files {
-        if total <= MAX_SANDBOX {
+        if total <= sandbox_limit {
             break;
         }
         if std::fs::remove_file(&path).is_ok() {
@@ -115,6 +165,7 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             .ok_or("give the file a name")?,
     )?;
     let dir = sandbox_dir(ctx.channel_id);
+    let knobs = tunables(ctx);
     // Finished work stays finished: this file already reached the size
     // the person asked for — rewriting it would undo that (the classic
     // loop: write 1 KB, duplicate to 1 MB, write 1 KB again…).
@@ -140,7 +191,7 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             .get("until_bytes")
             .or_else(|| args.get("size"))
             .and_then(Value::as_u64)
-            .map(|bytes| (bytes as usize).min(MAX_FILE));
+            .map(|bytes| (bytes as usize).min(knobs.upload_limit_bytes));
         // A target never shrinks: the sticky target for this file wins
         // over a smaller one the model passes on a retry.
         let sticky =
@@ -155,9 +206,9 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         // Pattern expansion: fast, deterministic, zero model tokens — for
         // GENERATED DATA (ids, logs, numbers). Prose through repeat is
         // copy-paste filler; a document goes through write_section.
-        let looks_like_prose = pattern.chars().count() > 240
+        let looks_like_prose = pattern.chars().count() > knobs.prose_min_chars
             && pattern.contains(". ")
-            && pattern.split_whitespace().count() > 40;
+            && pattern.split_whitespace().count() > knobs.prose_min_words;
         if looks_like_prose {
             return Err(
                 "repeat is for generated data (ids, logs, test data), not prose. To copy-paste a document to a size, write the text once with content, then call duplicate_file on it — one call, instant and exact"
@@ -172,8 +223,16 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             args.get("times").and_then(Value::as_u64)
         };
         match (times, target) {
-            (Some(times), _) => expand_pattern(pattern, join, Some(times as usize), None),
-            (None, Some(until)) => expand_pattern(pattern, join, None, Some(until)),
+            (Some(times), _) => expand_pattern(
+                pattern,
+                join,
+                Some(times as usize),
+                None,
+                knobs.upload_limit_bytes,
+            ),
+            (None, Some(until)) => {
+                expand_pattern(pattern, join, None, Some(until), knobs.upload_limit_bytes)
+            }
             (None, None) => {
                 return Err(
                     "with `repeat`, also give `times` (how many) or `until_bytes`/`size` (exact target size)"
@@ -198,11 +257,11 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     if bytes.is_empty() {
         return Err("the file would be empty".to_owned());
     }
-    if bytes.len() > MAX_FILE {
+    if bytes.len() > knobs.upload_limit_bytes {
         return Err(format!(
             "that's {} MB — over the {} MB upload limit. For copy-paste to a big size, write the text once and call duplicate_file on it: it fills to the exact size and splits into uploadable parts by itself",
             bytes.len() / 1024 / 1024,
-            MAX_FILE / 1024 / 1024
+            knobs.upload_limit_bytes / 1024 / 1024
         ));
     }
     // Sizes in whole MB only: KB and raw byte counts just mislead small
@@ -219,9 +278,18 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         ),
         None => format!(" ({})", size_label(bytes.len())),
     };
-    let path = dir.join(&name);
+    let temp = super::flag(args, "temp").unwrap_or(false);
+    let path = if temp {
+        tmp_dir(ctx).join(&name)
+    } else {
+        dir.join(&name)
+    };
     paths::write_atomic(&path, &bytes)?;
-    enforce_caps(&dir);
+    enforce_caps(
+        &dir,
+        knobs.sandbox_limit_bytes,
+        knobs.temp_file_lifetime_hours,
+    );
     // Track the shortfall so the brain can push back if the model tries
     // to answer and walk away from a half-sized file.
     if let Some(want) = target {
@@ -231,7 +299,10 @@ pub async fn write_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
     // when the model has rewritten the same short file twice (the
     // observed flail: 7 rewrites of 3 KB, never a duplicate call).
     let still_short = peek_shortfall(ctx.channel_id).is_some_and(|(n, _, _)| n == name);
-    if still_short && (ctx.copy_fill_asked || count_rewrite(ctx.channel_id, &name) >= 2) {
+    if still_short
+        && (ctx.copy_fill_asked
+            || count_rewrite(ctx.channel_id, &name) >= knobs.file_rewrite_autofill)
+    {
         let filled = duplicate_file(ctx, &serde_json::json!({ "name": name })).await?;
         return Ok(format!(
             "The app finished the size work for you (copied up to the target in code): {filled} Reply to the person now — nothing else to do."
@@ -275,7 +346,9 @@ pub async fn run_script(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         .current_dir(&dir)
         .stdin(Stdio::null())
         .output();
-    let output = match tokio::time::timeout(SCRIPT_TIMEOUT, run).await {
+    let knobs = tunables(ctx);
+    let timeout = Duration::from_secs(knobs.script_timeout_secs);
+    let output = match tokio::time::timeout(timeout, run).await {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             let _ = std::fs::remove_file(&script);
@@ -287,7 +360,7 @@ pub async fn run_script(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
             let _ = std::fs::remove_file(&script);
             return Err(format!(
                 "the script ran past {} seconds and was stopped",
-                SCRIPT_TIMEOUT.as_secs()
+                timeout.as_secs()
             ));
         }
     };
@@ -354,7 +427,11 @@ NOTE: the file is {} MB, not the {} MB asked for. Fix it deterministically: writ
         }
         _ => String::new(),
     };
-    enforce_caps(&dir);
+    enforce_caps(
+        &dir,
+        knobs.sandbox_limit_bytes,
+        knobs.temp_file_lifetime_hours,
+    );
     Ok(format!("```{text}```{status}{files_note}{size_note}"))
 }
 
@@ -514,6 +591,7 @@ pub(crate) fn reset_channel_state(channel_id: u64) {
 pub(crate) fn repair_attach_markers(
     channel_id: u64,
     text: &str,
+    upload_limit: usize,
 ) -> (String, Vec<(String, Vec<u8>)>) {
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     let mut out = String::with_capacity(text.len());
@@ -553,7 +631,7 @@ pub(crate) fn repair_attach_markers(
         };
         let attached = candidate.and_then(|name| {
             let bytes = std::fs::read(dir.join(&name)).ok()?;
-            (bytes.len() <= MAX_FILE).then(|| {
+            (bytes.len() <= upload_limit).then(|| {
                 files.push((name.clone(), bytes));
                 name
             })
@@ -598,6 +676,7 @@ pub async fn duplicate_file(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
             .ok_or("which file? (see list_files)")?,
     )?;
     let dir = sandbox_dir(ctx.channel_id);
+    let knobs = tunables(ctx);
     let path = dir.join(&name);
     let content = std::fs::read(&path)
         .map_err(|_| format!("{name} isn't in the file sandbox — check list_files"))?;
@@ -644,7 +723,12 @@ pub async fn duplicate_file(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     let (mut bytes, copies) = match (times, target) {
         // Both given: the size is the ask (times ignored). Duplicate to
         // the FULL target (up to 10 upload parts); splitting comes next.
-        (_, Some(until)) => duplicate_until(&content, &join, until.min(MAX_PART * 10)),
+        (_, Some(until)) => duplicate_until(
+            &content,
+            &join,
+            until.min(knobs.upload_limit_bytes * knobs.max_duplicate_parts),
+            knobs.exact_size_tolerance_bytes,
+        ),
         (Some(times), None) => {
             let times = times.clamp(1, 10_000_000) as usize;
             let mut out = Vec::with_capacity(content.len().saturating_mul(times));
@@ -657,14 +741,15 @@ pub async fn duplicate_file(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
         // Unreachable: both missing was rejected above.
         (None, None) => return Err("give `times` or `until_bytes`".to_owned()),
     };
-    if bytes.len() > MAX_PART * 10 {
-        bytes.truncate(MAX_PART * 10);
+    let whole_cap = knobs.upload_limit_bytes * knobs.max_duplicate_parts;
+    if bytes.len() > whole_cap {
+        bytes.truncate(whole_cap);
     }
 
     // Discord caps one upload at 25 MB: a bigger whole becomes numbered
     // parts, each an uploadable file.
     let want_total = target;
-    let parts = split_parts(&bytes, want_total);
+    let parts = split_parts(&bytes, knobs.upload_limit_bytes);
     let mut written: Vec<String> = Vec::new();
     for (index, part) in parts.iter().enumerate() {
         let part_name = if parts.len() == 1 {
@@ -675,9 +760,13 @@ pub async fn duplicate_file(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
         paths::write_atomic(&dir.join(&part_name), part)?;
         written.push(part_name);
     }
-    enforce_caps(&dir);
+    enforce_caps(
+        &dir,
+        knobs.sandbox_limit_bytes,
+        knobs.temp_file_lifetime_hours,
+    );
     // Deliver: attach every part with the reply (up to 10 per message).
-    let attached = written.len() <= 10;
+    let attached = written.len() <= knobs.max_duplicate_parts;
     if attached {
         let mut media = ctx.media.lock().expect("media poisoned");
         for part_name in &written {
@@ -720,30 +809,26 @@ pub async fn duplicate_file(ctx: &ToolCtx, args: &Value) -> Result<String, Strin
     ))
 }
 
-/// The biggest single upload Discord allows a bot.
-pub(crate) const MAX_PART: usize = MAX_FILE;
-
 /// Cut a byte string into upload-sized parts when the whole exceeds the
 /// upload cap (always at a line break when one is nearby).
-pub(crate) fn split_parts(bytes: &[u8], want_total: Option<usize>) -> Vec<Vec<u8>> {
-    if bytes.len() <= MAX_PART {
+pub(crate) fn split_parts(bytes: &[u8], max_part: usize) -> Vec<Vec<u8>> {
+    if bytes.len() <= max_part {
         return vec![bytes.to_vec()];
     }
     let mut parts = Vec::new();
     let mut rest = bytes;
-    while rest.len() > MAX_PART {
-        let cut = rest[..MAX_PART]
+    while rest.len() > max_part {
+        let cut = rest[..max_part]
             .iter()
             .rposition(|&b| b == b'\n')
             .map(|at| at + 1)
-            .unwrap_or(MAX_PART);
+            .unwrap_or(max_part);
         parts.push(rest[..cut].to_vec());
         rest = &rest[cut..];
     }
     if !rest.is_empty() {
         parts.push(rest.to_vec());
     }
-    let _ = want_total;
     parts
 }
 
@@ -794,54 +879,21 @@ pub(crate) fn peek_requested_target(channel_id: u64) -> Option<usize> {
         .copied()
 }
 
-/// Pull a file-size ask out of a message: "a 25 MB file", "1mb",
-/// "500 KB of notes", "100000 bytes". The LAST mention wins (that is the
-/// ask). Sizes are binary (MB = 1024²) — matching the upload cap.
-pub(crate) fn parse_requested_size(text: &str) -> Option<usize> {
-    let unit_of = |word: &str| -> Option<u64> {
-        match word.trim_matches(|c: char| !c.is_ascii_alphanumeric()) {
-            "kb" | "kilobyte" | "kilobytes" => Some(1024),
-            "mb" | "megabyte" | "megabytes" => Some(1024 * 1024),
-            "gb" | "gigabyte" | "gigabytes" => Some(1024 * 1024 * 1024),
-            "bytes" | "byte" => Some(1),
-            _ => None,
-        }
-    };
-    let mut found: Option<usize> = None;
-    let mut pending: Option<f64> = None;
-    for word in text.to_lowercase().split_whitespace() {
-        let cleaned = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
-        // Fused form: "25mb".
-        if let Some(at) = cleaned.find(|c: char| c.is_ascii_alphabetic()) {
-            let (num, unit) = cleaned.split_at(at);
-            if let (Ok(n), Some(mult)) = (num.trim().parse::<f64>(), unit_of(unit)) {
-                found = Some((n * mult as f64) as usize);
-                pending = None;
-                continue;
-            }
-        }
-        if let Ok(n) = cleaned.parse::<f64>() {
-            pending = Some(n);
-        } else if let (Some(n), Some(mult)) = (pending, unit_of(cleaned)) {
-            found = Some((n * mult as f64) as usize);
-            pending = None;
-        } else {
-            pending = None;
-        }
-    }
-    found.filter(|&bytes| bytes > 0)
-}
-
 /// Repeat `content` (joined by `join`) until reaching `until` bytes, cut
 /// at the last line break so a text file never ends mid-word. Returns the
 /// bytes and how many copies fit.
-pub(crate) fn duplicate_until(content: &[u8], join: &[u8], until: usize) -> (Vec<u8>, usize) {
+pub(crate) fn duplicate_until(
+    content: &[u8],
+    join: &[u8],
+    until: usize,
+    tolerance: usize,
+) -> (Vec<u8>, usize) {
     let mut unit = content.to_vec();
     unit.extend_from_slice(join);
     if unit.is_empty() {
         unit = b" ".to_vec();
     }
-    let mut out = Vec::with_capacity(until.min(MAX_FILE));
+    let mut out = Vec::with_capacity(until);
     let mut copies = 0usize;
     while out.len() < until {
         out.extend_from_slice(&unit);
@@ -860,7 +912,7 @@ pub(crate) fn duplicate_until(content: &[u8], join: &[u8], until: usize) -> (Vec
             .rposition(|&b| b == b'\n')
             .map(|at| at + 1)
             .unwrap_or(until);
-        let cut = if until - newline <= 64 {
+        let cut = if until - newline <= tolerance {
             newline
         } else {
             until
@@ -876,12 +928,11 @@ pub async fn attach_file(ctx: &ToolCtx, args: &Value) -> Result<String, String> 
             .and_then(Value::as_str)
             .ok_or("which file? (see list_files)")?,
     )?;
-    let dir = sandbox_dir(ctx.channel_id);
-    let path = dir.join(&name);
+    let path = resolve_file(ctx, &name);
     let bytes = std::fs::read(&path)
         .map_err(|_| format!("{name} isn't in the file sandbox — check list_files"))?;
-    if bytes.len() > MAX_FILE {
-        return Err(format!("{name} is over the 25 MB limit"));
+    if bytes.len() > tunables(ctx).upload_limit_bytes {
+        return Err(format!("{name} is over the upload limit"));
     }
     ctx.media
         .lock()
@@ -928,7 +979,7 @@ pub async fn convert_file(ctx: &ToolCtx, args: &Value) -> Result<String, String>
             ));
         }
     };
-    if converted.len() > MAX_FILE {
+    if converted.len() > tunables(ctx).upload_limit_bytes {
         return Err("the converted file is over the 25 MB limit".to_owned());
     }
     paths::write_atomic(&dir.join(&target), &converted)?;
@@ -940,11 +991,16 @@ pub async fn convert_file(ctx: &ToolCtx, args: &Value) -> Result<String, String>
 
 pub async fn list_files(ctx: &ToolCtx, _args: &Value) -> Result<String, String> {
     let dir = sandbox_dir(ctx.channel_id);
+    let knobs = tunables(ctx);
     let files = snapshot_files(&dir);
     if files.is_empty() {
         return Ok("The file sandbox for this channel is empty.".to_owned());
     }
-    enforce_caps(&dir);
+    enforce_caps(
+        &dir,
+        knobs.sandbox_limit_bytes,
+        knobs.temp_file_lifetime_hours,
+    );
     let lines: Vec<String> = files
         .iter()
         .map(|(name, size)| format!("- {name} ({})", size_label(*size)))
@@ -989,6 +1045,7 @@ pub(crate) fn expand_pattern(
     join: Option<&str>,
     times: Option<usize>,
     until: Option<usize>,
+    max: usize,
 ) -> Vec<u8> {
     let mut unit = pattern.as_bytes().to_vec();
     match join {
@@ -1008,7 +1065,7 @@ pub(crate) fn expand_pattern(
             out
         }
         (_, Some(until)) => {
-            let until = until.min(MAX_FILE);
+            let until = until.min(max);
             let whole = until / unit.len();
             for _ in 0..whole {
                 out.extend_from_slice(&unit);
@@ -1039,29 +1096,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requested_size_parses_from_message_text() {
-        assert_eq!(
-            parse_requested_size("write a story and copy it until the file is 25 MB"),
-            Some(25 * 1024 * 1024)
-        );
-        assert_eq!(parse_requested_size("make a 1mb file"), Some(1024 * 1024));
-        assert_eq!(
-            parse_requested_size("about 500 KB of notes"),
-            Some(500 * 1024)
-        );
-        assert_eq!(parse_requested_size("100000 bytes please"), Some(100_000));
-        assert_eq!(parse_requested_size("no size mentioned here"), None);
-        assert_eq!(
-            parse_requested_size("first a 1 MB draft then finish at 2 MB"),
-            Some(2 * 1024 * 1024),
-            "the last mention is the ask"
-        );
-    }
-
-    #[test]
     fn duplicate_until_cuts_at_a_line_break() {
+        let tol = crate::config::Tunables::default().exact_size_tolerance_bytes;
         let story = b"line one\nline two\n".to_vec();
-        let (out, copies) = duplicate_until(&story, b"\n\n", 25);
+        let (out, copies) = duplicate_until(&story, b"\n\n", 25, tol);
         assert!(out.len() <= 25, "never over the target");
         assert!(
             out.ends_with(b"\n"),
@@ -1077,8 +1115,9 @@ mod tests {
 
     #[test]
     fn duplicate_until_single_copy_over_target_truncates() {
+        let tol = crate::config::Tunables::default().exact_size_tolerance_bytes;
         let story = b"abcdefghijklmnopqrstuvwxyz".to_vec();
-        let (out, copies) = duplicate_until(&story, b"", 10);
+        let (out, copies) = duplicate_until(&story, b"", 10, tol);
         assert_eq!(out.len(), 10);
         assert_eq!(copies, 1);
         assert_eq!(&out, b"abcdefghij");
@@ -1087,15 +1126,17 @@ mod tests {
     #[test]
     fn duplicate_until_is_exact_when_a_line_break_is_far() {
         // until_bytes is EXACT: a far-away newline must not shrink it.
+        let tol = crate::config::Tunables::default().exact_size_tolerance_bytes;
         let story = vec![b'x'; 1000];
-        let (out, _) = duplicate_until(&story, b"\n\n", 1500);
+        let (out, _) = duplicate_until(&story, b"\n\n", 1500, tol);
         assert_eq!(out.len(), 1500, "exact target, not a paragraph short");
     }
 
     #[test]
     fn duplicate_until_exact_fit_is_untouched() {
+        let tol = crate::config::Tunables::default().exact_size_tolerance_bytes;
         let story = b"0123456789".to_vec();
-        let (out, copies) = duplicate_until(&story, b"", 10);
+        let (out, copies) = duplicate_until(&story, b"", 10, tol);
         assert_eq!(out, story);
         assert_eq!(copies, 1);
     }
@@ -1121,14 +1162,14 @@ mod tests {
     #[test]
     fn pattern_hits_exact_byte_targets() {
         // 1MB of "legion " (spaces via join) lands on exactly 1048576.
-        let out = expand_pattern("legion", Some(" "), None, Some(1024 * 1024));
+        let out = expand_pattern("legion", Some(" "), None, Some(1024 * 1024), usize::MAX);
         assert_eq!(out.len(), 1024 * 1024);
         assert!(out.starts_with(b"legion legion"));
         // Newline-joined, odd target: still exact.
-        let out = expand_pattern("legion", None, None, Some(1000));
+        let out = expand_pattern("legion", None, None, Some(1000), usize::MAX);
         assert_eq!(out.len(), 1000);
         // Explicit count: full repeats only, as asked.
-        let out = expand_pattern("legion", Some(" "), Some(100), None);
+        let out = expand_pattern("legion", Some(" "), Some(100), None, usize::MAX);
         assert_eq!(out.len(), 700);
     }
 

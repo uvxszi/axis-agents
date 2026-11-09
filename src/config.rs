@@ -834,6 +834,77 @@ pub struct GlobalSettings {
     /// Optional GitHub token for watching repos (higher rate limit,
     /// private repos).
     pub github_token: String,
+    /// Every operational knob in one place — no magic number stays buried
+    /// in code. Editable in Settings, live for every agent.
+    pub tunables: Tunables,
+}
+
+/// The knobs. Defaults match Discord's real limits and the behavior the
+/// probe runs verified against a live small model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tunables {
+    /// One file upload by this bot. 25 MiB is Discord's hard API cap —
+    /// the 8/10 MB figures are human limits and must never be used.
+    pub upload_limit_bytes: usize,
+    /// Total sandbox size per channel before the oldest files are pruned.
+    pub sandbox_limit_bytes: u64,
+    /// Most parts an oversized duplicate is split into for uploads.
+    pub max_duplicate_parts: usize,
+    /// Rewrites of a still-short file before the app fills it itself.
+    pub file_rewrite_autofill: u32,
+    /// "Not finished" pushes before the app fills the file itself.
+    pub size_nudge_limit: u32,
+    /// Pushes for promised work that never ran a tool.
+    pub follow_through_limit: u32,
+    /// Scratchpad entries kept per channel.
+    pub scratch_entries: usize,
+    /// Scratchpad chars per entry.
+    pub scratch_entry_chars: usize,
+    /// Entries recall_scratch shows at once.
+    pub scratch_recall: usize,
+    /// Process-journal entries kept after jobs finish.
+    pub process_journal_entries: usize,
+    /// Message contents remembered for edit-dedup.
+    pub sent_content_entries: usize,
+    /// Minimum ms between status-message edits.
+    pub edit_min_interval_ms: u64,
+    /// A line-break cut within this many bytes of the target still counts
+    /// as exact; beyond it the file is cut mid-line to hit the byte.
+    pub exact_size_tolerance_bytes: usize,
+    /// Text longer than this many chars…
+    pub prose_min_chars: usize,
+    /// …with at least this many words reads as prose (which `repeat`
+    /// refuses and write_section handles).
+    pub prose_min_words: usize,
+    /// Temp files (the `_tmp/` scratch area) older than this are removed.
+    pub temp_file_lifetime_hours: u64,
+    /// run_script execution cap, seconds.
+    pub script_timeout_secs: u64,
+}
+
+impl Default for Tunables {
+    fn default() -> Self {
+        Self {
+            upload_limit_bytes: 25 * 1024 * 1024,
+            sandbox_limit_bytes: 128 * 1024 * 1024,
+            max_duplicate_parts: 10,
+            file_rewrite_autofill: 2,
+            size_nudge_limit: 3,
+            follow_through_limit: 2,
+            scratch_entries: 120,
+            scratch_entry_chars: 1600,
+            scratch_recall: 15,
+            process_journal_entries: 300,
+            sent_content_entries: 512,
+            edit_min_interval_ms: 1400,
+            exact_size_tolerance_bytes: 64,
+            prose_min_chars: 240,
+            prose_min_words: 40,
+            temp_file_lifetime_hours: 24,
+            script_timeout_secs: 30,
+        }
+    }
 }
 
 impl Default for GlobalSettings {
@@ -848,6 +919,7 @@ impl Default for GlobalSettings {
             max_agent_chain: 4,
             ui_scale: 1.0,
             github_token: String::new(),
+            tunables: Tunables::default(),
         }
     }
 }

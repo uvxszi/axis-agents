@@ -647,7 +647,7 @@ fn build_catalog() -> Vec<ToolDef> {
             required: []),
         tool!("write_file", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["file", "write", "make a file", "create a file", "save", "document", "txt", "csv", "json", "generate", "repeated", "1mb", "mb file"],
-            "Write a file into this channel's file sandbox. For a SIZE-targeted or repetitive file (\"a 1MB file of the word legion\") this is the right tool: pass `repeat`, `until_bytes` (or `size`) for the exact byte count, and `join` for the separator — join: \" \") puts a space between repeats, the default is a newline. The app hits the exact size every time and you write none of the bytes yourself. For normal content pass `content` (a size target only ever TRIMS it — content is never padded up, so keep writing until the target). YOUR upload limit is 25 MB (26 214 400 bytes) — never say 8 MB or 10 MB, those are human limits. If the person named a size in their message you may omit until_bytes; the app knows the ask. For copy-pasting a document to a size, write it once then duplicate_file.",
+            "Write a file into this channel's file sandbox. For a SIZE-targeted or repetitive file (\"a 1MB file of the word legion\") this is the right tool: pass `repeat`, `until_bytes` (or `size`) for the exact byte count, and `join` for the separator — join: \" \") puts a space between repeats, the default is a newline. The app hits the exact size every time and you write none of the bytes yourself. For normal content pass `content` (a size target only ever TRIMS it — content is never padded up, so keep writing until the target). YOUR upload limit is 25 MB (26 214 400 bytes) — never say 8 MB or 10 MB, those are human limits. If the person named a size in their message you may omit until_bytes; the app knows the ask. For copy-pasting a document to a size, write it once then duplicate_file. Intermediate working files (drafts, partial results you will build on): pass temp: true and they live in the _tmp scratch area, which cleans itself up.",
             { "name": ("string", "File name, e.g. legion.txt"), "content": ("string", "The file's text content (omit when using repeat)"), "repeat": ("string", "A short pattern to repeat (e.g. a word or line)"), "times": ("number", "Repeat count (with repeat)"), "until_bytes": ("number", "EXACT target size in bytes — the file will be exactly this many bytes"), "size": ("number", "Alias for until_bytes"), "join": ("string", "Separator between repeats: a space \" \") for readable columns, \"\n\" or omit for lines") }, required: ["name"]),
         tool!("write_section", Utilities, Conversational, none, guild: false, core: true,
             keywords: ["chapter", "story", "essay", "write", "section", "novel", "long", "continue writing", "part", "scene", "article", "guide", "document"],
@@ -964,9 +964,22 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
     // Everything flows through the scratchpad: the model can pull any
     // earlier result back verbatim instead of redoing the work.
     if !matches!(def.name, "recall_scratch" | "list_files" | "read_messages") {
+        let knobs = ctx.core.hive.settings().tunables;
         match &result {
-            Ok(text) => scratch::record(ctx.channel_id, def.name, text),
-            Err(error) => scratch::record(ctx.channel_id, def.name, &format!("(failed) {error}")),
+            Ok(text) => scratch::record(
+                ctx.channel_id,
+                def.name,
+                text,
+                knobs.scratch_entries,
+                knobs.scratch_entry_chars,
+            ),
+            Err(error) => scratch::record(
+                ctx.channel_id,
+                def.name,
+                &format!("(failed) {error}"),
+                knobs.scratch_entries,
+                knobs.scratch_entry_chars,
+            ),
         }
     }
     // From a DM: log it in the servers where the requester has the rank

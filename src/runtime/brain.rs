@@ -367,6 +367,7 @@ async fn present(
     thought: u64,
     mut done: watch::Receiver<bool>,
 ) -> Option<MessageId> {
+    let knobs = core.hive.settings().tunables;
     let channel = ChannelId::new(job.channel_id);
     // Already showing "thinking…" (posted when the message arrived)?
     let early = if matches!(job.outlet, Outlet::Channel) {
@@ -453,7 +454,7 @@ async fn present(
                         | ThinkingStyle::LiveWithReasoning
                         | ThinkingStyle::Placeholder
                 )
-                && last_edit.elapsed() >= Duration::from_millis(1400)
+                && last_edit.elapsed() >= Duration::from_millis(knobs.edit_min_interval_ms)
                 && version != shown_version
             {
                 // Edit only on real change: a re-edit with identical text
@@ -588,12 +589,16 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
     // counts) belongs to ONE job: a leftover from an earlier job would
     // hijack this one's files.
     tools::files::reset_channel_state(job.channel_id);
+    // What the message asks for, read ONCE — sizes, attachments,
+    // copy-paste intent, file names. Every consumer consults the same
+    // parse; no scattered keyword matching.
+    let intent = request_text(job)
+        .map(|t| super::intent::parse(&t))
+        .unwrap_or_default();
     // "a 25 MB file" in the request: the app owns the size arithmetic.
     // The first file work without its own target picks this up.
-    if let Some(text) = request_text(job) {
-        if let Some(bytes) = tools::files::parse_requested_size(&text) {
-            tools::files::note_requested_target(job.channel_id, bytes);
-        }
+    if let Some(bytes) = intent.final_size {
+        tools::files::note_requested_target(job.channel_id, bytes);
     }
     let ctx = ToolCtx {
         core: Arc::clone(core),
@@ -606,28 +611,10 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         media: Arc::clone(&media),
         // "write X and attach/send it": the app performs the attach step
         // itself — a small model reliably manages one tool, not a chain.
-        wants_file_attached: request_text(job)
-            .map(|t| {
-                let t = t.to_lowercase();
-                (t.contains("attach") || t.contains("send it") || t.contains("send the file"))
-                    && !t.contains("don't attach")
-            })
-            .unwrap_or(false),
+        wants_file_attached: intent.wants_attachment,
         // "copy-paste it until / repeat it until / fill to a size": the
         // app performs the copying itself the moment the file is written.
-        copy_fill_asked: request_text(job)
-            .map(|t| {
-                let t = t.to_lowercase();
-                (t.contains("copy") && t.contains("paste"))
-                    || t.contains("copy-paste")
-                    || t.contains("duplicate")
-                    || t.contains("repeat it")
-                    || t.contains("repeat the")
-                    || t.contains("fill it to")
-                    || t.contains("fill to")
-                    || t.contains("over and over")
-            })
-            .unwrap_or(false),
+        copy_fill_asked: intent.copy_fill,
         inputs: super::vision::sources(core, &job.triggers),
     };
     let mut max_rounds = profile.behavior.max_tool_rounds.clamp(1, 24);
@@ -1095,12 +1082,13 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         }
         // A file with a size target that came out short: the model may not
         // just answer and walk away — keep going until the target.
-        if calls.is_empty() && !last_round && size_nudges < 3 {
+        let knobs = core.hive.settings().tunables;
+        if calls.is_empty() && !last_round && size_nudges < knobs.size_nudge_limit {
             if let Some((name, have, want)) = tools::files::peek_shortfall(job.channel_id) {
                 // Third strike: the model had two pushes and still won't
                 // fill it — the app finishes the job itself so the person
                 // is never left with a "195 chapters" that is 7 KB.
-                if size_nudges >= 2 {
+                if size_nudges + 1 >= knobs.size_nudge_limit {
                     let filled = tools::dispatch(
                         &ctx,
                         "duplicate_file",
@@ -1136,7 +1124,7 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
         if calls.is_empty()
             && tools_used == 0
             && !last_round
-            && follow_through_nudges < 2
+            && follow_through_nudges < knobs.follow_through_limit
             && tools::files::peek_requested_target(job.channel_id).is_some()
         {
             follow_through_nudges += 1;
@@ -1161,7 +1149,11 @@ async fn think(core: &Arc<AgentCore>, job: &Job, view: &Arc<Mutex<View>>, though
             };
             // "[attach_file]" written as text instead of the tool being
             // called: perform the attachment it meant, strip the marker.
-            let (content, repaired) = tools::files::repair_attach_markers(job.channel_id, &content);
+            let (content, repaired) = tools::files::repair_attach_markers(
+                job.channel_id,
+                &content,
+                core.hive.settings().tunables.upload_limit_bytes,
+            );
             if !repaired.is_empty() {
                 for (name, bytes) in repaired {
                     media.lock().expect("media poisoned").add_file(&name, bytes);

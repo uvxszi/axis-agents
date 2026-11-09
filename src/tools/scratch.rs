@@ -31,21 +31,18 @@ fn pad() -> &'static Mutex<HashMap<u64, Vec<Entry>>> {
     PAD.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-const MAX_ENTRIES: usize = 120;
-const MAX_ENTRY_CHARS: usize = 1600;
-
 /// Record a tool result (called from the dispatch gateway — everything
-/// flows through here).
-pub fn record(channel_id: u64, tool: &str, text: &str) {
+/// flows through here). Caps come from the live tunables.
+pub fn record(channel_id: u64, tool: &str, text: &str, max_entries: usize, max_chars: usize) {
     let mut pad = pad().lock().expect("scratch poisoned");
     let entries = pad.entry(channel_id).or_default();
     entries.push(Entry {
         tool: tool.to_owned(),
-        text: crate::llm::truncate(text, MAX_ENTRY_CHARS).to_owned(),
+        text: crate::llm::truncate(text, max_chars).to_owned(),
         at: crate::memory::now_ms(),
     });
-    if entries.len() > MAX_ENTRIES {
-        let drop = entries.len() - MAX_ENTRIES;
+    if entries.len() > max_entries {
+        let drop = entries.len() - max_entries;
         entries.drain(..drop);
     }
 }
@@ -112,12 +109,13 @@ mod tests {
 
     #[test]
     fn records_and_caps() {
-        for n in 0..(MAX_ENTRIES + 10) {
-            record(999_001, "write_file", &format!("result {n}"));
+        let cap = 120;
+        for n in 0..(cap + 10) {
+            record(999_001, "write_file", &format!("result {n}"), cap, 1600);
         }
         let pad = pad().lock().unwrap();
         let entries = &pad[&999_001];
-        assert_eq!(entries.len(), MAX_ENTRIES);
+        assert_eq!(entries.len(), cap);
         assert!(entries.last().unwrap().text.contains("result 129"));
     }
 }

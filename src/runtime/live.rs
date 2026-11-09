@@ -199,6 +199,9 @@ pub struct Live {
     pub mcp: Mutex<HashMap<String, McpStatus>>,
     egui: Mutex<Option<egui::Context>>,
     thought_ids: AtomicU64,
+    /// Buffer caps, installed from settings when the app builds the Live
+    /// (defaults otherwise — the probe and sim).
+    caps: (usize, usize),
 }
 
 /// One finished (or running) job in the process journal.
@@ -218,6 +221,30 @@ pub struct ProcessEntry {
 }
 
 impl Live {
+    /// Install buffer caps from the live settings.
+    pub fn with_caps(process_journal: usize, sent_content: usize) -> Self {
+        Self {
+            caps: (process_journal, sent_content),
+            ..Self::default()
+        }
+    }
+
+    fn journal_cap(&self) -> usize {
+        if self.caps.0 == 0 {
+            crate::config::Tunables::default().process_journal_entries
+        } else {
+            self.caps.0
+        }
+    }
+
+    fn sent_cap(&self) -> usize {
+        if self.caps.1 == 0 {
+            crate::config::Tunables::default().sent_content_entries
+        } else {
+            self.caps.1
+        }
+    }
+
     pub fn set_egui(&self, ctx: egui::Context) {
         *self.egui.lock().expect("live poisoned") = Some(ctx);
     }
@@ -301,9 +328,9 @@ impl Live {
     /// Record what a message now shows, after a successful create or edit.
     pub fn remember_sent(&self, message_id: u64, content: &str) {
         let mut sent = self.sent_content.lock().expect("live poisoned");
-        if sent.len() > 512 && !sent.contains_key(&message_id) {
+        if sent.len() > self.sent_cap() && !sent.contains_key(&message_id) {
             // Bounded: drop the oldest quarter when full.
-            let ids: Vec<u64> = sent.keys().copied().take(128).collect();
+            let ids: Vec<u64> = sent.keys().copied().take(self.sent_cap() / 4).collect();
             for id in ids {
                 sent.remove(&id);
             }
@@ -356,8 +383,8 @@ impl Live {
             reasoning: String::new(),
             answer: String::new(),
         });
-        if journal.len() > 300 {
-            let drop = journal.len() - 300;
+        if journal.len() > self.journal_cap() {
+            let drop = journal.len() - self.journal_cap();
             journal.drain(..drop);
         }
         id

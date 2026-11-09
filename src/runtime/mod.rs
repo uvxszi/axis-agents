@@ -15,6 +15,7 @@ pub mod context;
 pub mod github;
 pub mod hive;
 pub mod hq;
+pub mod intent;
 #[cfg(test)]
 mod lab;
 pub mod levels;
@@ -69,7 +70,10 @@ impl Supervisor {
             .thread_name("axis-agents")
             .build()
             .expect("tokio runtime");
-        let live = Arc::new(Live::default());
+        let live = Arc::new(Live::with_caps(
+            settings.tunables.process_journal_entries,
+            settings.tunables.sent_content_entries,
+        ));
         let hive = Hive::new(Arc::clone(&live), settings.clone());
         let supervisor = Self {
             hive,

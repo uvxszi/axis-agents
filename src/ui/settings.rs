@@ -197,6 +197,49 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     }
                 });
             });
+            egui::CollapsingHeader::new("⚙ Advanced — behavior knobs")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "Every operational number lives here — nothing is buried in code. Defaults match Discord's limits and the behavior verified against live small models; change only what you mean to."
+                        )
+                        .size(12.0)
+                        .color(WEAK),
+                    );
+                    let tun = &mut settings.tunables;
+                    let mb = |bytes: usize| format!("{} MB", bytes / 1024 / 1024);
+                    form_row(ui, "Upload limit", "One file upload (Discord's bot cap is 25 MB).", |ui| {
+                        ui.label(RichText::new(mb(tun.upload_limit_bytes)).strong());
+                        if ui.small_button("reset 25 MB").clicked() {
+                            tun.upload_limit_bytes = 25 * 1024 * 1024;
+                        }
+                    });
+                    form_row(ui, "Sandbox per channel", "Total file storage per channel before pruning.", |ui| {
+                        ui.add(egui::Slider::new(&mut tun.sandbox_limit_bytes, 16..=1024u64 * 1024 * 1024).custom_formatter(|v, _| format!("{} MB", (v as u64) / 1024 / 1024)));
+                    });
+                    form_row(ui, "Split parts", "Most parts an oversized duplicate becomes.", |ui| {
+                        ui.add(egui::Slider::new(&mut tun.max_duplicate_parts, 1..=10));
+                    });
+                    form_row(ui, "Auto-fill after rewrites", "Rewrites of a still-short file before the app fills it itself.", |ui| {
+                        ui.add(egui::Slider::new(&mut tun.file_rewrite_autofill, 1..=5));
+                    });
+                    form_row(ui, "Size nudges", "'Not finished' pushes before the app fills the file.", |ui| {
+                        ui.add(egui::Slider::new(&mut tun.size_nudge_limit, 1..=6));
+                    });
+                    form_row(ui, "Edit interval", "Minimum ms between status-message edits.", |ui| {
+                        ui.add(egui::Slider::new(&mut tun.edit_min_interval_ms, 500..=5000));
+                    });
+                    form_row(ui, "Temp file lifetime", "Hours before _tmp scratch files are removed.", |ui| {
+                        ui.add(egui::Slider::new(&mut tun.temp_file_lifetime_hours, 1..=168));
+                    });
+                    form_row(ui, "Script timeout", "run_script execution cap, seconds.", |ui| {
+                        ui.add(egui::Slider::new(&mut tun.script_timeout_secs, 5..=120));
+                    });
+                    if ui.small_button("restore all defaults").clicked() {
+                        *tun = crate::config::Tunables::default();
+                    }
+                });
         });
 
         if settings != app.config.settings {

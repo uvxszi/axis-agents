@@ -216,7 +216,8 @@ pub async fn write_section(ctx: &ToolCtx, args: &Value) -> Result<String, String
         // The ask was "a file" — deliver it: attach with the reply (when
         // it fits an upload) instead of leaving the model to chain
         // another tool call.
-        if text.len() <= super::files::MAX_FILE {
+        let upload_limit = ctx.core.hive.settings().tunables.upload_limit_bytes;
+        if text.len() <= upload_limit {
             ctx.media
                 .lock()
                 .expect("media poisoned")
