@@ -1920,7 +1920,8 @@ pub async fn list_votes(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
 /// when the owner hasn't restricted it).
 fn ensure_settings(ctx: &ToolCtx) -> Result<u64, String> {
     let guild_id = ctx.require_guild()?;
-    if ctx.acting_as_agent()
+    if ctx.requester_bypassed()
+        || ctx.acting_as_agent()
         || crate::runtime::levels::can_manage(&ctx.core, guild_id, &ctx.requester)
     {
         Ok(guild_id)

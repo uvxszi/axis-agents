@@ -1144,7 +1144,11 @@ pub async fn execute(ctx: &ToolCtx, call: &ToolCall) -> ToolOutcome {
                         .trim_end_matches('.')
                         .to_owned()
                 })
-                .unwrap_or_else(|| "the required permissions".to_owned());
+                .unwrap_or_else(|| {
+                    // The deny text names the real reason — use it instead
+                    // of a vague 'the required permissions'.
+                    error.trim_start_matches("denied:").trim().to_owned()
+                });
             ToolOutcome {
                 text: format!("{error} — the system already told them; do not repeat this"),
                 ok: false,
