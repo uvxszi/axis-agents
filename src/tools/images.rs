@@ -1153,6 +1153,146 @@ pub fn draw_shape(canvas: &mut RgbaImage, command: &str) -> Result<(), String> {
             );
             polygon(canvas, &[(x2, y2), left, right], color);
         }
+        "arc" | "orbit" => {
+            // arc CX CY RX RY START_DEG END_DEG COLOR [width=N] — a partial
+            // ellipse (degrees, 0 = right, clockwise positive = downward in
+            // image space). Orbits around a center: one call per orbit.
+            let (cx, cy, rx, ry, start, end) =
+                (num(0)?, num(1)?, num(2)?, num(3)?, num(4)?, num(5)?);
+            let color = color_at(6);
+            let t = thickness(2.0);
+            let steps = ((rx + ry).max(40.0) * 2.0) as i32;
+            let mut prev: Option<(f32, f32)> = None;
+            for s in 0..=steps {
+                let frac = s as f32 / steps as f32;
+                let angle = (start + (end - start) * frac).to_radians();
+                let point = (cx + rx * angle.cos(), cy + ry * angle.sin());
+                if let Some(p) = prev {
+                    line(canvas, p.0, p.1, point.0, point.1, t, color);
+                }
+                prev = Some(point);
+            }
+        }
+        "star" => {
+            // star CX CY R COLOR [points=N] [inner=F] — an N-pointed star.
+            let (cx, cy, r) = (num(0)?, num(1)?, num(2)?);
+            let color = color_at(3);
+            let points = rest
+                .iter()
+                .find(|v| v.starts_with("points="))
+                .and_then(|v| v.trim_start_matches("points=").parse::<f32>().ok())
+                .unwrap_or(5.0)
+                .clamp(3.0, 24.0) as i32;
+            let inner = rest
+                .iter()
+                .find(|v| v.starts_with("inner="))
+                .and_then(|v| v.trim_start_matches("inner=").parse::<f32>().ok())
+                .unwrap_or(0.45)
+                .clamp(0.1, 0.9);
+            let mut verts = Vec::new();
+            for s in 0..(points * 2) {
+                let radius = if s % 2 == 0 { r } else { r * inner };
+                let angle =
+                    (s as f32) * std::f32::consts::PI / points as f32 - std::f32::consts::FRAC_PI_2;
+                verts.push((cx + radius * angle.cos(), cy + radius * angle.sin()));
+            }
+            polygon(canvas, &verts, color);
+        }
+        "roundrect" | "panel" => {
+            // roundrect X Y W H R COLOR [outline] [width=N]
+            let (x, y, w, h, radius) = (
+                num(0)?,
+                num(1)?,
+                num(2)?,
+                num(3)?,
+                num(4)?.clamp(1.0, 200.0),
+            );
+            let color = color_at(5);
+            let t = thickness(3.0);
+            let steps = 8;
+            fn corner(
+                canvas: &mut RgbaImage,
+                cx: f32,
+                cy: f32,
+                start: f32,
+                radius: f32,
+                t: f32,
+                color: Rgba<u8>,
+            ) {
+                let steps = 8;
+                let mut prev: Option<(f32, f32)> = None;
+                for s in 0..=steps {
+                    let a = (start + (std::f32::consts::FRAC_PI_2) * s as f32 / steps as f32)
+                        .to_radians();
+                    let point = (cx + radius * a.cos(), cy + radius * a.sin());
+                    if let Some(p) = prev {
+                        line(canvas, p.0, p.1, point.0, point.1, t, color);
+                    }
+                    prev = Some(point);
+                }
+            }
+            if outline {
+                line(canvas, x + radius, y, x + w - radius, y, t, color);
+                line(canvas, x + radius, y + h, x + w - radius, y + h, t, color);
+                line(canvas, x, y + radius, x, y + h - radius, t, color);
+                line(canvas, x + w, y + radius, x + w, y + h - radius, t, color);
+                corner(canvas, x + radius, y + radius, 180.0, radius, t, color);
+                corner(canvas, x + w - radius, y + radius, 270.0, radius, t, color);
+                corner(
+                    canvas,
+                    x + w - radius,
+                    y + h - radius,
+                    0.0,
+                    radius,
+                    t,
+                    color,
+                );
+                corner(canvas, x + radius, y + h - radius, 90.0, radius, t, color);
+            } else {
+                fill_rect(canvas, x + radius, y, w - 2.0 * radius, h, color);
+                fill_rect(canvas, x, y + radius, w, h - 2.0 * radius, color);
+                ellipse(
+                    canvas,
+                    x + radius,
+                    y + radius,
+                    radius,
+                    radius,
+                    color,
+                    true,
+                    1.0,
+                );
+                ellipse(
+                    canvas,
+                    x + w - radius,
+                    y + radius,
+                    radius,
+                    radius,
+                    color,
+                    true,
+                    1.0,
+                );
+                ellipse(
+                    canvas,
+                    x + radius,
+                    y + h - radius,
+                    radius,
+                    radius,
+                    color,
+                    true,
+                    1.0,
+                );
+                ellipse(
+                    canvas,
+                    x + w - radius,
+                    y + h - radius,
+                    radius,
+                    radius,
+                    color,
+                    true,
+                    1.0,
+                );
+            }
+        }
         "polygon" | "triangle" => {
             let color = color_at(0);
             let values: Vec<f32> = rest[1..].iter().filter_map(|v| v.parse().ok()).collect();
@@ -1249,19 +1389,111 @@ pub async fn draw_image(ctx: &ToolCtx, args: &Value) -> Result<String, String> {
         }
     }
     let (w, h) = canvas.dimensions();
+    let png = encode(DynamicImage::ImageRgba8(canvas))?;
+
+    // Verify-then-deliver: with a `goal`, the app LOOKS at the drawing
+    // and judges it against the goal before anything is attached. The
+    // model gets concrete flaws and redraws; only a pass attaches.
+    if let Some(goal) = arg(args, "goal") {
+        match verify_drawing(ctx, &png, &goal).await {
+            Ok((true, notes)) => {
+                let mut media = ctx.media.lock().expect("media poisoned");
+                let name = media.add(png, true);
+                if let Some(base) = base {
+                    media.supersede(&base, &name);
+                }
+                let mut out = format!(
+                    "drew {name} ({w}×{h}) and VERIFIED it against the goal — the vision check passed{}. It is attached to your reply. Do not redraw.",
+                    if notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({notes})")
+                    }
+                );
+                if !errors.is_empty() {
+                    out.push_str(&format!("\nskipped shapes: {}", errors.join("; ")));
+                }
+                return Ok(out);
+            }
+            Ok((false, flaws)) => {
+                return Ok(format!(
+                    "drew it, but the vision check says it does NOT yet match the goal. FLAWS the check found:\n{flaws}\n\nRedraw now: call draw_image again with the SAME goal and a corrected shape list — fix exactly those flaws (spacing, overlaps, missing or mislabeled parts, wrong proportions). The flawed version was NOT attached; iterate until the check passes. Complex drawings usually take 2–3 rounds — that is normal, not a failure."
+                ));
+            }
+            Err(error) => {
+                // Vision unavailable: deliver unverified, honestly.
+                let mut media = ctx.media.lock().expect("media poisoned");
+                let name = media.add(png, true);
+                if let Some(base) = base {
+                    media.supersede(&base, &name);
+                }
+                return Ok(format!(
+                    "drew {name} ({w}×{h}) and attached it, but could NOT verify it ({}). Look at it yourself with look_at_image and redraw if something is off.",
+                    error
+                ));
+            }
+        }
+    }
+
     let mut media = ctx.media.lock().expect("media poisoned");
-    let name = media.add(encode(DynamicImage::ImageRgba8(canvas))?, true);
+    let name = media.add(png, true);
     if let Some(base) = base {
         media.supersede(&base, &name);
     }
     let mut out = format!(
-        "drew {name} ({w}×{h}, {} shapes); it will be attached to your reply",
+        "drew {name} ({w}×{h}, {} shapes); it will be attached to your reply. For anything complex, pass goal: \"...\" so the app verifies the drawing with vision before it ships.",
         shapes.len() - errors.len()
     );
     if !errors.is_empty() {
         out.push_str(&format!("\nskipped: {}", errors.join("; ")));
     }
     Ok(out)
+}
+
+/// Look at a fresh drawing with the vision model and judge it against
+/// what it was supposed to show. Returns (passed, notes-or-flaws).
+async fn verify_drawing(ctx: &ToolCtx, png: &[u8], goal: &str) -> Result<(bool, String), String> {
+    let image = image::load_from_memory(png).map_err(|e| format!("re-encode failed: {e}"))?;
+    let small = encode(image.resize(1024, 1024, imageops::FilterType::Triangle))?;
+    let seen = crate::runtime::vision::SeenImage {
+        label: "your drawing".to_owned(),
+        data_uri: crate::runtime::vision::prepare(&small).ok_or("couldn't prepare the image")?,
+    };
+    let profile = ctx.core.profile();
+    let model = if profile.model.vision_model.trim().is_empty() {
+        profile.model.model.clone()
+    } else {
+        profile.model.vision_model.trim().to_owned()
+    };
+    let question = format!(
+        "You are a strict art judge. The drawing was supposed to show: \"{goal}\".\n\nAnswer in exactly this form:\nVERDICT: PASS or FAIL\nFLAWS: a short list of CONCRETE visual problems (missing parts, overlaps, mislabels, bad spacing or proportions, wrong counts). If PASS, one short sentence on quality.\nBe strict about correctness — wrong counts, overlapping or misplaced elements, unreadable or cut-off labels are FAILs. Style does not matter; content correctness does.",
+        goal = goal
+    );
+    let verdict = crate::runtime::vision::describe(&ctx.core, &model, &seen, &question)
+        .await
+        .map_err(|e| {
+            if e.contains("image") {
+                format!(
+                    "the model {model} can't see images — set a vision model on the Model tab (any -VL model)"
+                )
+            } else {
+                e
+            }
+        })?;
+    let passed = verdict
+        .lines()
+        .find(|l| l.to_uppercase().contains("VERDICT"))
+        .map(|l| l.to_uppercase().contains("PASS"))
+        .unwrap_or(false);
+    let flaws = verdict
+        .lines()
+        .filter(|l| !l.to_uppercase().contains("VERDICT"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    tracing::info!(passed, flaws = %crate::llm::truncate(&flaws, 200), "drawing vision check");
+    Ok((passed, flaws))
 }
 
 const CHART_COLORS: [[u8; 3]; 8] = [
@@ -1885,7 +2117,10 @@ mod tests {
         }
         assert_eq!(canvas.get_pixel(20, 20).0, [60, 120, 230, 255]);
         assert_eq!(canvas.get_pixel(150, 30).0, [60, 190, 100, 255]);
-        assert!(draw_shape(&mut canvas, "star 1 2 3").is_err());
+        // star now has defaults for points/inner: 3 numbers draw fine.
+        assert!(draw_shape(&mut canvas, "star 40 40 20 gold").is_ok());
+        assert!(draw_shape(&mut canvas, "arc 100 60 50 50 0 360 gray").is_ok());
+        assert!(draw_shape(&mut canvas, "roundrect 10 10 60 30 8 teal outline").is_ok());
         assert!(draw_shape(&mut canvas, "rect 1 2").is_err());
     }
 

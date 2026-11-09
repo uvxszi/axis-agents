@@ -597,9 +597,9 @@ fn build_catalog() -> Vec<ToolDef> {
             { "query": ("string", "What to find"), "count": ("integer", "How many results (1-10, default 5)"), "attach": ("boolean", "Upload the first image with your reply") },
             required: ["query"]),
         tool!("draw_image", Images, Conversational, none, guild: false, core: false,
-            keywords: ["draw", "diagram", "sketch", "box", "boxes", "shape", "rectangle", "circle", "arrow", "mockup", "layout", "illustrate", "visualize", "flowchart"],
-            "Draw an image from shapes on a canvas (or on top of an image via base_image). Coordinates are pixels from the top-left. Shapes, one per item: rect X Y W H COLOR [outline] [width=N] | circle CX CY R COLOR [outline] | ellipse CX CY RX RY COLOR | line X1 Y1 X2 Y2 COLOR [width=N] | arrow X1 Y1 X2 Y2 COLOR [width=N] | polygon COLOR x1 y1 x2 y2 x3 y3… | grid STEP COLOR | text X Y SIZE COLOR words (X can be center/right) | fill COLOR. Colors: names or #rrggbb. The result is attached to your reply.",
-            { "shapes": ("array", "Shape commands in drawing order"), "width": ("integer", "Canvas width (default 800)"), "height": ("integer", "Canvas height (default 500)"), "background": ("string", "Canvas color (default white; or transparent)"), "base_image": ("string", "Draw on this image instead (a name, URL, avatar:NAME…)") },
+            keywords: ["draw", "diagram", "sketch", "box", "boxes", "shape", "rectangle", "circle", "arrow", "mockup", "layout", "illustrate", "visualize", "flowchart", "solar system", "orbit", "board"],
+            "Draw an image from shapes on a canvas (or on top of an image via base_image). THE METHOD (also the draw-diagrams skill): (1) plan the layout FIRST — list every element with its center coordinates, keep margins, give labels room; (2) draw in layers: background, then big shapes, then connecting lines/arrows, then details, then LABELS LAST (never covered); (3) compute positions instead of eyeballing (a planet on an orbit at angle a is at CX+RX*cos(a), CY+RY*sin(a); a board cell i is at X0+i*TILE); (4) ALWAYS pass goal: a one-sentence description of what the finished picture must show — the app then runs a VISION CHECK and hands you the concrete flaws; fix exactly those and redraw until it PASSES (2-3 rounds on complex art is normal). Coordinates are pixels from the top-left. Shapes, one per item, in order: rect X Y W H COLOR [outline] [width=N] | circle CX CY R COLOR [outline] | ellipse CX CY RX RY COLOR | arc CX CY RX RY START_DEG END_DEG COLOR [width=N] (orbits!) | star CX CY R COLOR [points=N] [inner=F] | roundrect X Y W H R COLOR [outline] | line X1 Y1 X2 Y2 COLOR [width=N] | arrow X1 Y1 X2 Y2 COLOR [width=N] | polygon COLOR x1 y1 x2 y2 x3 y3… | grid STEP COLOR | text X Y SIZE COLOR words (X can be center/right) | fill COLOR. Colors: names or #rrggbb.",
+            { "shapes": ("array", "Shape commands in drawing order"), "width": ("integer", "Canvas width (default 800; 900+ for labeled diagrams)"), "height": ("integer", "Canvas height (default 500)"), "background": ("string", "Canvas color (default white; or transparent)"), "base_image": ("string", "Draw on this image instead (a name, URL, avatar:NAME…)"), "goal": ("string", "One sentence: what the finished picture MUST show — enables the vision check-and-fix loop") },
             required: ["shapes"]),
         tool!("make_chart", Images, Conversational, none, guild: false, core: false,
             keywords: ["chart", "graph", "plot", "bar chart", "pie chart", "visualize", "stats"],
@@ -666,6 +666,21 @@ fn build_catalog() -> Vec<ToolDef> {
             keywords: ["copy", "paste", "duplicate", "repeat", "copy-paste", "copies", "fill", "expand", "over and over", "again and again", "multiple times", "x times"],
             "Copy-paste a sandbox file's content until it reaches a size (or an exact copy count) — instant and exact, done in code, and the parts are attached to your reply automatically. Use it whenever someone asks to repeat/duplicate/copy-paste a file or its text to a size: never write the copies out by hand, never script it. If the person named a size in their message you can even omit until_bytes — the app knows the ask.",
             { "name": ("string", "The file to duplicate"), "until_bytes": ("number", "Target size in bytes for the WHOLE resulting file"), "size": ("number", "Alias for until_bytes"), "times": ("number", "Exact number of copies instead of a size"), "to": ("string", "Write the result to this file name instead (default: same file)"), "join": ("string", "Separator between copies (default: a blank line)") },
+            required: ["name"]),
+        tool!("learn_skill", Utilities, Conversational, none, guild: false, core: false,
+            keywords: ["learn", "teach you", "remember how", "skill", "how to", "taught"],
+            "Teach yourself (or record what a person taught you) as a SKILL — a reusable method saved permanently. The name+description become part of your system prompt; load_skill reads the full method back any time. Use it whenever someone teaches you a procedure, or when you discover a method worth keeping (after solving something hard).",
+            { "name": ("string", "Short id, lowercase-dashes (e.g. chess)"), "description": ("string", "ONE line: when to use this skill"), "body": ("string", "The full method: numbered steps, rules, worked guidance") },
+            required: ["name", "description", "body"]),
+        tool!("load_skill", Utilities, Conversational, none, guild: false, core: false,
+            keywords: ["skill", "how do i", "method", "procedure", "recall skill"],
+            "Read one of your taught skills' full method. Check your skills list in the system prompt; load the relevant one BEFORE doing that kind of task.",
+            { "name": ("string", "The skill's id") },
+            required: ["name"]),
+        tool!("forget_skill", Utilities, Conversational, none, guild: false, core: false,
+            keywords: ["forget skill", "delete skill", "remove skill"],
+            "Drop a skill you were taught.",
+            { "name": ("string", "The skill's id") },
             required: ["name"]),
         tool!("set_logging", Utilities, Conversational, none, guild: true, core: false,
             keywords: ["logging", "logs", "activity log", "stop logging", "turn off logging", "log activity", "audit"],
@@ -1344,6 +1359,22 @@ pub(crate) async fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> Result<
         "duplicate_file" => files::duplicate_file(ctx, args).await,
         "recall_scratch" => scratch::recall(ctx, args).await,
         "set_logging" => extra::set_logging(ctx, args).await,
+        "learn_skill" => {
+            let name = required(args, "name")?;
+            let description = required(args, "description")?;
+            let body = required(args, "body")?;
+            crate::runtime::skills::learn(&name, &description, &body, &ctx.requester.name)
+        }
+        "load_skill" => crate::runtime::skills::load(&required(args, "name")?),
+        "forget_skill" => {
+            if !(ctx.requester_bypassed()
+                || ctx.requester.kind == PrincipalKind::Operator
+                || ctx.requester.level >= AccessLevel::Admin)
+            {
+                return Err("only admins (or the teacher) can forget a skill".to_owned());
+            }
+            crate::runtime::skills::forget(&required(args, "name")?)
+        }
         "convert_file" => files::convert_file(ctx, args).await,
         "list_files" => files::list_files(ctx, args).await,
         "find_in_document" => docs::find(

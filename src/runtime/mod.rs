@@ -24,6 +24,7 @@ pub mod moderation;
 pub mod pages;
 pub mod reflect;
 pub mod setup;
+pub mod skills;
 pub mod speech;
 pub mod tasks;
 pub mod tickets;
@@ -70,6 +71,7 @@ impl Supervisor {
             .thread_name("axis-agents")
             .build()
             .expect("tokio runtime");
+        crate::runtime::skills::seed_defaults();
         let live = Arc::new(Live::with_caps(
             settings.tunables.process_journal_entries,
             settings.tunables.sent_content_entries,
