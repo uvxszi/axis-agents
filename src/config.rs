@@ -597,6 +597,11 @@ pub struct BehaviorConfig {
     pub emojis: ThinkingEmojis,
     pub reply_length: ReplyLength,
     pub max_tool_rounds: u32,
+    /// Idle roaming: when nothing is happening, wander the channels —
+    /// read, notice chats about the agent, occasionally react or reply.
+    /// Chill by design: only when idle, mostly QUIET, never spammy.
+    #[serde(default)]
+    pub idle_roaming: bool,
     /// Only these channel IDs (empty = everywhere the bot can see).
     pub allowed_channels: Vec<u64>,
     pub ignored_channels: Vec<u64>,
@@ -669,6 +674,7 @@ impl CustomCommand {
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
+            idle_roaming: false,
             respond_to_mentions: true,
             respond_to_name: true,
             name_position: Default::default(),

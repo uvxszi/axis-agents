@@ -321,6 +321,11 @@ impl Live {
             .collect()
     }
 
+    /// A small system note into the feed (roaming, maintenance…).
+    pub fn feed_kind_note(&self, agent: &str, text: &str) {
+        self.feed(agent, agent, FeedKind::System, text.to_owned(), None);
+    }
+
     pub fn clear_feed(&self) {
         self.feed.lock().expect("live poisoned").clear();
     }

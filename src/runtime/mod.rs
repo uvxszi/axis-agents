@@ -23,6 +23,7 @@ pub mod live;
 pub mod moderation;
 pub mod pages;
 pub mod reflect;
+pub mod roam;
 pub mod setup;
 pub mod skills;
 pub mod speech;

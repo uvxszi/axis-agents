@@ -1674,6 +1674,12 @@ fn behavior(app: &mut App, ui: &mut Ui, p: &mut AgentProfile) {
         );
         toggle_row(
             ui,
+            &mut b.idle_roaming,
+            "Idle roaming",
+            "When nothing is happening, wander the channels: read, notice chats about the agent, occasionally react or drop one chill reply. Never while busy, never spammy — the model decides per batch: react, reply, or stay quiet.",
+        );
+        toggle_row(
+            ui,
             &mut b.small_thinking,
             "Small thinking text",
             "Show the thinking message in Discord's small subtext (-#) instead of normal size.",

@@ -1122,6 +1122,10 @@ pub async fn run(core: Arc<AgentCore>, token: String, mut shutdown: watch::Recei
         let core = Arc::clone(&core);
         tokio::spawn(async move { super::tasks::scheduler(core).await })
     };
+    let roamer = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move { super::roam::run(core).await })
+    };
 
     let start = client.start();
     tokio::pin!(start);
@@ -1134,6 +1138,7 @@ pub async fn run(core: Arc<AgentCore>, token: String, mut shutdown: watch::Recei
         }
     };
     ticker.abort();
+    roamer.abort();
     let still_current = current(&live);
     if still_current {
         core.hive.update_peer(&core.id, |p| p.online = false);
