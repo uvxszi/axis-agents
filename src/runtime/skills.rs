@@ -186,30 +186,41 @@ pub fn seed_defaults() {
     for (name, description, body) in [
         (
             "chess",
-            "Play or continue a chess game in chat: track the real board position so moves, blunders, and whose turn it is are always correct.",
+            "Play or continue a chess game in chat: keep the real board as a text diagram in this exact format, show it after every move, and read it before any commentary.",
             "# Chess
-1. START A GAME: create a board record in the _tmp scratch area:
-   write_file (name: \"chess-<channel>.txt\", temp: true) with an 8x8
-   position in this exact layout, one rank per line, rnbqkbnr starting
-   position, lowercase = black, UPPERCASE = white, a blank square is '.':
-     rn bqkb r  <- rank 8 (a8..h8)
-   Use one line per rank, 8 squares each, and a footer line:
-   `turn: white|black  last: <move>`.
-2. BEFORE ANY COMMENT about a move (yours, theirs, or a suggested one):
-   load_skill chess is not enough — READ the board record (read the file
-   or recall_scratch), find the piece on the from-square, and check the
-   to-square makes sense for THAT piece. If the from-square has no piece
-   of theirs, say so — never invent a position.
-3. AFTER AN AGREED MOVE: rewrite the board record with the move applied,
-   flip the turn footer, then reply. The record is the truth — your
-   commentary must match it, never memory.
-4. When asked to evaluate, judge from the RECORD: material count, hung
-   pieces (attacked and undefended), king safety. Say which pieces the
-   record shows where.
-5. Keep chat commentary short; the record carries the state.
+THE BOARD is a text diagram, always in this exact format — ranks 8 down
+to 1, files a-h left to right, uppercase = White, lowercase = black,
+'.' = empty square, two spaces between the rank number and the row:
 
-The point: a small model must never reason about the position from
-memory. The file is the board; every claim comes from reading it.",
+8  r n b q k b n r
+7  p p p p p p p p
+6  . . . . . . . .
+5  . . . . . . . .
+4  . . . . P . . .
+3  . . . . . . . .
+2  P P P P . P P P
+1  R N B Q K B N R
+   a b c d e f g h
+
+RULES:
+1. START A GAME by printing this diagram (starting position) and whose
+   move it is.
+2. BEFORE ANY COMMENT about a move (yours, theirs, suggested, or
+   claimed): rebuild the CURRENT diagram from the last one shown, find
+   the from-square, and check the to-square makes sense for THAT piece.
+   If the from-square holds no such piece, say so — never invent or
+   accept an impossible move.
+3. AFTER AN AGREED MOVE: print the NEW diagram (the whole thing, same
+   format), whose turn it is, then a short comment. The diagram is the
+   truth — every claim (blunders, hangs, checks) must be visible IN it.
+   No commentary without the diagram.
+4. CAPTURES, checks, castling (king two squares + rook jump), en
+   passant, promotion (a pawn reaching rank 8/1 becomes Q by default):
+   apply them in the diagram.
+5. Keep commentary to 1-2 lines; the diagram carries the state.
+
+The point: never reason about the position from memory. Redraw the
+diagram from the previous one, move by move, and show it.",
         ),
         (
             "draw-diagrams",
@@ -246,7 +257,27 @@ memory. The file is the board; every claim comes from reading it.",
         ),
     ] {
         let path = path_for(name);
+        // Built-in skills follow their seed (this code) when unchanged by
+        // a person; anything taught or edited by a person is never touched.
         if path.exists() {
+            let skill = Skill {
+                name: name.to_owned(),
+                description: description.to_owned(),
+                body: body.to_owned(),
+                author: "built-in".to_owned(),
+                created: crate::memory::now_ms(),
+            };
+            if let Ok(existing) = std::fs::read_to_string(&path) {
+                if existing == dump_skill(&skill) {
+                    continue;
+                }
+                if let Some(parsed) = parse_skill(&existing, String::new(), 0) {
+                    if parsed.author != "built-in" {
+                        continue;
+                    }
+                }
+            }
+            crate::paths::write_atomic(&path, dump_skill(&skill).as_bytes()).expect("seed skills");
             continue;
         }
         let skill = Skill {
