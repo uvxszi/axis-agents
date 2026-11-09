@@ -362,6 +362,30 @@ impl AgentCore {
     pub async fn refresh_model_info(&self) {
         let profile = self.profile();
         let info = self.endpoint().model_info(&profile.model.model).await;
+        // The main model being able to see IS vision, by default: when the
+        // endpoint reports image support and no separate vision model is
+        // configured, switch the agent's vision on automatically (the
+        // toggle stays available to turn it off).
+        if info.vision == Some(true)
+            && !profile.model.vision
+            && profile.model.vision_model.trim().is_empty()
+        {
+            let mut patched = profile.clone();
+            patched.model.vision = true;
+            self.set_profile(patched.clone());
+            let id = self.id.clone();
+            self.live()
+                .profile_patches
+                .lock()
+                .expect("live poisoned")
+                .push((
+                    id,
+                    Box::new(move |p: &mut crate::config::AgentProfile| {
+                        p.model.vision = true;
+                    }),
+                ));
+            tracing::info!(agent = %self.id, "main model supports vision — enabled it by default");
+        }
         self.live()
             .agent(&self.id, |live| live.model_info = Some(info.clone()));
         *self.model_info.write().expect("model info poisoned") = info;

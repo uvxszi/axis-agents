@@ -645,7 +645,7 @@ pub async fn look_at_image(ctx: &ToolCtx, args: &Value) -> Result<String, String
     match crate::runtime::vision::describe(&ctx.core, &model, &seen, &question).await {
         Ok(text) => Ok(format!("{name}: {text}")),
         Err(error) if error.contains("image") => Err(format!(
-            "the model {model} can't see images — set a vision model on the Model tab (e.g. a small -VL model)"
+            "the model {model} can't see images — load a vision-capable model (any -VL) or set one as the vision model on the Model tab"
         )),
         Err(error) => Err(format!("couldn't look at it: {error}")),
     }
@@ -1474,7 +1474,7 @@ async fn verify_drawing(ctx: &ToolCtx, png: &[u8], goal: &str) -> Result<(bool, 
         .map_err(|e| {
             if e.contains("image") {
                 format!(
-                    "the model {model} can't see images — set a vision model on the Model tab (any -VL model)"
+                    "the model {model} can't see images — load a vision-capable model (any -VL) or set one as the vision model on the Model tab"
                 )
             } else {
                 e
