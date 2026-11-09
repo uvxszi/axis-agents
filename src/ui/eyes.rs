@@ -130,9 +130,20 @@ fn guild_rail(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
             .show(ui, |ui| {
                 for (guild_id, name) in guilds {
                     let selected = app.eyes_guild == Some(guild_id);
-                    // Discord-style: the selected server gets the accent.
+                    // Discord-style: selected server = accent tile + left pill.
                     let color = if selected { ACCENT } else { dim(BLUE, 60) };
                     let response = widgets::avatar(ui, &name, color, 42.0);
+                    if selected {
+                        let rect = response.rect;
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(rect.left() - 10.0, rect.center().y - 12.0),
+                                egui::pos2(rect.left() - 5.0, rect.center().y + 12.0),
+                            ),
+                            egui::CornerRadius::same(3),
+                            ACCENT,
+                        );
+                    }
                     if response.clicked() {
                         app.eyes_guild = Some(guild_id);
                         app.eyes_channel = None;
@@ -196,37 +207,24 @@ fn channel_list(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
 
 fn channel_row(app: &mut App, ui: &mut Ui, channel_id: u64, name: &str, voice: bool) {
     let selected = app.eyes_channel == Some(channel_id);
-    let frame = if selected {
-        egui::Frame::new()
-            .fill(CARD_HOVER)
-            .corner_radius(egui::CornerRadius::same(6))
-    } else {
-        egui::Frame::new()
-    };
     let mark = if voice { "🔊" } else { "#" };
-    let response = frame
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(mark)
-                        .size(13.0)
-                        .color(if selected { TEXT } else { FAINT }),
-                );
-                ui.label(
-                    RichText::new(name)
-                        .size(13.0)
-                        .color(if selected { TEXT } else { WEAK }),
-                );
-            })
-        })
-        .response;
-    if response.clicked() {
+    let button = egui::Button::new(
+        RichText::new(format!("{mark}  {name}"))
+            .size(13.0)
+            .color(if selected { TEXT } else { WEAK }),
+    )
+    .fill(if selected {
+        CARD_HOVER
+    } else {
+        Color32::TRANSPARENT
+    })
+    .corner_radius(egui::CornerRadius::same(6))
+    // Full-width row: the whole strip is the click target.
+    .min_size(egui::vec2(ui.available_width(), 24.0));
+    if ui.add(button).clicked() {
         app.eyes_channel = Some(channel_id);
         app.eyes_reply_to = None;
     }
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("#{name}"));
 }
 
 /// The chat: message history (the bot's own archive) + composer.
@@ -276,6 +274,15 @@ fn chat(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
                         .strong()
                         .color(TEXT),
                 );
+                if ui
+                    .small_button("↻")
+                    .on_hover_text(
+                        "fetch the latest messages from Discord (API) into the bot's view",
+                    )
+                    .clicked()
+                {
+                    refresh_from_api(app, core, channel_id);
+                }
                 if let Some(id) = app.eyes_reply_to {
                     ui.label(
                         RichText::new(format!("· replying to {id}"))
@@ -537,6 +544,49 @@ fn composer(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64) {
             .clicked()
         {
             type_as_bot(app, core, channel);
+        }
+    });
+}
+
+/// Pull the latest messages from the Discord API into the bot's archive —
+/// the eyes view stays "what the bot knows", it just knows more now.
+fn refresh_from_api(app: &mut App, core: &Arc<AgentCore>, channel: u64) {
+    let core = Arc::clone(core);
+    let channel_id = axis::prelude::ChannelId::new(channel);
+    app.sup.spawn(async move {
+        match core
+            .http
+            .get_messages(channel_id)
+            .limit(50)
+            .await
+        {
+            Ok(page) => {
+                let mut fresh = 0;
+                core.hive.knowledge.channel_mut(channel, |archive| {
+                    for message in page.iter().rev() {
+                        let stored = crate::runtime::agent::to_stored(message);
+                        if archive.messages.iter().any(|m| m.id == stored.id) {
+                            // keep newest version of a known message
+                            if let Some(existing) =
+                                archive.messages.iter_mut().find(|m| m.id == stored.id)
+                            {
+                                *existing = stored;
+                            }
+                        } else {
+                            archive.messages.push_back(stored);
+                            fresh += 1;
+                        }
+                    }
+                });
+                tracing::info!(agent = %core.id, channel = channel, fresh, "eyes: refreshed from API");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    agent = %core.id,
+                    error = %crate::tools::discord_error(error),
+                    "eyes: API refresh failed"
+                );
+            }
         }
     });
 }
