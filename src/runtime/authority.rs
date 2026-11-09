@@ -160,6 +160,25 @@ pub fn base_permissions(guild: &GuildState, user_id: u64, roles: &[u64]) -> Perm
     }
 }
 
+/// The bot's own permissions in a channel — what bypass-listed users act
+/// with instead of their own.
+pub fn bot_channel_permissions(
+    core: &crate::runtime::AgentCore,
+    guild_id: u64,
+    channel_id: u64,
+) -> Permissions {
+    core.world
+        .with_guild(guild_id, |state| {
+            let roles: Vec<u64> = state
+                .members
+                .get(&core.world.my_id())
+                .map(|m| m.roles.clone())
+                .unwrap_or_default();
+            channel_permissions(state, core.world.my_id(), &roles, channel_id)
+        })
+        .unwrap_or_default()
+}
+
 /// Permissions in a channel, applying overwrites in Discord's order:
 /// @everyone, then all role overwrites together, then the member. Threads
 /// inherit their parent's overwrites.

@@ -738,23 +738,12 @@ impl ToolCtx {
                     .unwrap_or(false)
             })
         });
-        guild
-            .and_then(|g| {
-                self.core.world.with_guild(g, |state| {
-                    let roles: Vec<u64> = state
-                        .members
-                        .get(&self.core.world.my_id())
-                        .map(|m| m.roles.clone())
-                        .unwrap_or_default();
-                    crate::runtime::authority::channel_permissions(
-                        state,
-                        self.core.world.my_id(),
-                        &roles,
-                        channel_id,
-                    )
-                })
-            })
-            .unwrap_or_default()
+        match guild {
+            Some(g) => {
+                crate::runtime::authority::bot_channel_permissions(&self.core, g, channel_id)
+            }
+            None => Permissions::empty(),
+        }
     }
 
     /// Is this requester on the operator's bypass list — acting with the

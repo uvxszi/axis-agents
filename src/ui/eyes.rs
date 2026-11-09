@@ -12,6 +12,18 @@ use super::widgets;
 use crate::runtime::agent::AgentCore;
 use crate::runtime::live::AgentStatus;
 
+/// One channel as the sidebar sees it.
+struct Chan {
+    id: u64,
+    name: String,
+    category: bool,
+    voice: bool,
+    forum: bool,
+    thread: bool,
+    parent: u64,
+    pos: i32,
+}
+
 const CHAT_BG: Color32 = Color32::from_rgb(16, 18, 25);
 const MESSAGE_OWN: Color32 = Color32::from_rgb(29, 33, 47);
 
@@ -156,7 +168,9 @@ fn guild_rail(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
     });
 }
 
-/// The channel sidebar for the selected guild.
+/// The channel sidebar for the selected guild, structured like Discord:
+/// categories are collapsible sections holding their channels; forum
+/// channels collapse into their posts (threads).
 fn channel_list(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
     let Some(guild_id) = app.eyes_guild else {
         ui.add_space(10.0);
@@ -172,7 +186,16 @@ fn channel_list(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
             s.name.clone(),
             s.channels
                 .values()
-                .map(|c| (c.id.get(), c.name.clone().unwrap_or_default(), c.is_voice()))
+                .map(|c| Chan {
+                    id: c.id.get(),
+                    name: c.name.clone().unwrap_or_default(),
+                    category: matches!(c.r#type, axis::model::ChannelType::GuildCategory),
+                    voice: c.is_voice(),
+                    forum: c.is_forum(),
+                    thread: c.is_thread(),
+                    parent: c.parent_id.map(|p| p.get()).unwrap_or(0),
+                    pos: c.position.unwrap_or(0),
+                })
                 .collect::<Vec<_>>(),
         )
     }) else {
@@ -181,35 +204,140 @@ fn channel_list(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>) {
     ui.add_space(8.0);
     ui.label(RichText::new(guild.0).strong().color(TEXT));
     ui.add_space(4.0);
-    let text: Vec<_> = guild.1.iter().filter(|(_, _, v)| !v).cloned().collect();
-    let voice: Vec<_> = guild.1.iter().filter(|(_, _, v)| *v).cloned().collect();
+    let chans = guild.1;
+    let sorted_cats = {
+        let mut v: Vec<&Chan> = chans.iter().filter(|c| c.category).collect();
+        v.sort_by_key(|c| c.pos);
+        v
+    };
+    let top = {
+        let mut v: Vec<&Chan> = chans
+            .iter()
+            .filter(|c| !c.category && !c.thread && c.parent == 0)
+            .collect();
+        v.sort_by_key(|c| c.pos);
+        v
+    };
     egui::ScrollArea::vertical()
         .id_salt("eyes_channel_scroll")
         .show(ui, |ui| {
-            if !text.is_empty() {
+            let text_top: Vec<&Chan> = top.iter().filter(|c| !c.voice).copied().collect();
+            let voice_top: Vec<&Chan> = top.iter().filter(|c| c.voice).copied().collect();
+            if !text_top.is_empty() {
                 ui.label(RichText::new("TEXT CHANNELS").size(10.5).color(FAINT));
-                for (channel_id, name, _) in &text {
-                    channel_row(app, ui, *channel_id, name, false);
+                for channel in &text_top {
+                    channel_entry(app, ui, channel, &chans);
                 }
                 ui.add_space(6.0);
             }
-            if !voice.is_empty() {
+            // Categories, each collapsible with its channels inside.
+            for category in &sorted_cats {
+                let children: Vec<&Chan> = {
+                    let mut v: Vec<&Chan> = chans
+                        .iter()
+                        .filter(|c| !c.thread && c.parent == category.id)
+                        .collect();
+                    v.sort_by_key(|c| c.pos);
+                    v
+                };
+                let contains_selected = children.iter().any(|c| app.eyes_channel == Some(c.id))
+                    || app.eyes_channel == Some(category.id);
+                egui::CollapsingHeader::new(
+                    RichText::new(format!("▾ {}", category.name))
+                        .size(11.0)
+                        .color(WEAK),
+                )
+                .default_open(contains_selected)
+                .id_salt(("eyes_cat", category.id))
+                .show_unindented(ui, |ui| {
+                    for channel in &children {
+                        channel_entry(app, ui, channel, &chans);
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            if !voice_top.is_empty() {
                 ui.label(RichText::new("VOICE CHANNELS").size(10.5).color(FAINT));
-                for (channel_id, name, _) in &voice {
-                    channel_row(app, ui, *channel_id, name, true);
+                for channel in &voice_top {
+                    channel_entry(app, ui, channel, &chans);
                 }
             }
-            if text.is_empty() && voice.is_empty() {
+            if text_top.is_empty() && voice_top.is_empty() && sorted_cats.is_empty() {
                 ui.label(RichText::new("No channels known.").size(12.0).color(FAINT));
             }
         });
 }
 
-fn channel_row(app: &mut App, ui: &mut Ui, channel_id: u64, name: &str, voice: bool) {
-    let selected = app.eyes_channel == Some(channel_id);
-    let mark = if voice { "🔊" } else { "#" };
+/// One channel row; forums collapse into their posts (threads).
+fn channel_entry(app: &mut App, ui: &mut Ui, channel: &Chan, chans: &[Chan]) {
+    let selected = app.eyes_channel == Some(channel.id);
+    let mark = if channel.voice {
+        "🔊"
+    } else if channel.forum {
+        "📋"
+    } else {
+        "#"
+    };
+    if channel.forum {
+        let posts: Vec<&Chan> = chans
+            .iter()
+            .filter(|c| c.thread && c.parent == channel.id)
+            .collect();
+        let open = app
+            .eyes_forum_open
+            .map(|id| id == channel.id)
+            .unwrap_or(false);
+        let toggle_label = if open { "▾" } else { "▸" };
+        ui.horizontal(|ui| {
+            let button = egui::Button::new(
+                RichText::new(format!("{mark}  {}", channel.name))
+                    .size(13.0)
+                    .color(if selected { TEXT } else { WEAK }),
+            )
+            .fill(if selected {
+                CARD_HOVER
+            } else {
+                Color32::TRANSPARENT
+            })
+            .corner_radius(egui::CornerRadius::same(6))
+            .min_size(egui::vec2(ui.available_width() - 22.0, 24.0));
+            if ui.add(button).clicked() {
+                app.eyes_channel = Some(channel.id);
+                app.eyes_reply_to = None;
+            }
+            if ui
+                .small_button(toggle_label)
+                .on_hover_text("show/hide this forum's posts")
+                .clicked()
+            {
+                app.eyes_forum_open = if open { None } else { Some(channel.id) };
+            }
+        });
+        if open {
+            for post in posts {
+                let post_selected = app.eyes_channel == Some(post.id);
+                let button = egui::Button::new(
+                    RichText::new(format!("  🧵  {}", post.name))
+                        .size(12.5)
+                        .color(if post_selected { TEXT } else { FAINT }),
+                )
+                .fill(if post_selected {
+                    CARD_HOVER
+                } else {
+                    Color32::TRANSPARENT
+                })
+                .corner_radius(egui::CornerRadius::same(6))
+                .min_size(egui::vec2(ui.available_width(), 22.0));
+                if ui.add(button).clicked() {
+                    app.eyes_channel = Some(post.id);
+                    app.eyes_reply_to = None;
+                }
+            }
+        }
+        return;
+    }
     let button = egui::Button::new(
-        RichText::new(format!("{mark}  {name}"))
+        RichText::new(format!("{mark}  {}", channel.name))
             .size(13.0)
             .color(if selected { TEXT } else { WEAK }),
     )
@@ -219,10 +347,9 @@ fn channel_row(app: &mut App, ui: &mut Ui, channel_id: u64, name: &str, voice: b
         Color32::TRANSPARENT
     })
     .corner_radius(egui::CornerRadius::same(6))
-    // Full-width row: the whole strip is the click target.
     .min_size(egui::vec2(ui.available_width(), 24.0));
     if ui.add(button).clicked() {
-        app.eyes_channel = Some(channel_id);
+        app.eyes_channel = Some(channel.id);
         app.eyes_reply_to = None;
     }
 }
@@ -409,6 +536,24 @@ fn message_row(
                 {
                     app.eyes_react_for = if picker_open { None } else { Some(id) };
                 }
+                ui.menu_button("⋯", |ui| {
+                    let guild = app.eyes_guild.unwrap_or_default();
+                    let bot_may =
+                        crate::runtime::authority::bot_channel_permissions(core, guild, channel)
+                            .contains(axis::prelude::Permissions::MANAGE_MESSAGES);
+                    if ui
+                        .add_enabled(bot_may, egui::Button::new("🗑 delete message"))
+                        .on_disabled_hover_text("the bot lacks Manage Messages here")
+                        .clicked()
+                    {
+                        delete_message_as_bot(app, core, channel, id);
+                        ui.close_menu();
+                    }
+                    if ui.button("🧷 copy message id").clicked() {
+                        ui.ctx().copy_text(id.to_string());
+                        ui.close_menu();
+                    }
+                });
             });
         });
         if !content.trim().is_empty() {
@@ -420,17 +565,14 @@ fn message_row(
         if !reactions.is_empty() {
             ui.horizontal(|ui| {
                 for (emoji, count) in reactions {
-                    egui::Frame::new()
-                        .fill(CARD)
-                        .corner_radius(egui::CornerRadius::same(8))
-                        .inner_margin(egui::Margin::symmetric(6, 2))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!("{emoji} {count}"))
-                                    .size(12.0)
-                                    .color(WEAK),
-                            );
-                        });
+                    // Clicking a chip removes the BOT'S reaction (unreact).
+                    if ui
+                        .small_button(format!("{emoji} {count}"))
+                        .on_hover_text("remove the bot's reaction")
+                        .clicked()
+                    {
+                        unreact_as_bot(app, core, channel, id, emoji);
+                    }
                 }
             });
         }
@@ -472,11 +614,11 @@ fn react_picker(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64,
                     app.eyes_react_for = None;
                 }
             });
-            let emotes: Vec<(String, String)> = core
-                .world
-                .guild_ids()
-                .into_iter()
-                .filter_map(|g| {
+            // Emotes from the SELECTED server — the one being viewed —
+            // not a mix of every server the bot is in.
+            let emotes: Vec<(String, String)> = app
+                .eyes_guild
+                .and_then(|g| {
                     core.world.with_guild(g, |state| {
                         state
                             .emojis
@@ -497,16 +639,15 @@ fn react_picker(app: &mut App, ui: &mut Ui, core: &Arc<AgentCore>, channel: u64,
                             .collect::<Vec<_>>()
                     })
                 })
-                .flatten()
-                .collect();
+                .unwrap_or_default();
             if !emotes.is_empty() {
                 ui.label(
-                    RichText::new("server emotes the bot knows:")
+                    RichText::new("server emotes (this server):")
                         .size(11.0)
                         .color(FAINT),
                 );
                 ui.horizontal_wrapped(|ui| {
-                    for (label, wire) in emotes.iter().take(60) {
+                    for (label, wire) in emotes.iter().take(80) {
                         if ui.small_button(label).on_hover_text(wire).clicked() {
                             react_as_bot(app, core, channel, message, wire);
                             app.eyes_react_for = None;
@@ -654,6 +795,59 @@ fn send_as_bot(app: &mut App, core: &Arc<AgentCore>, channel: u64, text: String)
                     crate::runtime::live::FeedKind::Error,
                     format!(
                         "eyes: could not send: {}",
+                        crate::tools::discord_error(error)
+                    ),
+                    None,
+                );
+            }
+        }
+    });
+}
+
+/// Remove the bot's own reaction from a message.
+fn unreact_as_bot(app: &mut App, core: &Arc<AgentCore>, channel: u64, message: u64, emoji: &str) {
+    let core = Arc::clone(core);
+    let channel = axis::prelude::ChannelId::new(channel);
+    let message = axis::prelude::MessageId::new(message);
+    let emoji = emoji.to_owned();
+    app.sup.spawn(async move {
+        if let Err(error) = core
+            .http
+            .delete_own_reaction(channel, message, crate::tools::discord::parse_emoji(&emoji))
+            .await
+        {
+            core.feed(
+                crate::runtime::live::FeedKind::Error,
+                format!(
+                    "eyes: could not remove reaction: {}",
+                    crate::tools::discord_error(error)
+                ),
+                None,
+            );
+        }
+    });
+}
+
+/// Delete a message as the bot (offered only where the bot has Manage
+/// Messages).
+fn delete_message_as_bot(app: &mut App, core: &Arc<AgentCore>, channel: u64, message: u64) {
+    let core = Arc::clone(core);
+    let channel = axis::prelude::ChannelId::new(channel);
+    let message = axis::prelude::MessageId::new(message);
+    app.sup.spawn(async move {
+        match core.http.delete_message(channel, message).await {
+            Ok(()) => {
+                core.hive.knowledge.channel_mut(channel.get(), |archive| {
+                    if let Some(stored) = archive.get_mut(message.get()) {
+                        stored.deleted = true;
+                    }
+                });
+            }
+            Err(error) => {
+                core.feed(
+                    crate::runtime::live::FeedKind::Error,
+                    format!(
+                        "eyes: could not delete: {}",
                         crate::tools::discord_error(error)
                     ),
                     None,
